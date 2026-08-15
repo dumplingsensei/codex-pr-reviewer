@@ -1,10 +1,10 @@
 {
-  "name": "codex-pr-reviewer",
+  "name": "chase-plugins",
   "owner": {
     "name": "dumplingsensei"
   },
   "metadata": {
-    "description": "Review other people's GitHub pull requests with Codex, from inside Claude Code.",
+    "description": "Chase's Claude Code plugins.",
     "version": "0.2.0"
   },
   "plugins": [
