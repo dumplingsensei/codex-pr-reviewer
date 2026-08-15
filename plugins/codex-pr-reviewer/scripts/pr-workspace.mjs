@@ -938,10 +938,13 @@ function selectForClean(entries, options) {
  * a branch that could not be deleted (because the user has it checked out, say)
  * must keep its manifest entry, or the record needed to retry is lost.
  *
- * `survivors` are the entries that will remain in the manifest afterwards; a
- * cached clone is only purged when none of them still depend on it.
+ * Deliberately does NOT delete cached clones: several entries in one batch can
+ * share a clone, and deleting it here would pull the repository out from under
+ * every entry still queued behind this one — their branch and ref removal would
+ * then be skipped silently, and reported as success. `purgeUnusedClones` runs
+ * once, after the whole batch.
  */
-function removeEntry(entry, { purgeClone, survivors }) {
+function removeEntry(entry) {
   const removed = [];
   const failed = [];
 
@@ -981,22 +984,38 @@ function removeEntry(entry, { purgeClone, survivors }) {
     /* other PRs from this repo are still prepared */
   }
 
-  const cloneStillUsed = survivors.some(
-    (other) => other.key !== entry.key && realPath(other.repoDir) === realPath(entry.repoDir)
-  );
-  // Normalize both sides: manifest paths are stored as given, so a raw
-  // `startsWith` against a path.join-normalized prefix can silently miss.
-  const insideCache = `${realPath(entry.repoDir)}${path.sep}`.startsWith(
-    `${realPath(clonesDir())}${path.sep}`
-  );
-  if (purgeClone && entry.mode === "clone" && insideCache) {
-    if (cloneStillUsed) {
-      removed.push(`kept clone ${entry.repoDir} (still used by another prepared PR)`);
-    } else {
-      fs.rmSync(entry.repoDir, { recursive: true, force: true });
-      removed.push(`clone ${entry.repoDir}`);
+  return { removed, failed };
+}
+
+/**
+ * Deletes cached clones left unreferenced once the batch is done. Runs after
+ * every entry has had its branches and refs removed, so nothing is pulled out
+ * from under an entry still waiting its turn.
+ */
+function purgeUnusedClones(processed, survivors) {
+  const notes = [];
+  const seen = new Set();
+
+  for (const entry of processed) {
+    if (entry.mode !== "clone") continue;
+    const repoDir = realPath(entry.repoDir);
+    if (seen.has(repoDir)) continue;
+    seen.add(repoDir);
+
+    // Normalize both sides: manifest paths are stored as given, so a raw
+    // `startsWith` against a path.join-normalized prefix can silently miss.
+    const insideCache = `${repoDir}${path.sep}`.startsWith(`${realPath(clonesDir())}${path.sep}`);
+    if (!insideCache) continue;
+
+    const stillUsed = survivors.some((other) => realPath(other.repoDir) === repoDir);
+    if (stillUsed) {
+      notes.push(`kept clone ${entry.repoDir} (still used by another prepared PR)`);
+    } else if (fs.existsSync(repoDir)) {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+      notes.push(`clone ${entry.repoDir}`);
     }
   }
+  return notes;
   return { removed, failed };
 }
 
@@ -1036,10 +1055,11 @@ function commandClean(argv) {
   const targetKeys = new Set(targets.map((entry) => entry.key));
   const survivors = manifest.entries.filter((entry) => !targetKeys.has(entry.key));
 
-  const results = targets.map((entry) => ({
-    key: entry.key,
-    ...removeEntry(entry, { purgeClone, survivors })
-  }));
+  // Per-entry work first, for every entry, against clones that still exist.
+  const results = targets.map((entry) => ({ key: entry.key, ...removeEntry(entry) }));
+
+  // Then, once nothing else needs them, the shared clones.
+  const clonesRemoved = purgeClone ? purgeUnusedClones(targets, survivors) : [];
 
   // Only entries that were fully removed leave the manifest. Anything that
   // failed keeps its record so it can be retried — reporting success while
@@ -1054,7 +1074,11 @@ function commandClean(argv) {
 
   if (options.json) {
     process.stdout.write(
-      `${JSON.stringify({ cleaned: results, incomplete: failures.map((f) => f.key) }, null, 2)}\n`
+      `${JSON.stringify(
+        { cleaned: results, clones: clonesRemoved, incomplete: failures.map((f) => f.key) },
+        null,
+        2
+      )}\n`
     );
     return failures.length === 0 ? 0 : 1;
   }
@@ -1067,6 +1091,9 @@ function commandClean(argv) {
     for (const failure of result.failed) {
       process.stdout.write(`  ! could not remove ${failure}\n`);
     }
+  }
+  if (clonesRemoved.length > 0) {
+    process.stdout.write(`\ncached clones\n${clonesRemoved.map((item) => `  - ${item}`).join("\n")}\n`);
   }
   if (failures.length > 0) {
     process.stdout.write(
