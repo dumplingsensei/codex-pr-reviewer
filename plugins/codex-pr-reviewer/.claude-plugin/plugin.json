@@ -1,0 +1,10 @@
+{
+  "name": "codex-pr-reviewer",
+  "version": "0.1.0",
+  "description": "Fetch any GitHub PR into an isolated worktree and review it with Codex.",
+  "author": {
+    "name": "dumplingsensei"
+  },
+  "license": "MIT",
+  "keywords": ["code-review", "pull-request", "codex", "github"]
+}
