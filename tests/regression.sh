@@ -206,5 +206,42 @@ check "wrapper exits 0 when the review was saved" "$?" "0"
 saved="$(ls -t "$CACHE"/reviews/*.md 2>/dev/null | head -1)"
 contains "footer names a model" "$(cat "$saved")" "Automated review by codex"
 
+note "batch clean of two PRs sharing one cached clone"
+# Regression: the shared-clone guard compared against post-batch survivors, so
+# with --all the FIRST entry deleted the clone and every later entry in the same
+# batch silently skipped its branch/ref removal — and reported success anyway.
+git -C "$HOST" checkout --quiet main 2>/dev/null
+for n in 21 22; do
+  git -C "$HOST" fetch --quiet origin "+refs/pull/7/head:refs/codex-pr-reviewer/pr/$n"
+  git -C "$HOST" branch --force "codex-pr/$n" refs/codex-pr-reviewer/pr/"$n"
+  git -C "$HOST" branch --force "codex-pr/$n-base" main
+done
+cat >"$CACHE/manifest.json" <<JSON
+{"version":1,"entries":[
+ {"key":"o/r#21","repo":"o/r","number":21,"title":"t","url":"u","state":"OPEN","author":"a",
+  "worktree":"$SANDBOX/wt-21","repoDir":"$HOST","remote":"origin","mode":"clone",
+  "headBranch":"codex-pr/21","baseBranch":"codex-pr/21-base",
+  "refs":["refs/codex-pr-reviewer/pr/21"],"headSha":"0","mergeBase":"0",
+  "baseRefName":"main","additions":1,"deletions":0,"changedFiles":1,
+  "preparedAt":"2026-01-01T00:00:00.000Z"},
+ {"key":"o/r#22","repo":"o/r","number":22,"title":"t","url":"u","state":"OPEN","author":"a",
+  "worktree":"$SANDBOX/wt-22","repoDir":"$HOST","remote":"origin","mode":"clone",
+  "headBranch":"codex-pr/22","baseBranch":"codex-pr/22-base",
+  "refs":["refs/codex-pr-reviewer/pr/22"],"headSha":"0","mergeBase":"0",
+  "baseRefName":"main","additions":1,"deletions":0,"changedFiles":1,
+  "preparedAt":"2026-01-01T00:00:00.000Z"}
+]}
+JSON
+
+out="$(node "$SCRIPT" clean --all 2>&1)"
+# The second entry must report its own branches, not silently skip them.
+contains "later entry still removes its branches" "$out" "branch codex-pr/22"
+contains "later entry still removes its refs" "$out" "refs/codex-pr-reviewer/pr/22"
+check "clone is purged exactly once" \
+  "$(printf '%s' "$out" | grep -c "^  - clone ")" "1"
+check "clone is gone" "$([[ -d "$HOST" ]] && echo present || echo gone)" "gone"
+check "manifest is emptied" \
+  "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key"')" "0"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]
