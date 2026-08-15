@@ -1,7 +1,7 @@
 ---
 description: Review someone else's GitHub pull request with Codex
 argument-hint: '<pr> [--post] [--wait|--background] [--repo owner/repo] [--context] [--effort low|medium|high|xhigh]'
-allowed-tools: Read, Grep, Glob, AskUserQuestion, Bash(node:*), Bash(git:*), Bash(gh:*), Bash(codex:*)
+allowed-tools: Read, Grep, Glob, AskUserQuestion, Bash(node:*), Bash(git:*), Bash(gh:*)
 ---
 
 Fetch a GitHub pull request into an isolated worktree and run Codex's native reviewer against it.
@@ -38,7 +38,7 @@ You are reading code written by someone else, fetched from the internet.
    ```bash
    node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" prepare <pr> [--repo …] [--clone] --json
    ```
-   Report one line from the JSON: `owner/repo#N — "title" by @author · N files, +A/-D · base <ref>`. If `state` is not `OPEN`, say so. If the PR is a draft or has zero changed files, ask whether to continue.
+   Report one line from the JSON: `owner/repo#N — "title" by @author · N files, +A/-D · base <ref>`. The JSON carries `state`, `isDraft`, and `changedFiles`; if `state` is not `OPEN` or `isDraft` is true, say so plainly. If `changedFiles` is 0, stop — there is nothing to review.
 
 4. **Choose an execution mode.** If the arguments contain `--wait` or `--background`, obey that and do not ask. Otherwise use `AskUserQuestion` exactly once, with two options, the recommended one first and labelled `(Recommended)`:
    - `Wait for results`
@@ -52,18 +52,24 @@ You are reading code written by someone else, fetched from the internet.
    ```
    `--no-prepare` is safe here because step 3 already prepared the worktree. Add `--dry-run` first if the user asks what will actually be run. For background mode, launch it with `Bash(run_in_background: true)`, then tell the user the review is running and stop for this turn — do not poll.
 
-6. **Show the result.** Print Codex's output exactly as it came back. The script also saves a copy under the cache directory and prints that path; mention it once.
+6. **Show the result.** Print Codex's output exactly as it came back. The script saves a copy and prints `Saved to <path>` on its last line — that path is what step 7 posts. Mention it once.
 
-7. **Posting (only with `--post`).** If and only if `--post` was passed:
-   - Read the saved review file and show the user the **exact** body that would be posted.
-   - Use `AskUserQuestion` to confirm — `Post to the PR` / `Don't post`.
-   - Only on explicit confirmation:
+   If the script exits non-zero, or the review body is empty, or it reads `_Codex produced no review output._`, then **the review failed**. Say so, show any stderr, and stop. Do not continue to step 7 — a failed run must never be published.
+
+7. **Posting (only with `--post`).** If and only if `--post` was passed *and* step 6 produced a real review:
+   - Read the saved review file and show the user the **exact** body that would be posted, in full. Never summarize it at this step — the user is approving the literal text.
+   - Use `AskUserQuestion` to confirm — `Don't post` / `Post to the PR`.
+   - Post **only** on an explicit, unambiguous confirmation in this same run:
      ```bash
      gh pr comment <number> --repo <owner/repo> --body-file <saved-review-path>
      ```
    - Then print the resulting comment URL.
 
-   Never post without `--post` **and** a confirmation in the same run. A confirmation for one PR never carries to another. `--post` is not available in `/codex-pr-reviewer:sweep`.
+   Hard rules, no exceptions:
+   - Never post without `--post` **and** a confirmation in the same run.
+   - A confirmation for one PR never carries to another, and never survives into a later run.
+   - If the confirmation is ambiguous, contradicts what the user asked for in plain text, or you are unsure — **do not post**. Say why and let them repeat the instruction. Not posting is always recoverable; posting to someone else's PR is not.
+   - `--post` is not available in `/codex-pr-reviewer:sweep`.
 
 ## Notes
 
