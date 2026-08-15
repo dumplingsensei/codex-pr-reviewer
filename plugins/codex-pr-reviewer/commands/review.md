@@ -63,10 +63,10 @@ You are reading code written by someone else, fetched from the internet.
      ```
    - Then print the resulting comment URL.
 
-   Never post without `--post` **and** a confirmation in the same run. A confirmation for one PR never carries to another. `--post` is not available in `/codex-pr:sweep`.
+   Never post without `--post` **and** a confirmation in the same run. A confirmation for one PR never carries to another. `--post` is not available in `/codex-pr-reviewer:sweep`.
 
 ## Notes
 
 - Re-running on the same PR is safe and picks up new commits — the worktree is refreshed in place.
 - The review is anchored to the merge-base of the PR head and its base branch, so it sees exactly what GitHub's "Files changed" tab shows.
-- Worktrees accumulate under the cache directory. `/codex-pr:clean` removes them.
+- Worktrees accumulate under the cache directory. `/codex-pr-reviewer:clean` removes them.
