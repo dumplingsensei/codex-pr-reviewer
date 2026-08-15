@@ -21,7 +21,7 @@ Choose **user** scope when prompted, not project scope: the point is to review
 PRs from whichever repository you happen to be working in, so scoping the plugin
 to a single directory defeats it.
 
-Requires `codex` (logged in), `gh` (authenticated), `git` ≥ 2.5, and Node ≥ 18. Run `/codex-pr:review` and it will tell you if anything is missing, or check directly:
+Requires `codex` (logged in), `gh` (authenticated), `git` ≥ 2.5, and Node ≥ 18. Run `/codex-pr-reviewer:review` and it will tell you if anything is missing, or check directly:
 
 ```
 node plugins/codex-pr-reviewer/scripts/pr-workspace.mjs doctor
@@ -31,15 +31,15 @@ node plugins/codex-pr-reviewer/scripts/pr-workspace.mjs doctor
 
 | Command | What it does |
 |---|---|
-| `/codex-pr:review <pr> [--post]` | Fetch a PR and review it. `<pr>` is `42`, `owner/repo#42`, or a PR URL. |
-| `/codex-pr:list` | Show PRs awaiting your review, across GitHub or in one repo. |
-| `/codex-pr:sweep [--limit N]` | Review a batch of PRs and produce one digest. |
-| `/codex-pr:clean` | Remove the worktrees, branches, and clones the plugin created. |
+| `/codex-pr-reviewer:review <pr> [--post]` | Fetch a PR and review it. `<pr>` is `42`, `owner/repo#42`, or a PR URL. |
+| `/codex-pr-reviewer:list` | Show PRs awaiting your review, across GitHub or in one repo. |
+| `/codex-pr-reviewer:sweep [--limit N]` | Review a batch of PRs and produce one digest. |
+| `/codex-pr-reviewer:clean` | Remove the worktrees, branches, and clones the plugin created. |
 
 ## How it works
 
 ```
-/codex-pr:review 42
+/codex-pr-reviewer:review 42
    │
    ├─ gh pr view 42 --json …               resolve PR metadata
    ├─ host repo = your repo if it matches, else a cached blobless clone
@@ -62,9 +62,9 @@ Fork PRs work without adding remotes: GitHub serves `refs/pull/<N>/head` from th
 ## Safety
 
 - **PR content is untrusted input.** Every Codex run passes `-s read-only` explicitly rather than relying on config defaults, and the plugin never runs the PR's build, tests, or hooks. The commands instruct Claude to treat text inside a diff as data to review, never as instructions to follow.
-- **Nothing is posted without asking.** Reviews print to your terminal. `--post` additionally requires an explicit confirmation showing the exact comment body. `/codex-pr:sweep` cannot post at all.
+- **Nothing is posted without asking.** Reviews print to your terminal. `--post` additionally requires an explicit confirmation showing the exact comment body. `/codex-pr-reviewer:sweep` cannot post at all.
 - **Local paths are stripped** from review output before it is saved, so a posted comment never leaks your filesystem layout.
-- **Cleanup is precise.** The plugin records what it created in a manifest and `/codex-pr:clean` removes only that — it will not touch unrelated worktrees or branches.
+- **Cleanup is precise.** The plugin records what it created in a manifest and `/codex-pr-reviewer:clean` removes only that — it will not touch unrelated worktrees or branches.
 
 ## Cache layout
 

@@ -28,7 +28,7 @@ Raw slash-command arguments:
 
 2. **Render a compact table**, newest first: index, `repo#number`, title (truncate to ~60 chars), author, size (`N files, +A/-D` when available), age, and CI/review state when available. Mark drafts.
 
-   `gh search prs` does not return size fields. Do not issue a `gh pr view` per row just to fill them in — leave the size column blank for search results and note that `/codex-pr:review` will report it.
+   `gh search prs` does not return size fields. Do not issue a `gh pr view` per row just to fill them in — leave the size column blank for search results and note that `/codex-pr-reviewer:review` will report it.
 
 3. **Show what is already prepared** so the user knows which reviews are cheap to re-run:
    ```bash
@@ -36,7 +36,7 @@ Raw slash-command arguments:
    ```
    Mark rows that already have a worktree.
 
-4. **Offer next steps.** End by telling the user they can run `/codex-pr:review <repo#number>` on any row. If there are four or fewer rows, use `AskUserQuestion` to offer reviewing one directly — then hand off to the `/codex-pr:review` flow. Do not start a review without the user choosing one.
+4. **Offer next steps.** End by telling the user they can run `/codex-pr-reviewer:review <repo#number>` on any row. If there are four or fewer rows, use `AskUserQuestion` to offer reviewing one directly — then hand off to the `/codex-pr-reviewer:review` flow. Do not start a review without the user choosing one.
 
 ## Notes
 

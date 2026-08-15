@@ -851,7 +851,7 @@ function streamCodex(args, { echo = process.stdout } = {}) {
     child.on("error", (error) => {
       reject(
         error.code === "ENOENT"
-          ? new UserError("`codex` is not installed or not on PATH.", "Run `/codex-pr:review` after installing the Codex CLI.")
+          ? new UserError("`codex` is not installed or not on PATH.", "Run `/codex-pr-reviewer:review` after installing the Codex CLI.")
           : error
       );
     });
