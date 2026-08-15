@@ -12,7 +12,7 @@ matches GitHub's "Files changed" exactly, and hands that checkout to `codex revi
 |---|---|
 | `/codex-pr-reviewer:review <pr> [--post]` | Fetch a PR and review it. `<pr>` is `42`, `owner/repo#42`, or a PR URL. |
 | `/codex-pr-reviewer:list` | Show PRs awaiting your review. |
-| `/codex-pr-reviewer:sweep [--limit N]` | Review a batch and produce one digest. |
+| `/codex-pr-reviewer:sweep [--limit N]` | Review a batch (smallest first) and produce one digest. |
 | `/codex-pr-reviewer:clean` | Remove the worktrees, branches, and clones the plugin created. |
 
 Requires `codex` (logged in), `gh` (authenticated), `git` ≥ 2.5, and Node ≥ 18.

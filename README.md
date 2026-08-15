@@ -33,7 +33,7 @@ node plugins/codex-pr-reviewer/scripts/pr-workspace.mjs doctor
 |---|---|
 | `/codex-pr-reviewer:review <pr> [--post]` | Fetch a PR and review it. `<pr>` is `42`, `owner/repo#42`, or a PR URL. |
 | `/codex-pr-reviewer:list` | Show PRs awaiting your review, across GitHub or in one repo. |
-| `/codex-pr-reviewer:sweep [--limit N]` | Review a batch of PRs and produce one digest. |
+| `/codex-pr-reviewer:sweep [--limit N]` | Review a batch of PRs (smallest first) and produce one digest. |
 | `/codex-pr-reviewer:clean` | Remove the worktrees, branches, and clones the plugin created. |
 
 ## How it works
@@ -100,6 +100,16 @@ $ pr-workspace.mjs review cli/cli#14057 --dry-run
 codex -C <cache>/worktrees/cli__cli/pr-14057 -s read-only \
   review --base codex-pr/14057-base --title 'PR #14057: docs: recommend nix-shell …'
 ```
+
+`/codex-pr-reviewer:sweep` gathers up to 50 candidates and reviews the
+**smallest first** (`additions + deletions` ascending, tie-broken on file
+count), because each PR in the batch is a separate paid Codex run. On a busy
+queue the difference is large: for `cli/cli` at the time of writing, `--limit 5`
+costs 27 lines of churn smallest-first versus 352 newest-first, and the queue's
+largest open PR is 4,111 lines across 66 files. Pass `--order newest` for queue
+order. The skipped large PRs are named before the run, so nothing is dropped
+silently, and a specific PR is always reachable via
+`/codex-pr-reviewer:review <pr>`.
 
 `--context` passes the PR title and description to the reviewer as stated intent, explicitly framed as a claim rather than as instructions. It is off by default so runs stay comparable to a plain `codex review`.
 
