@@ -25,6 +25,7 @@ const PR_FIELDS = [
   "title",
   "url",
   "state",
+  "isDraft",
   "isCrossRepository",
   "baseRefName",
   "baseRefOid", // fallback base when the branch has been deleted post-merge
@@ -638,6 +639,7 @@ function prepare(options, positionals, cwd) {
     title: pr.title,
     url: pr.url,
     state: pr.state,
+    isDraft: Boolean(pr.isDraft),
     author: pr.author?.login ?? "unknown",
     isFork: Boolean(pr.isCrossRepository),
     worktree,
@@ -679,7 +681,7 @@ function describeEntry(entry) {
   const size = describeSize(entry);
   return [
     `${entry.repo}#${entry.number} — ${entry.title}`,
-    `  by @${entry.author}${entry.isFork ? " (fork)" : ""} · ${entry.state} · ${size} · base ${entry.baseRefName}`,
+    `  by @${entry.author}${entry.isFork ? " (fork)" : ""} · ${entry.state}${entry.isDraft ? " (draft)" : ""} · ${size} · base ${entry.baseRefName}`,
     `  worktree  ${entry.worktree}`,
     `  base ref  ${entry.baseBranch} @ ${entry.mergeBase.slice(0, 12)}`,
     `  head      ${entry.headBranch} @ ${entry.headSha.slice(0, 12)}`

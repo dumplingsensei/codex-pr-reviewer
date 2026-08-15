@@ -1,6 +1,6 @@
 ---
 description: Find GitHub pull requests waiting on your review
-argument-hint: '[--repo owner/repo] [--limit N] [--author @me] [--state open]'
+argument-hint: '[--repo owner/repo] [--limit N]'
 allowed-tools: Read, Grep, Glob, AskUserQuestion, Bash(node:*), Bash(git:*), Bash(gh:*)
 ---
 
@@ -17,16 +17,21 @@ Raw slash-command arguments:
      gh pr list --repo <owner/repo> --state open --limit <N> \
        --json number,title,author,createdAt,updatedAt,isDraft,additions,deletions,changedFiles,url,statusCheckRollup,reviewDecision
      ```
-   - With no `--repo`, find what is assigned to the user across GitHub. Run both and merge, de-duplicating on `url`:
+   - With no `--repo`, find what is assigned to the user across GitHub. Run both and merge, de-duplicating on `url`, and keep track of which query produced each row:
      ```bash
-     gh search prs --review-requested=@me --state=open --limit <N> --json number,title,author,repository,createdAt,url
-     gh search prs --assignee=@me --state=open --limit <N> --json number,title,author,repository,createdAt,url
+     gh search prs --review-requested=@me --state=open --limit <N> --json number,title,author,repository,createdAt,isDraft,url
+     gh search prs --assignee=@me --state=open --limit <N> --json number,title,author,repository,createdAt,isDraft,url
      ```
-   - If neither returns anything and the current directory is a git repo, fall back to that repo's open PRs and say that is what you did.
+     These mean different things — review-requested is work waiting on you, assigned is work owned by you — so label the reason rather than blurring them into one list.
+   - If neither returns anything, fall back to the current directory's repository, but only if it actually resolves to one:
+     ```bash
+     gh repo view --json nameWithOwner
+     ```
+     A directory can be a git repository with no GitHub remote at all, in which case `gh pr list` fails. If that lookup fails, say plainly that there is nothing to list and that `--repo owner/repo` will scope it — do not report an error as an empty queue.
 
    `--limit` defaults to 20.
 
-2. **Render a compact table**, newest first: index, `repo#number`, title (truncate to ~60 chars), author, size (`N files, +A/-D` when available), age, and CI/review state when available. Mark drafts.
+2. **Render a compact table**, newest first (sort by `createdAt` descending — do not rely on the API's ordering): index, `repo#number`, title (truncate to ~60 chars), author, size (`N files, +A/-D` when available), age, and CI/review state when available. Mark drafts, and mark why each row is listed when the source was the two searches.
 
    `gh search prs` does not return size fields. Do not issue a `gh pr view` per row just to fill them in — leave the size column blank for search results and note that `/codex-pr-reviewer:review` will report it.
 

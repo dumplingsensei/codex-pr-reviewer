@@ -1,7 +1,7 @@
 ---
 description: Review several GitHub pull requests with Codex and produce one digest
 argument-hint: '[--repo owner/repo] [--limit N] [--order smallest|newest] [--parallel] [--effort low|medium|high|xhigh]'
-allowed-tools: Read, Grep, Glob, AskUserQuestion, Bash(node:*), Bash(git:*), Bash(gh:*), Bash(codex:*)
+allowed-tools: Read, Grep, Glob, AskUserQuestion, Bash(node:*), Bash(git:*), Bash(gh:*)
 ---
 
 Review a batch of pull requests with Codex and summarize them together.
@@ -40,15 +40,19 @@ Core constraint:
    ```
    These are cheap read-only calls and far cheaper than reviewing the wrong PR. If a size lookup fails for some PR, sort it last rather than dropping it, and say so.
 
-4. **Confirm the cost before running.** Each PR is a separate paid Codex run that can take minutes. Show the chosen set **with sizes**, and name the largest candidate that was left out so the skip is visible rather than silent. Use `AskUserQuestion` to confirm. Always confirm when the set is larger than 3, regardless of `--limit`.
+4. **Confirm the cost before running — always.** Every PR in the set is a separate paid Codex run that can take minutes, so there is no batch size small enough to skip this. Show the chosen set **with sizes**, and name the largest candidate that was left out so the skip is visible rather than silent. Then use `AskUserQuestion` to confirm.
 
-5. **Prepare every worktree first**, one `prepare … --json` call per PR. Doing this up front means a fetch failure surfaces before any Codex time is spent. Report any PR that failed to prepare and drop it from the batch.
+   If the candidate set is empty, say so and stop. If the answer is ambiguous or contradicts what the user asked for in plain text, do not start any reviews.
+
+5. **Prepare every worktree first**, one `prepare … --json` call per PR. Doing this up front means a fetch failure surfaces before any Codex time is spent. Report any PR that failed to prepare and drop it from the batch. If every PR fails to prepare, stop rather than reporting an empty digest.
 
 6. **Run the reviews.**
    - Default: **sequentially**, one `review … --no-prepare` per PR. Concurrent reviews at high reasoning effort are heavy on both rate limits and the machine.
-   - With `--parallel`: launch each as a background `Bash(run_in_background: true)` task, then stop for the turn and report the results once they arrive. Do not poll.
+   - With `--parallel`: launch each as a background `Bash(run_in_background: true)` task, tell the user they are running, and end the turn. Do not poll and do not wait — assemble the digest in a later turn, once the results have actually arrived. Never write a digest for a review that has not returned.
 
 7. **Produce the digest.** Lead with a table — `repo#number`, size, headline verdict, count of findings by severity. Then, for each PR, the full Codex review verbatim under its own heading. Do not merge, re-rank, or reword findings across PRs; attribute each to its PR.
+
+   A review that exited non-zero or produced no output is a **failure**, not a clean verdict. Say so in its row rather than recording it as "no findings" — silently reading a failed run as a passing one is the worst outcome this command can produce.
 
 8. **Point at the artifacts.** Each review is saved under the cache directory; list the paths. Remind the user that `/codex-pr-reviewer:clean` removes the worktrees when they are done.
 
