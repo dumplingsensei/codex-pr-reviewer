@@ -8,12 +8,18 @@ Reviewing in a real checkout — rather than from a raw diff — means Codex can
 
 ## Install
 
-From a local checkout — run this from the repository root, or substitute its path:
+From a local checkout, pass the path to the repository root. An absolute path
+always works; a relative one must start with `./` — a bare `.` is rejected as an
+invalid source format.
 
 ```
-/plugin marketplace add .
+/plugin marketplace add /absolute/path/to/codex-pr-reviewer
 /plugin install codex-pr-reviewer
 ```
+
+Choose **user** scope when prompted, not project scope: the point is to review
+PRs from whichever repository you happen to be working in, so scoping the plugin
+to a single directory defeats it.
 
 Requires `codex` (logged in), `gh` (authenticated), `git` ≥ 2.5, and Node ≥ 18. Run `/codex-pr:review` and it will tell you if anything is missing, or check directly:
 
