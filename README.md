@@ -14,8 +14,13 @@ invalid source format.
 
 ```
 /plugin marketplace add /absolute/path/to/codex-pr-reviewer
-/plugin install codex-pr-reviewer
+/plugin install codex-pr-reviewer@chase-plugins
 ```
+
+The marketplace is named `chase-plugins` and the plugin inside it is
+`codex-pr-reviewer`, so the fully-qualified name is
+`codex-pr-reviewer@chase-plugins`. Commands are namespaced by the *plugin*
+name: `/codex-pr-reviewer:review`.
 
 Choose **user** scope when prompted, not project scope: the point is to review
 PRs from whichever repository you happen to be working in, so scoping the plugin
