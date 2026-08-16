@@ -27,7 +27,10 @@ const {
   diffFileHashes,
   isInsideDir,
   digestOf,
-  selectReviewFiles
+  reviewStamp,
+  reviewFileMatches,
+  selectReviewFiles,
+  reviewSnapshotDigest
 } = await import(path.join(pluginDir, "scripts", "pr-workspace.mjs"));
 
 let failures = 0;
@@ -161,12 +164,45 @@ eq("a traversal that lands back inside", isInsideDir(reviewsRoot, `${reviewsRoot
 // The string-prefix version of this check calls a sibling directory a child.
 eq("a sibling sharing a prefix", isInsideDir(reviewsRoot, "/nonexistent-cache/reviews-old/x.md"), false);
 
+describe("reviewStamp");
+// The matcher below anchors on the shape of this stamp. If the two ever drift,
+// every saved review stops being recognised as one — including by `post`.
+eq("matches the pattern the matcher expects", /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/.test(reviewStamp()), true);
+eq(
+  "is the ISO timestamp with : and . swapped out",
+  reviewStamp(new Date("2026-08-16T13:50:02.197Z")),
+  "2026-08-16T13-50-02-197Z"
+);
+
+describe("reviewFileMatches");
+eq("its own output", reviewFileMatches(`o__r-pr7-${reviewStamp()}.md`, "o/r", 7), true);
+// A repository name can continue where a `<slug>-pr<N>-` prefix stops. This is
+// a review of o/r-pr7-archive#9, and a prefix test reads it as one of o/r#7 —
+// which deletes it under --purge-reviews and posts it to the wrong PR.
+eq(
+  "a repo whose name extends the prefix",
+  reviewFileMatches("o__r-pr7-archive-pr9-2026-01-01T00-00-00-000Z.md", "o/r", 7),
+  false
+);
+eq(
+  "that same file against its real PR",
+  reviewFileMatches("o__r-pr7-archive-pr9-2026-01-01T00-00-00-000Z.md", "o/r-pr7-archive", 9),
+  true
+);
+eq("a longer number", reviewFileMatches("o__r-pr70-2026-01-01T00-00-00-000Z.md", "o/r", 7), false);
+eq("a missing stamp", reviewFileMatches("o__r-pr7-a.md", "o/r", 7), false);
+eq("trailing junk after the stamp", reviewFileMatches("o__r-pr7-2026-01-01T00-00-00-000Z.md.bak", "o/r", 7), false);
+// Repo names may contain regex metacharacters; `.` must not match any byte.
+eq("a dot is a literal dot", reviewFileMatches("o__rXjs-pr7-2026-01-01T00-00-00-000Z.md", "o/r.js", 7), false);
+eq("the real dotted name", reviewFileMatches("o__r.js-pr7-2026-01-01T00-00-00-000Z.md", "o/r.js", 7), true);
+
 describe("selectReviewFiles");
 const listing = [
   "o__r-pr7-2026-01-01T00-00-00-000Z.md",
   "o__r-pr7-2026-02-02T00-00-00-000Z.md",
   "o__r-pr70-2026-01-01T00-00-00-000Z.md",
   "o__other-pr7-2026-01-01T00-00-00-000Z.md",
+  "o__r-pr7-archive-pr9-2026-01-01T00-00-00-000Z.md",
   "manifest.json"
 ];
 eq(
@@ -174,8 +210,7 @@ eq(
   selectReviewFiles(listing, [{ repo: "o/r", number: 7 }]),
   ["o__r-pr7-2026-02-02T00-00-00-000Z.md", "o__r-pr7-2026-01-01T00-00-00-000Z.md"]
 );
-// The trailing dash in the prefix is what keeps #7 from swallowing #70.
-eq("a longer number is not a prefix match", selectReviewFiles(listing, [{ repo: "o/r", number: 70 }]), [
+eq("a longer number is not a match", selectReviewFiles(listing, [{ repo: "o/r", number: 70 }]), [
   "o__r-pr70-2026-01-01T00-00-00-000Z.md"
 ]);
 eq("another repo, same number", selectReviewFiles(listing, [{ repo: "o/other", number: 7 }]), [
@@ -184,6 +219,17 @@ eq("another repo, same number", selectReviewFiles(listing, [{ repo: "o/other", n
 eq("repo case does not matter", selectReviewFiles(listing, [{ repo: "O/R", number: 7 }]).length, 2);
 eq("no entries selects nothing", selectReviewFiles(listing, []), []);
 eq("an unprepared PR selects nothing", selectReviewFiles(listing, [{ repo: "o/r", number: 9 }]), []);
+eq(
+  "several entries at once",
+  selectReviewFiles(listing, [{ repo: "o/r", number: 70 }, { repo: "o/other", number: 7 }]).length,
+  2
+);
+
+describe("reviewSnapshotDigest");
+eq("order does not matter", reviewSnapshotDigest(["b", "a"]), reviewSnapshotDigest(["a", "b"]));
+eq("an added file changes it", reviewSnapshotDigest(["a", "b"]) === reviewSnapshotDigest(["a", "b", "c"]), false);
+eq("a removed file changes it", reviewSnapshotDigest(["a", "b"]) === reviewSnapshotDigest(["a"]), false);
+eq("empty is stable", reviewSnapshotDigest([]), reviewSnapshotDigest([]));
 
 describe("digestOf");
 eq("known sha256", digestOf(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");

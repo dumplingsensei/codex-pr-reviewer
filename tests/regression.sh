@@ -248,33 +248,48 @@ note "post refuses everything that must never reach a PR"
 # a stale prompt, a slip, or text inside a reviewed diff could get around them.
 # Each case below is one of those rules, now enforced where none of that applies.
 REVIEWS="$CACHE/reviews"
+# Saved reviews are named `<slug>-pr<N>-<stamp>.md`, and the stamp is part of
+# what identifies one: see the collision case below.
+STAMP="2026-01-01T00-00-00-000Z"
 mkdir -p "$REVIEWS" "$SANDBOX/ghstub"
-printf '<!-- codex-pr-reviewer -->\n# Codex review\n\nP1: a real finding.\n' >"$REVIEWS/o__r-pr7-a.md"
-printf '<!-- codex-pr-reviewer -->\n# Codex review\n\n_Codex produced no review output._\n' >"$REVIEWS/o__r-pr8-a.md"
-printf 'handwritten\n' >"$REVIEWS/o__r-pr9-a.md"
+printf '<!-- codex-pr-reviewer -->\n# Codex review\n\nP1: a real finding.\n' >"$REVIEWS/o__r-pr7-$STAMP.md"
+printf '<!-- codex-pr-reviewer -->\n# Codex review\n\n_Codex produced no review output._\n' >"$REVIEWS/o__r-pr8-$STAMP.md"
+printf 'handwritten\n' >"$REVIEWS/o__r-pr9-$STAMP.md"
 printf 'elsewhere\n' >"$SANDBOX/outside.md"
 GOOD="$(node -e 'const {createHash}=require("node:crypto"),fs=require("node:fs");
   console.log(createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex").slice(0,12))' \
-  "$REVIEWS/o__r-pr7-a.md")"
+  "$REVIEWS/o__r-pr7-$STAMP.md")"
 
-out="$(node "$SCRIPT" post o/r#8 --repo o/r --review "$REVIEWS/o__r-pr8-a.md" --confirm "$GOOD" 2>&1)"
+out="$(node "$SCRIPT" post o/r#8 --repo o/r --review "$REVIEWS/o__r-pr8-$STAMP.md" --confirm "$GOOD" 2>&1)"
 contains "a failed review cannot be posted" "$out" "that review failed"
-out="$(node "$SCRIPT" post o/r#9 --repo o/r --review "$REVIEWS/o__r-pr9-a.md" --confirm "$GOOD" 2>&1)"
+out="$(node "$SCRIPT" post o/r#9 --repo o/r --review "$REVIEWS/o__r-pr9-$STAMP.md" --confirm "$GOOD" 2>&1)"
 contains "a file this plugin did not write is refused" "$out" "not a review this plugin generated"
 out="$(node "$SCRIPT" post o/r#7 --repo o/r --review "$SANDBOX/outside.md" --confirm "$GOOD" 2>&1)"
 contains "a path outside the reviews directory is refused" "$out" "not inside"
 # Containment is decided on the resolved path, not on the spelling of it, so a
 # `..` that lands back inside is fine and one that escapes is not. --dry-run
 # keeps this case off the network: nothing below has stubbed `gh` yet.
-out="$(node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/../reviews/o__r-pr7-a.md" --dry-run 2>&1)"
+out="$(node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/../reviews/o__r-pr7-$STAMP.md" --dry-run 2>&1)"
 contains "a traversal that lands inside is accepted" "$out" "gh pr comment 7"
-out="$(node "$SCRIPT" post o/r#8 --repo o/r --review "$REVIEWS/o__r-pr7-a.md" --confirm "$GOOD" 2>&1)"
+out="$(node "$SCRIPT" post o/r#8 --repo o/r --review "$REVIEWS/o__r-pr7-$STAMP.md" --confirm "$GOOD" 2>&1)"
 contains "a review of another PR is refused" "$out" "a different pull request"
-out="$(node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-a.md" 2>&1)"
+# A repository name can continue where the `<slug>-pr<N>-` prefix stops. This is
+# a review of o/r-pr7-archive#9; a prefix test reads it as one of o/r#7 and
+# publishes another repository's review to the wrong pull request.
+printf '<!-- codex-pr-reviewer -->\n# Codex review\n\nP1: from the archive repo.\n' \
+  >"$REVIEWS/o__r-pr7-archive-pr9-$STAMP.md"
+COLLIDE="$(node -e 'const {createHash}=require("node:crypto"),fs=require("node:fs");
+  console.log(createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex").slice(0,12))' \
+  "$REVIEWS/o__r-pr7-archive-pr9-$STAMP.md")"
+out="$(node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-archive-pr9-$STAMP.md" --confirm "$COLLIDE" 2>&1)"
+contains "a repo whose name extends the prefix is refused" "$out" "a different pull request"
+out="$(node "$SCRIPT" post "o/r-pr7-archive#9" --repo o/r-pr7-archive --review "$REVIEWS/o__r-pr7-archive-pr9-$STAMP.md" --dry-run 2>&1)"
+contains "that same review reaches its own PR" "$out" "gh pr comment 9"
+out="$(node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-$STAMP.md" 2>&1)"
 contains "posting without --confirm is refused" "$out" "Refusing to post without"
-out="$(node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-a.md" --confirm 0000 2>&1)"
+out="$(node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-$STAMP.md" --confirm 0000 2>&1)"
 contains "a truncated digest is refused" "$out" "too short"
-out="$(node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-a.md" --confirm 000000000000 2>&1)"
+out="$(node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-$STAMP.md" --confirm 000000000000 2>&1)"
 contains "a digest for another review is refused" "$out" "is not the one that digest"
 # The digest is what carries an approval from the body that was shown. A failure
 # must not hand it back, or the next call just quotes it and posts anyway.
@@ -289,7 +304,7 @@ STUB
 chmod +x "$SANDBOX/ghstub/gh"
 export GH_CALLS="$SANDBOX/gh-calls.txt"
 : >"$GH_CALLS"
-out="$(PATH="$SANDBOX/ghstub:$PATH" node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-a.md" --dry-run --json 2>&1)"
+out="$(PATH="$SANDBOX/ghstub:$PATH" node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-$STAMP.md" --dry-run --json 2>&1)"
 check "dry-run posts nothing" "$(wc -l <"$GH_CALLS" | tr -d ' ')" "0"
 check "dry-run does not hand back the digest" "$(printf '%s' "$out" | grep -c "$GOOD")" "0"
 
@@ -303,13 +318,88 @@ cat >"$CACHE/manifest.json" <<JSON
   "changedFiles":1,"preparedAt":"2026-01-01T00:00:00.000Z"}
 ]}
 JSON
-out="$(PATH="$SANDBOX/ghstub:$PATH" node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-a.md" --confirm "$GOOD" 2>&1)"
+out="$(PATH="$SANDBOX/ghstub:$PATH" node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-$STAMP.md" --confirm "$GOOD" 2>&1)"
 contains "an approved review posts and returns the URL" "$out" "issuecomment-99"
 contains "the post is recorded" "$(node "$SCRIPT" list --json 2>/dev/null)" "issuecomment-99"
-out="$(PATH="$SANDBOX/ghstub:$PATH" node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-a.md" --confirm "$GOOD" 2>&1)"
+out="$(PATH="$SANDBOX/ghstub:$PATH" node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-$STAMP.md" --confirm "$GOOD" 2>&1)"
 contains "the same review is not posted twice" "$out" "already posted"
-out="$(PATH="$SANDBOX/ghstub:$PATH" node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-a.md" --confirm "$GOOD" --again 2>&1)"
+out="$(PATH="$SANDBOX/ghstub:$PATH" node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-$STAMP.md" --confirm "$GOOD" --again 2>&1)"
 contains "--again allows a deliberate duplicate" "$out" "issuecomment-99"
+rm -f "$CACHE/manifest.json"
+
+note "clean --purge-reviews cannot overreach"
+# Three defects found reviewing the change that added the flag, each of them
+# fatal to a file that cannot be regenerated: a prefix match that reached
+# another repository's reviews, a plan recomputed by the process that acts on
+# it, and a failed deletion that cleared its manifest entry anyway.
+rm -rf "$CACHE"
+PURGE_WT="$SANDBOX/purge-wt"
+mkdir -p "$REVIEWS" "$PURGE_WT"
+mk_review() { printf '<!-- codex-pr-reviewer -->\n# Codex review\n\nP1: a finding.\n' >"$1"; }
+plan_field() {
+  node "$SCRIPT" clean --all --purge-reviews --dry-run --json >"$SANDBOX/plan.json" 2>/dev/null
+  node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));
+    const v=j[process.argv[2]];console.log(Array.isArray(v)?v.length:v)' "$SANDBOX/plan.json" "$1"
+}
+write_manifest() {
+  cat >"$CACHE/manifest.json" <<JSON
+{"version":1,"entries":[
+ {"key":"o/r#7","repo":"o/r","number":7,"title":"t","url":"u","state":"OPEN","author":"a",
+  "worktree":"$PURGE_WT","repoDir":"$SANDBOX/none","remote":"origin","mode":"clone",
+  "headBranch":"codex-pr/7","baseBranch":"codex-pr/7-base","refs":[],
+  "headSha":"0","mergeBase":"0","baseRefName":"main","additions":1,"deletions":0,
+  "changedFiles":1,"preparedAt":"2026-01-01T00:00:00.000Z"}
+]}
+JSON
+}
+write_manifest
+mk_review "$REVIEWS/o__r-pr7-$STAMP.md"
+mk_review "$REVIEWS/o__r-pr7-2026-02-02T00-00-00-000Z.md"
+mk_review "$REVIEWS/o__r-pr7-archive-pr9-$STAMP.md"   # o/r-pr7-archive#9, not o/r#7
+mk_review "$REVIEWS/o__other-pr3-$STAMP.md"
+
+check "the plan covers this PR's reviews only" "$(plan_field reviews)" "2"
+DIGEST="$(plan_field reviewsDigest)"
+
+out="$(node "$SCRIPT" clean --all --purge-reviews 2>&1)"
+contains "purging without a confirmed snapshot is refused" "$out" "--confirm-reviews"
+check "a refused run deletes nothing" "$(ls "$REVIEWS" | wc -l | tr -d ' ')" "4"
+out="$(node "$SCRIPT" clean --all --purge-reviews --confirm-reviews 000000000000 2>&1)"
+contains "a digest for another set is refused" "$out" "not the ones that digest approved"
+check "still nothing deleted" "$(ls "$REVIEWS" | wc -l | tr -d ' ')" "4"
+
+# The plan is shown by one process and carried out by another. A review saved in
+# between — a background review, a sweep finishing — was in nobody's plan.
+mk_review "$REVIEWS/o__r-pr7-2026-03-03T00-00-00-000Z.md"
+out="$(node "$SCRIPT" clean --all --purge-reviews --confirm-reviews "$DIGEST" 2>&1)"
+contains "a review saved after the plan aborts the run" "$out" "not the ones that digest approved"
+check "and that review is still there" \
+  "$([[ -f "$REVIEWS/o__r-pr7-2026-03-03T00-00-00-000Z.md" ]] && echo present || echo gone)" "present"
+
+# A review that could not be deleted must hold its PR in the manifest: reviews
+# of a PR no longer recorded there can never be selected again.
+DIGEST="$(plan_field reviewsDigest)"
+chmod 500 "$REVIEWS"
+out="$(node "$SCRIPT" clean --all --purge-reviews --confirm-reviews "$DIGEST" 2>&1)"
+chmod 700 "$REVIEWS"
+contains "a failed review deletion is reported" "$out" "could not remove review"
+check "its entry stays for a retry" "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key"')" "1"
+
+DIGEST="$(plan_field reviewsDigest)"
+out="$(node "$SCRIPT" clean --all --purge-reviews --confirm-reviews "$DIGEST" 2>&1)"
+check "the retry removes all three" "$(printf '%s' "$out" | grep -c '^  - review ')" "3"
+check "another repo's colliding review survives" \
+  "$([[ -f "$REVIEWS/o__r-pr7-archive-pr9-$STAMP.md" ]] && echo present || echo gone)" "present"
+check "an unrelated review survives" \
+  "$([[ -f "$REVIEWS/o__other-pr3-$STAMP.md" ]] && echo present || echo gone)" "present"
+check "the manifest is empty" "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key"')" "0"
+
+# Without the flag, reviews are untouched and no confirmation is needed.
+write_manifest
+mkdir -p "$PURGE_WT"
+out="$(node "$SCRIPT" clean --all 2>&1)"
+check "a plain clean keeps every review" "$(ls "$REVIEWS" | wc -l | tr -d ' ')" "2"
+contains "and says so" "$out" "Kept 2 saved reviews"
 rm -f "$CACHE/manifest.json"
 
 note "doctor detects a stale installed copy"

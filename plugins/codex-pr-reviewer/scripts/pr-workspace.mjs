@@ -894,22 +894,43 @@ const NO_REVIEW_BODY = "_Codex produced no review output._";
 /** sha256 of a saved review, used to bind an approval to the exact bytes. */
 export const digestOf = (text) => createHash("sha256").update(text).digest("hex");
 
+const escapeRegex = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** The timestamp `reviewStamp` produces, as a pattern. Kept beside it. */
+const REVIEW_STAMP_PATTERN = String.raw`\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z`;
+
+export const reviewStamp = (date = new Date()) => date.toISOString().replace(/[:.]/g, "-");
+
 function reviewOutputPath(entry) {
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  return path.join(reviewsDir(), `${slugToDir(entry.repo)}-pr${entry.number}-${stamp}.md`);
+  return path.join(reviewsDir(), `${slugToDir(entry.repo)}-pr${entry.number}-${reviewStamp()}.md`);
 }
 
 /**
- * Saved review filenames belonging to `entries`, matched on the same
- * `<slug>-pr<N>-` prefix `reviewOutputPath` writes. Re-running a review on one
- * PR is expected and leaves several files, so every match is returned, newest
+ * Matches a saved review filename to one PR, anchored on the whole name that
+ * `reviewOutputPath` writes: `<slug>-pr<N>-<stamp>.md`.
+ *
+ * The obvious spelling — does the name start with `<slug>-pr<N>-` — is wrong,
+ * because a repository name may itself continue where that prefix stops. A
+ * review of `o/r-pr7-archive#9` is saved as `o__r-pr7-archive-pr9-<stamp>.md`,
+ * which starts with `o__r-pr7-` and so reads as a review of `o/r#7`. Getting
+ * that wrong deletes another repository's review under `--purge-reviews`, and
+ * publishes it to the wrong pull request under `post`. Requiring the stamp to
+ * follow the number removes the ambiguity: `archive-pr9-…` is not a stamp.
+ */
+export function reviewFileMatches(name, repo, number) {
+  const head = escapeRegex(`${slugToDir(repo)}-pr${number}-`);
+  return new RegExp(`^${head}${REVIEW_STAMP_PATTERN}\\.md$`).test(name);
+}
+
+/**
+ * Saved review filenames belonging to `entries`. Re-running a review on one PR
+ * is expected and leaves several files, so every match is returned, newest
  * first. Takes the listing rather than reading the directory so the matching
  * rule stays testable on its own.
  */
 export function selectReviewFiles(names, entries) {
-  const prefixes = entries.map((entry) => `${slugToDir(entry.repo)}-pr${entry.number}-`);
   return names
-    .filter((name) => prefixes.some((prefix) => name.startsWith(prefix)))
+    .filter((name) => entries.some((entry) => reviewFileMatches(name, entry.repo, entry.number)))
     .sort()
     .reverse();
 }
@@ -922,12 +943,19 @@ function savedReviewsFor(entries) {
 }
 
 /**
+ * Identifies a set of reviews as one list, so an approval to delete them can be
+ * carried between the process that showed the plan and the process that acts on
+ * it. Order-independent: the same files always digest the same.
+ */
+export const reviewSnapshotDigest = (files) => digestOf([...files].sort().join("\n"));
+
+/**
  * Codex cites files by absolute path inside the worktree. Rewrite those to
  * repo-relative paths — they are noise when read locally and leak a local
  * filesystem path if the review is posted to a public PR.
  */
 export function stripWorktreePaths(text, worktree) {
-  const escaped = worktree.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escaped = escapeRegex(worktree);
   return String(text)
     .replaceAll(new RegExp(`${escaped}/`, "g"), "")
     .replaceAll(new RegExp(escaped, "g"), ".");
@@ -1131,11 +1159,10 @@ function loadPostableReview(reviewPath, target) {
     );
   }
 
-  const expectedPrefix = `${slugToDir(target.slug)}-pr${target.number}-`;
-  if (!path.basename(resolved).startsWith(expectedPrefix)) {
+  if (!reviewFileMatches(path.basename(resolved), target.slug, target.number)) {
     throw new UserError(
       `Refusing to post ${path.basename(resolved)} to ${target.slug}#${target.number}: it is a review of a different pull request.`,
-      `A review of this PR is named \`${expectedPrefix}*.md\`.`
+      `A review of this PR is named \`${slugToDir(target.slug)}-pr${target.number}-<timestamp>.md\`.`
     );
   }
 
@@ -1423,9 +1450,42 @@ function purgeUnusedClones(processed, survivors) {
   return { removed, failed };
 }
 
+/**
+ * Binds a `--purge-reviews` run to the file list its dry run showed.
+ *
+ * The plan is built by one process and carried out by another, with a human
+ * confirmation in between. Recomputing the list in the second process would
+ * delete whatever is on disk by then — including a review a background run or a
+ * sweep saved during the confirmation, which appeared in nothing anyone
+ * approved. Like `post --confirm`, the digest is never quoted back in a
+ * failure: a caller that can read it off an error has lost the link to an
+ * approval that the digest exists to carry.
+ */
+function requireReviewSnapshot(planned, confirm) {
+  const supplied = String(confirm ?? "").trim().toLowerCase();
+  if (!supplied) {
+    throw new UserError(
+      `Refusing to delete ${planned.length} saved review${planned.length === 1 ? "" : "s"} without \`--confirm-reviews <digest>\`.`,
+      "Re-run with --dry-run, show the list, and pass the digest it prints."
+    );
+  }
+  if (supplied.length < 12) {
+    throw new UserError(
+      `The digest \`${supplied}\` is too short to identify a set of reviews.`,
+      "Pass at least the first 12 characters that --dry-run printed."
+    );
+  }
+  if (!reviewSnapshotDigest(planned).startsWith(supplied)) {
+    throw new UserError(
+      "The saved reviews on disk are not the ones that digest approved.",
+      "Re-run with --dry-run to see what is there now, and confirm that list."
+    );
+  }
+}
+
 function commandClean(argv) {
   const { options } = parseArgs(argv, {
-    valueOptions: ["pr", "repo", "older-than"],
+    valueOptions: ["pr", "repo", "older-than", "confirm-reviews"],
     booleanOptions: ["json", "all", "dry-run", "purge-clones", "purge-reviews"]
   });
 
@@ -1436,7 +1496,12 @@ function commandClean(argv) {
   // can be re-fetched; a review is the output of a Codex run the user paid for
   // and cannot be regenerated byte-for-byte. Deleting one stays its own ask.
   const purgeReviews = Boolean(options["purge-reviews"]);
-  const doomedReviews = purgeReviews ? savedReviewsFor(targets) : [];
+  // Held per entry, so a review that could not be deleted keeps its own PR in
+  // the manifest rather than being charged to the batch.
+  const doomed = new Map(
+    targets.map((entry) => [entry.key, purgeReviews ? savedReviewsFor([entry]) : []])
+  );
+  const allDoomed = targets.flatMap((entry) => doomed.get(entry.key));
 
   if (options["dry-run"]) {
     const plan = targets.map((entry) => ({
@@ -1445,11 +1510,16 @@ function commandClean(argv) {
       repoDir: entry.repoDir,
       branches: [entry.headBranch, entry.baseBranch],
       refs: entry.refs ?? [],
-      reviews: purgeReviews ? savedReviewsFor([entry]) : []
+      reviews: doomed.get(entry.key)
     }));
+    const digest = reviewSnapshotDigest(allDoomed).slice(0, 12);
     process.stdout.write(
       options.json
-        ? `${JSON.stringify({ wouldRemove: plan, reviews: doomedReviews }, null, 2)}\n`
+        ? `${JSON.stringify(
+            { wouldRemove: plan, reviews: allDoomed, reviewsDigest: allDoomed.length > 0 ? digest : null },
+            null,
+            2
+          )}\n`
         : plan.length === 0
           ? "Nothing to clean.\n"
           : `${plan
@@ -1457,37 +1527,46 @@ function commandClean(argv) {
                 (item) =>
                   `${item.key}\n  worktree  ${item.worktree}\n  branches  ${item.branches.join(", ")}\n  in repo   ${item.repoDir}${
                     item.reviews.length > 0
-                      ? `\n  reviews   ${item.reviews.length} saved review${item.reviews.length === 1 ? "" : "s"}`
+                      ? `\n  reviews   ${item.reviews.map((file) => path.basename(file)).join("\n            ")}`
                       : ""
                   }`
               )
-              .join("\n\n")}\n`
+              .join("\n\n")}\n${
+              allDoomed.length > 0
+                ? `\n${allDoomed.length} saved review${allDoomed.length === 1 ? "" : "s"} would be deleted permanently.\nReviews digest ${digest}\n`
+                : ""
+            }`
     );
     return 0;
   }
+
+  // Nothing to approve when nothing would be deleted, and the check would then
+  // be friction with no subject.
+  if (allDoomed.length > 0) requireReviewSnapshot(allDoomed, options["confirm-reviews"]);
 
   const purgeClone = Boolean(options["purge-clones"] || options.all);
   const targetKeys = new Set(targets.map((entry) => entry.key));
   const survivors = manifest.entries.filter((entry) => !targetKeys.has(entry.key));
 
   // Per-entry work first, for every entry, against clones that still exist.
-  const results = targets.map((entry) => ({ key: entry.key, ...removeEntry(entry) }));
+  // A review is removed with the PR it belongs to, so a failure here counts
+  // against that entry and holds it in the manifest for a retry — the reviews
+  // of a PR no longer recorded there could never be selected again.
+  const results = targets.map((entry) => {
+    const outcome = removeEntry(entry);
+    for (const file of doomed.get(entry.key)) {
+      try {
+        fs.rmSync(file);
+        outcome.removed.push(`review ${file}`);
+      } catch (error) {
+        outcome.failed.push(`review ${file}: ${error.message}`);
+      }
+    }
+    return { key: entry.key, ...outcome };
+  });
 
   // Then, once nothing else needs them, the shared clones.
   const clonesRemoved = purgeClone ? purgeUnusedClones(targets, survivors) : [];
-
-  // Reviews last: they are read from the same directory `post` publishes out
-  // of, so nothing else in this run depends on them still being there.
-  const reviewsRemoved = [];
-  const reviewsFailed = [];
-  for (const file of doomedReviews) {
-    try {
-      fs.rmSync(file);
-      reviewsRemoved.push(file);
-    } catch (error) {
-      reviewsFailed.push(`review ${file}: ${error.message}`);
-    }
-  }
 
   // Only entries that were fully removed leave the manifest. Anything that
   // failed keeps its record so it can be retried — reporting success while
@@ -1499,22 +1578,16 @@ function commandClean(argv) {
   });
 
   const failures = results.filter((result) => result.failed.length > 0);
-  const exitCode = failures.length === 0 && reviewsFailed.length === 0 ? 0 : 1;
 
   if (options.json) {
     process.stdout.write(
       `${JSON.stringify(
-        {
-          cleaned: results,
-          clones: clonesRemoved,
-          reviews: reviewsRemoved,
-          incomplete: [...failures.map((f) => f.key), ...reviewsFailed]
-        },
+        { cleaned: results, clones: clonesRemoved, incomplete: failures.map((f) => f.key) },
         null,
         2
       )}\n`
     );
-    return exitCode;
+    return failures.length === 0 ? 0 : 1;
   }
   if (results.length === 0) {
     process.stdout.write("Nothing to clean.\n");
@@ -1534,14 +1607,6 @@ function commandClean(argv) {
       `\n${failures.length} entr${failures.length === 1 ? "y was" : "ies were"} left in the manifest so cleanup can be retried.\n`
     );
   }
-  if (reviewsRemoved.length > 0) {
-    process.stdout.write(
-      `\nsaved reviews\n${reviewsRemoved.map((item) => `  - ${item}`).join("\n")}\n`
-    );
-  }
-  for (const failure of reviewsFailed) {
-    process.stdout.write(`  ! could not remove ${failure}\n`);
-  }
   // Reviews are the product, not scratch state, so cleaning only deletes them
   // when asked. Whatever is left is reported so it is never a silent hoard.
   const saved = fs.existsSync(reviewsDir()) ? fs.readdirSync(reviewsDir()).length : 0;
@@ -1552,7 +1617,7 @@ function commandClean(argv) {
       }\n`
     );
   }
-  return exitCode;
+  return failures.length === 0 ? 0 : 1;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1569,7 +1634,8 @@ const USAGE = `pr-workspace.mjs — review GitHub PRs with Codex
                [--again] [--dry-run] [--json]
   list    [--repo owner/repo] [--json]
   clean   [--pr N | --repo owner/repo | --all | --older-than DAYS]
-          [--purge-clones] [--purge-reviews] [--dry-run] [--json]
+          [--purge-clones] [--purge-reviews --confirm-reviews <digest>]
+          [--dry-run] [--json]
 
 <pr> accepts 42, #42, owner/repo#42, or a github.com pull request URL.
 `;
