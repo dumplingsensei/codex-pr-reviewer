@@ -1,7 +1,7 @@
 ---
 description: Remove PR worktrees, branches, and cached clones this plugin created
 argument-hint: '[--pr N] [--repo owner/repo] [--all] [--older-than DAYS] [--purge-clones]'
-allowed-tools: Read, Grep, Glob, AskUserQuestion, Bash(node:*), Bash(git:*)
+allowed-tools: Read, Grep, Glob, AskUserQuestion, Bash(node:*), Bash(git worktree list:*), Bash(git branch --list:*)
 ---
 
 Remove the review scratch state this plugin created: worktrees, `codex-pr/*` branches, plugin-owned refs, and optionally cached clones.

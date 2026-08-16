@@ -30,6 +30,11 @@ post at all. Every Codex run passes `-s read-only`, the plugin never executes a
 PR's build or tests, and local paths are stripped from review output before it
 is saved.
 
+Publishing goes through the script, which independently refuses a file it did
+not write, a review of a different PR, a run that produced no output, and a body
+that is not the one approved. `/codex-pr-reviewer:review` is granted
+`Bash(node:*)` alone, so those checks are not optional.
+
 Those rules live in the command prompts, which Claude Code caches at install
 time and loads at session start — so `doctor` reports when the running copy is
 older than its source, and `--post` is withdrawn until the plugin is updated and
