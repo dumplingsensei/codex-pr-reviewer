@@ -400,6 +400,24 @@ mkdir -p "$PURGE_WT"
 out="$(node "$SCRIPT" clean --all 2>&1)"
 check "a plain clean keeps every review" "$(ls "$REVIEWS" | wc -l | tr -d ' ')" "2"
 contains "and says so" "$out" "Kept 2 saved reviews"
+
+# What survives has to be reported on every path that reports a clean. The
+# documented flow runs with --json, where the prose line is never reached, and
+# those survivors are exactly the ones no later --purge-reviews can select.
+kept_json() {
+  node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));
+    console.log(j.keptReviews ? j.keptReviews.count : "absent")' "$1"
+}
+write_manifest
+mkdir -p "$PURGE_WT"
+node "$SCRIPT" clean --all --json >"$SANDBOX/cleaned.json" 2>/dev/null
+check "a --json clean reports what it kept" "$(kept_json "$SANDBOX/cleaned.json")" "2"
+node "$SCRIPT" clean --all --purge-reviews --dry-run --json >"$SANDBOX/plan.json" 2>/dev/null
+check "a --json dry run reports what would remain" "$(kept_json "$SANDBOX/plan.json")" "2"
+# Nothing selected is still a run whose answer is "these reviews are still here".
+out="$(node "$SCRIPT" clean --all 2>&1)"
+contains "an empty clean still reports them" "$out" "Kept 2 saved reviews"
+contains "and says there was nothing to clean" "$out" "Nothing to clean."
 rm -f "$CACHE/manifest.json"
 
 note "doctor detects a stale installed copy"

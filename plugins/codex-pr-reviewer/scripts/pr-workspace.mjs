@@ -942,6 +942,9 @@ function savedReviewsFor(entries) {
   return selectReviewFiles(fs.readdirSync(dir), entries).map((name) => path.join(dir, name));
 }
 
+/** How many saved reviews are on disk. */
+const savedReviewCount = () => (fs.existsSync(reviewsDir()) ? fs.readdirSync(reviewsDir()).length : 0);
+
 /**
  * Identifies a set of reviews as one list, so an approval to delete them can be
  * carried between the process that showed the plan and the process that acts on
@@ -1483,6 +1486,20 @@ function requireReviewSnapshot(planned, confirm) {
   }
 }
 
+/**
+ * Reviews are the product, not scratch state, so cleaning only deletes them
+ * when asked. What is left has to be said on every path that reports a clean,
+ * `--json` and `Nothing to clean.` included: reviews of a PR no longer in the
+ * manifest are precisely the ones no later `--purge-reviews` can select, so a
+ * remainder nobody is told about is one nobody thinks to look for.
+ */
+function describeKeptReviews(count, purgeReviews) {
+  if (count <= 0) return "";
+  return `\nKept ${count} saved review${count === 1 ? "" : "s"} in ${reviewsDir()}${
+    purgeReviews ? " (not tied to a cleaned PR)" : ""
+  }\n`;
+}
+
 function commandClean(argv) {
   const { options } = parseArgs(argv, {
     valueOptions: ["pr", "repo", "older-than", "confirm-reviews"],
@@ -1513,15 +1530,21 @@ function commandClean(argv) {
       reviews: doomed.get(entry.key)
     }));
     const digest = reviewSnapshotDigest(allDoomed).slice(0, 12);
+    const wouldKeep = savedReviewCount() - allDoomed.length;
     process.stdout.write(
       options.json
         ? `${JSON.stringify(
-            { wouldRemove: plan, reviews: allDoomed, reviewsDigest: allDoomed.length > 0 ? digest : null },
+            {
+              wouldRemove: plan,
+              reviews: allDoomed,
+              reviewsDigest: allDoomed.length > 0 ? digest : null,
+              keptReviews: { count: wouldKeep, dir: reviewsDir() }
+            },
             null,
             2
           )}\n`
         : plan.length === 0
-          ? "Nothing to clean.\n"
+          ? `Nothing to clean.\n${describeKeptReviews(wouldKeep, purgeReviews)}`
           : `${plan
               .map(
                 (item) =>
@@ -1535,7 +1558,7 @@ function commandClean(argv) {
               allDoomed.length > 0
                 ? `\n${allDoomed.length} saved review${allDoomed.length === 1 ? "" : "s"} would be deleted permanently.\nReviews digest ${digest}\n`
                 : ""
-            }`
+            }${describeKeptReviews(wouldKeep, purgeReviews)}`
     );
     return 0;
   }
@@ -1578,11 +1601,17 @@ function commandClean(argv) {
   });
 
   const failures = results.filter((result) => result.failed.length > 0);
+  const kept = savedReviewCount();
 
   if (options.json) {
     process.stdout.write(
       `${JSON.stringify(
-        { cleaned: results, clones: clonesRemoved, incomplete: failures.map((f) => f.key) },
+        {
+          cleaned: results,
+          clones: clonesRemoved,
+          incomplete: failures.map((f) => f.key),
+          keptReviews: { count: kept, dir: reviewsDir() }
+        },
         null,
         2
       )}\n`
@@ -1590,7 +1619,7 @@ function commandClean(argv) {
     return failures.length === 0 ? 0 : 1;
   }
   if (results.length === 0) {
-    process.stdout.write("Nothing to clean.\n");
+    process.stdout.write(`Nothing to clean.\n${describeKeptReviews(kept, purgeReviews)}`);
     return 0;
   }
   for (const result of results) {
@@ -1607,16 +1636,7 @@ function commandClean(argv) {
       `\n${failures.length} entr${failures.length === 1 ? "y was" : "ies were"} left in the manifest so cleanup can be retried.\n`
     );
   }
-  // Reviews are the product, not scratch state, so cleaning only deletes them
-  // when asked. Whatever is left is reported so it is never a silent hoard.
-  const saved = fs.existsSync(reviewsDir()) ? fs.readdirSync(reviewsDir()).length : 0;
-  if (saved > 0) {
-    process.stdout.write(
-      `\nKept ${saved} saved review${saved === 1 ? "" : "s"} in ${reviewsDir()}${
-        purgeReviews ? " (not tied to a cleaned PR)" : ""
-      }\n`
-    );
-  }
+  process.stdout.write(describeKeptReviews(kept, purgeReviews));
   return failures.length === 0 ? 0 : 1;
 }
 

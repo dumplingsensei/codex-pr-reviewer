@@ -32,6 +32,8 @@ Raw slash-command arguments:
 
    The script exits non-zero when a removal was incomplete and prints `! could not remove …` for each one. Surface those lines — do not report success. Entries that failed are deliberately kept in the manifest so cleanup can be retried once the cause is cleared (most often a `codex-pr/*` branch still checked out somewhere).
 
+   Every result carries `keptReviews` — the reviews still on disk afterwards, and where they are. Pass that count on. It is not a leftover statistic: reviews of a PR that is no longer in the manifest cannot be selected by any later `--purge-reviews`, so this is the user's one notice that removing them is now a manual job.
+
 5. **Verify** in one of the affected repositories, if it still exists — under `--all` a cached clone is deleted outright, in which case there is nothing left to inspect:
    ```bash
    git -C <repoDir> worktree list
@@ -45,5 +47,5 @@ Raw slash-command arguments:
 - `--all` implies `--purge-clones`, which also deletes cached clones under the cache directory. Point this out before confirming, since re-cloning a large repo is slow.
 - Cached clones are shared between PRs of the same repository. They are purged only after every selected entry has been processed, and only when no remaining entry still needs them.
 - A missing worktree directory does **not** mean there is nothing to clean: the `codex-pr/*` branches and plugin refs still live in the host repository, and the manifest entry is the only record of them. `/codex-pr-reviewer:list` flags these; cleaning still removes them.
-- Saved reviews under `reviews/` are output, not scratch state, so they survive every clean unless `--purge-reviews` is passed. `--all` does **not** imply it: a cached clone can be re-fetched, a review cannot. Only reviews belonging to the PRs being cleaned are removed, so reviews for PRs already gone from the manifest stay put — the run reports how many were kept.
+- Saved reviews under `reviews/` are output, not scratch state, so they survive every clean unless `--purge-reviews` is passed. `--all` does **not** imply it: a cached clone can be re-fetched, a review cannot. Only reviews belonging to the PRs being cleaned are removed, so reviews for PRs already gone from the manifest stay put — every run reports how many were kept, in `--json` and in prose alike.
 - A review is removed as part of the PR it belongs to. If its deletion fails, that PR stays in the manifest like any other incomplete removal, so a retry can still reach it.
