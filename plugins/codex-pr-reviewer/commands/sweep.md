@@ -18,6 +18,8 @@ Core constraint:
 
 1. **Preflight** with `node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" doctor --json`. Stop on failure.
 
+   **These instructions were written for plugin version `0.4.0`.** If the report's `pluginVersion` differs, or `stale` is true, the prompts this session loaded are older than the installed plugin. Say so — with the `plugin` check's `remedy` — as part of step 4's confirmation, so the user decides whether to spend a paid batch on outdated instructions. This command cannot post, so it is a warning, not a block.
+
 2. **Gather candidates**, same sources as `/codex-pr-reviewer:list`:
    - With `--repo owner/repo`:
      ```bash

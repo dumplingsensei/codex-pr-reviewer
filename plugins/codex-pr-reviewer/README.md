@@ -30,5 +30,10 @@ post at all. Every Codex run passes `-s read-only`, the plugin never executes a
 PR's build or tests, and local paths are stripped from review output before it
 is saved.
 
+Those rules live in the command prompts, which Claude Code caches at install
+time and loads at session start — so `doctor` reports when the running copy is
+older than its source, and `--post` is withdrawn until the plugin is updated and
+the session restarted.
+
 Full documentation, design notes, and the script reference live in the
 [repository README](https://github.com/dumplingsensei/codex-pr-reviewer#readme).

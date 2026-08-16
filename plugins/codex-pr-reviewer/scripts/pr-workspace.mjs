@@ -11,6 +11,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -422,6 +423,166 @@ function resolveHostRepo(slug, cwd, options = {}) {
 }
 
 /* ------------------------------------------------------------------ *
+ * plugin build
+ *
+ * The safety rules that decide whether a review may be published live in the
+ * command prompts, not in this script. Claude Code copies those prompts into
+ * its plugin cache at install time and loads them at session start, so an edit
+ * to a prompt is invisible twice over: until the copy is refreshed, and then
+ * until the session is restarted. Both gaps are silent, and both leave a run
+ * following an older set of rules than the ones in the source tree.
+ *
+ * `doctor` closes the first gap by comparing the running copy against the
+ * marketplace source. The second is closed from the prompt side: each command
+ * file carries the version it was written for, and compares it against the
+ * `pluginVersion` reported here.
+ * ------------------------------------------------------------------ */
+
+const claudeConfigDir = () =>
+  process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+
+function readJsonFile(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+const pluginRoot = () => path.dirname(path.dirname(realPath(fileURLToPath(import.meta.url))));
+
+const pluginManifest = () =>
+  readJsonFile(path.join(pluginRoot(), ".claude-plugin", "plugin.json"));
+
+// Never compared: `.git` is not shipped, and the rest is editor and tool debris
+// that says nothing about whether the installed prompts match their source.
+const UNCOMPARED = new Set([".git", "node_modules", ".DS_Store"]);
+
+/**
+ * Content hash of every shipped file, keyed by path relative to `root`.
+ * Symlinks are skipped rather than followed — a link cycle inside a plugin
+ * directory would otherwise hang the preflight for every command.
+ */
+export function hashPluginDir(root) {
+  const hashes = new Map();
+
+  const walk = (dir, prefix) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (UNCOMPARED.has(entry.name)) continue;
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full, rel);
+      else if (entry.isFile()) {
+        try {
+          hashes.set(rel, createHash("sha256").update(fs.readFileSync(full)).digest("hex"));
+        } catch {
+          hashes.set(rel, "unreadable");
+        }
+      }
+    }
+  };
+
+  walk(realPath(root), "");
+  return hashes;
+}
+
+/** Relative paths that differ between two `hashPluginDir` results, sorted. */
+export function diffFileHashes(installed, source) {
+  const changed = new Set();
+  for (const [rel, hash] of source) if (installed.get(rel) !== hash) changed.add(rel);
+  for (const rel of installed.keys()) if (!source.has(rel)) changed.add(rel);
+  return [...changed].sort();
+}
+
+/**
+ * The marketplace a cached copy came from. Claude Code lays the cache out as
+ * <config>/plugins/cache/<marketplace>/<plugin>/<version>, which is only a
+ * preference here: the caller falls back to scanning every known marketplace.
+ */
+function marketplaceFromInstallPath(root) {
+  const parts = realPath(root).split(path.sep);
+  const index = parts.lastIndexOf("cache");
+  return index > 0 && parts.length - index >= 4 ? parts[index + 1] : null;
+}
+
+/**
+ * Where the installed copy was built from, if that source is still on disk.
+ * Both local-directory marketplaces and cloned ones qualify — `installLocation`
+ * is a real path in either case.
+ */
+function findPluginSource(pluginName, installedRoot) {
+  const known = readJsonFile(path.join(claudeConfigDir(), "plugins", "known_marketplaces.json"));
+  if (!known || typeof known !== "object") return null;
+
+  const preferred = marketplaceFromInstallPath(installedRoot);
+  const all = Object.keys(known);
+  const names = [...all.filter((name) => name === preferred), ...all.filter((name) => name !== preferred)];
+
+  for (const name of names) {
+    const location = known[name]?.installLocation;
+    if (typeof location !== "string" || !location) continue;
+
+    const manifest = readJsonFile(path.join(location, ".claude-plugin", "marketplace.json"));
+    const entry = manifest?.plugins?.find?.((plugin) => plugin?.name === pluginName);
+    // A `source` object means a remote plugin: there is no local tree to diff.
+    if (typeof entry?.source !== "string") continue;
+
+    const dir = path.resolve(location, entry.source);
+    if (fs.existsSync(path.join(dir, ".claude-plugin", "plugin.json"))) {
+      return { marketplace: name, dir };
+    }
+  }
+  return null;
+}
+
+/**
+ * Warn-level: a stale copy still reviews correctly, and blocking every review
+ * on an unreleased edit would be intolerable during development. What it must
+ * block is publishing — the command prompts refuse `--post` on a stale build.
+ */
+function checkPluginBuild() {
+  const root = pluginRoot();
+  const manifest = pluginManifest();
+  const version = manifest?.version ?? "unknown";
+  const name = manifest?.name ?? "codex-pr-reviewer";
+  const base = { name: "plugin", version, stale: false, source: null, changed: [] };
+
+  const source = findPluginSource(name, root);
+  if (!source) {
+    return { ...base, ok: true, detail: `${version} (no local source to compare against)`, remedy: null };
+  }
+  if (realPath(source.dir) === realPath(root)) {
+    return { ...base, ok: true, source: source.dir, detail: `${version}, running from source`, remedy: null };
+  }
+
+  const changed = diffFileHashes(hashPluginDir(root), hashPluginDir(source.dir));
+  if (changed.length === 0) {
+    return { ...base, ok: true, source: source.dir, detail: `${version}, matches ${source.marketplace}`, remedy: null };
+  }
+
+  const shown = changed.slice(0, 3).join(", ");
+  return {
+    ...base,
+    ok: false,
+    level: "warn",
+    stale: true,
+    source: source.dir,
+    changed,
+    detail: `${version} — installed copy differs from ${source.dir} in ${changed.length} file(s): ${shown}${changed.length > 3 ? ", …" : ""}`,
+    remedy:
+      `Run \`claude plugin marketplace update ${source.marketplace}\`, then ` +
+      `\`claude plugin update ${name}@${source.marketplace}\`, then restart Claude Code — ` +
+      "command prompts are only read at session start."
+  };
+}
+
+/* ------------------------------------------------------------------ *
  * doctor
  * ------------------------------------------------------------------ */
 
@@ -493,9 +654,18 @@ function checkCodex() {
 
 function commandDoctor(argv) {
   const { options } = parseArgs(argv, { booleanOptions: ["json"] });
-  const checks = [checkGit(), checkGh(), checkCodex()];
-  const ok = checks.every((check) => check.ok);
-  const report = { ok, checks, cacheRoot: cacheRoot() };
+  const build = checkPluginBuild();
+  const checks = [checkGit(), checkGh(), checkCodex(), build];
+  // A warn-level check reports itself as not ok but does not fail the preflight:
+  // it describes the plugin's own state, not a missing prerequisite.
+  const ok = checks.every((check) => check.ok || check.level === "warn");
+  const report = {
+    ok,
+    checks,
+    cacheRoot: cacheRoot(),
+    pluginVersion: build.version,
+    stale: build.stale
+  };
 
   if (options.json) {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
@@ -503,7 +673,8 @@ function commandDoctor(argv) {
   }
 
   for (const check of checks) {
-    process.stdout.write(`${check.ok ? "ok  " : "FAIL"}  ${check.name}: ${check.detail}\n`);
+    const status = check.ok ? "ok  " : check.level === "warn" ? "warn" : "FAIL";
+    process.stdout.write(`${status}  ${check.name}: ${check.detail}\n`);
     if (check.remedy) process.stdout.write(`      → ${check.remedy}\n`);
   }
   process.stdout.write(`\ncache: ${cacheRoot()}\n`);

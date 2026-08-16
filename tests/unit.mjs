@@ -9,14 +9,23 @@
  *   node tests/unit.mjs
  */
 
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const { parsePrRef, remoteUrlToSlug, stripWorktreePaths, canonicalSlug, slugToDir, entryKey } =
-  await import(
-    path.join(here, "..", "plugins", "codex-pr-reviewer", "scripts", "pr-workspace.mjs")
-  );
+const root = path.join(here, "..");
+const pluginDir = path.join(root, "plugins", "codex-pr-reviewer");
+const {
+  parsePrRef,
+  remoteUrlToSlug,
+  stripWorktreePaths,
+  canonicalSlug,
+  slugToDir,
+  entryKey,
+  hashPluginDir,
+  diffFileHashes
+} = await import(path.join(pluginDir, "scripts", "pr-workspace.mjs"));
 
 let failures = 0;
 
@@ -108,6 +117,62 @@ eq("case folds to one directory", slugToDir("Cli/CLI"), slugToDir("cli/cli"));
 eq("case folds to one key", entryKey("Cli/CLI", 42), entryKey("cli/cli", 42));
 eq("key shape", entryKey("cli/cli", 42), "cli/cli#42");
 eq("canonicalSlug lowercases", canonicalSlug("Owner/Repo"), "owner/repo");
+
+describe("diffFileHashes");
+const hashes = (entries) => new Map(Object.entries(entries));
+eq("identical trees", diffFileHashes(hashes({ "a.md": "1" }), hashes({ "a.md": "1" })), []);
+eq(
+  "edited file",
+  diffFileHashes(hashes({ "a.md": "1" }), hashes({ "a.md": "2" })),
+  ["a.md"]
+);
+eq(
+  "file added at the source",
+  diffFileHashes(hashes({}), hashes({ "commands/new.md": "1" })),
+  ["commands/new.md"]
+);
+// A file deleted upstream but still sitting in the installed copy is just as
+// stale as an edited one: the command it defines is still loadable.
+eq("file deleted at the source", diffFileHashes(hashes({ "old.md": "1" }), hashes({})), ["old.md"]);
+eq(
+  "reports each path once, sorted",
+  diffFileHashes(hashes({ "b": "1", "gone": "1" }), hashes({ "b": "2", "added": "1" })),
+  ["added", "b", "gone"]
+);
+
+describe("hashPluginDir");
+const shipped = hashPluginDir(pluginDir);
+eq("hashes the command prompts", shipped.has("commands/review.md"), true);
+eq("keys are relative to the root", shipped.has("scripts/pr-workspace.mjs"), true);
+eq("a tree matches itself", diffFileHashes(shipped, hashPluginDir(pluginDir)), []);
+
+describe("release stamps");
+// Each command prompt names the version it was written for, and compares it at
+// runtime against the version `doctor` reports. A stamp left behind at release
+// time silently disables the only signal a session gets that its prompts are
+// older than the plugin they are driving.
+const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
+const version = readJson(path.join(pluginDir, ".claude-plugin", "plugin.json")).version;
+const marketplace = readJson(path.join(root, ".claude-plugin", "marketplace.json"));
+
+eq("marketplace metadata version", marketplace.metadata.version, version);
+eq(
+  "marketplace entry version",
+  marketplace.plugins.find((plugin) => plugin.name === "codex-pr-reviewer").version,
+  version
+);
+
+for (const command of ["review.md", "sweep.md"]) {
+  const text = fs.readFileSync(path.join(pluginDir, "commands", command), "utf8");
+  const stamps = [...text.matchAll(/written for plugin version `([^`]+)`/g)].map((m) => m[1]);
+  eq(`${command} carries exactly one stamp`, stamps.length, 1);
+  eq(`${command} stamp matches plugin.json`, stamps[0], version);
+  // review.md quotes the version a second time, in the comparison it is told to
+  // make. Every version literal in the file has to move together or the prompt
+  // ends up checking itself against a number nothing reports.
+  const literals = [...new Set([...text.matchAll(/`(\d+\.\d+\.\d+)`/g)].map((m) => m[1]))];
+  eq(`${command} has one version literal throughout`, literals, [version]);
+}
 
 console.log(failures === 0 ? "\nAll unit tests passed." : `\n${failures} test(s) failed.`);
 process.exitCode = failures === 0 ? 0 : 1;
