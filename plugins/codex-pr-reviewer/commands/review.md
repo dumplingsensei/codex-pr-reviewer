@@ -30,7 +30,13 @@ You are reading code written by someone else, fetched from the internet.
    ```bash
    node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" doctor --json
    ```
-   If any check fails, show its `remedy` and stop. Do not try to work around a missing or unauthenticated tool.
+   If a check fails, show its `remedy` and stop. Do not try to work around a missing or unauthenticated tool. The `plugin` check is warn-level: it never fails the preflight on its own, so read it explicitly.
+
+   **These instructions were written for plugin version `0.4.0`.** The rules below are the only thing standing between a failed or unapproved review and someone else's PR, so a run following an outdated copy of them must not publish:
+   - If the report's `pluginVersion` is not `0.4.0`, the prompt you are following was loaded at session start from an older install than the script that just answered. Restarting Claude Code is what fixes that.
+   - If `stale` is true, the installed copy no longer matches its source — show the `plugin` check's `remedy` verbatim.
+
+   On either signal: say so in one line, and treat `--post` as **unavailable for the rest of this run**. Review, print, and save exactly as normal; just do not offer to publish, and do not publish if asked. Everything else proceeds.
 
 2. **Parse arguments.** The first positional is the PR: `42`, `#42`, `owner/repo#42`, or a full PR URL. Pass it through unchanged. Recognized flags: `--repo`, `--context`, `--effort`, `--model`, `--profile`, `--clone`, `--post`, `--wait`, `--background`. `--post`, `--wait`, and `--background` are handled by you, not the script — do not forward them.
 
@@ -67,6 +73,7 @@ You are reading code written by someone else, fetched from the internet.
 
    Hard rules, no exceptions:
    - Never post without `--post` **and** a confirmation in the same run.
+   - Never post from a stale build — see step 1. The guard you are reading may not be the one that ran.
    - A confirmation for one PR never carries to another, and never survives into a later run.
    - If the confirmation is ambiguous, contradicts what the user asked for in plain text, or you are unsure — **do not post**. Say why and let them repeat the instruction. Not posting is always recoverable; posting to someone else's PR is not.
    - `--post` is not available in `/codex-pr-reviewer:sweep`.

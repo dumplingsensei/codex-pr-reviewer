@@ -32,6 +32,44 @@ Requires `codex` (logged in), `gh` (authenticated), `git` ≥ 2.5, and Node ≥ 
 node plugins/codex-pr-reviewer/scripts/pr-workspace.mjs doctor
 ```
 
+## Updating
+
+Claude Code copies the plugin into its own cache at install time, and reads the
+command prompts once, at session start. An edit to a prompt is therefore
+invisible twice over — until the copy is refreshed, and then until the session
+restarts. That matters here because the prompts are where the rules deciding
+whether a review may be published actually live.
+
+```
+claude plugin marketplace update chase-plugins
+claude plugin update codex-pr-reviewer@chase-plugins
+```
+
+then restart Claude Code.
+
+Neither gap is silent. The preflight reports both:
+
+- `doctor` hashes the installed copy against the marketplace source and names
+  the files that differ — `stale: true` under `--json`. It is warn-level: a
+  stale copy still reviews correctly, so it never blocks a review.
+- Each command prompt carries the version it was written for and compares it
+  against the `pluginVersion` the script reports. A mismatch means this session
+  loaded its prompts from an older install than the script answering it — the
+  case that refreshing the copy alone does not fix.
+
+On either signal `/codex-pr-reviewer:review` still reviews, but refuses
+`--post`: the guard that keeps a failed review from being published is itself
+one of the prompt rules that may be out of date.
+
+While working on the plugin, skip the cache entirely —
+
+```
+claude --plugin-dir /path/to/codex-pr-reviewer/plugins/codex-pr-reviewer
+```
+
+— and every prompt edit is live in the next session. `doctor` then reports
+`running from source`.
+
 ## Commands
 
 | Command | What it does |
@@ -70,6 +108,7 @@ Fork PRs work without adding remotes: GitHub serves `refs/pull/<N>/head` from th
 - **Nothing is posted without asking.** Reviews print to your terminal. `--post` additionally requires an explicit confirmation showing the exact comment body. `/codex-pr-reviewer:sweep` cannot post at all.
 - **Local paths are stripped** from review output before it is saved, so a posted comment never leaks your filesystem layout.
 - **Cleanup is precise.** The plugin records what it created in a manifest and `/codex-pr-reviewer:clean` removes only that — it will not touch unrelated worktrees or branches.
+- **A stale install cannot post.** The rules above only hold if the running copy is the one you edited, so the preflight checks that and `--post` is withdrawn when it is not. See [Updating](#updating).
 
 ## Cache layout
 

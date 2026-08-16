@@ -243,5 +243,98 @@ check "clone is gone" "$([[ -d "$HOST" ]] && echo present || echo gone)" "gone"
 check "manifest is emptied" \
   "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key"')" "0"
 
+note "doctor detects a stale installed copy"
+# Regression: an edited command prompt reached neither the installed copy nor a
+# running session, and nothing said so. Every safety rule that decides whether a
+# review may be posted lives in those prompts, so a silently stale install means
+# --post is guarded by rules that are not the ones on disk.
+#
+# Simulate Claude Code's layout: a marketplace holding the source, and a copy of
+# it under <config>/plugins/cache/<marketplace>/<plugin>/<version>.
+CONFIG="$SANDBOX/config"
+MK="$SANDBOX/mk"
+INSTALLED="$CONFIG/plugins/cache/test-mk/codex-pr-reviewer/9.9.9"
+mkdir -p "$MK/.claude-plugin" "$MK/plugins" "$CONFIG/plugins" "$(dirname "$INSTALLED")"
+cp -R "$ROOT/plugins/codex-pr-reviewer" "$MK/plugins/codex-pr-reviewer"
+cp -R "$MK/plugins/codex-pr-reviewer" "$INSTALLED"
+cat >"$MK/.claude-plugin/marketplace.json" <<JSON
+{"name":"test-mk","owner":{"name":"t"},
+ "plugins":[{"name":"codex-pr-reviewer","source":"./plugins/codex-pr-reviewer"}]}
+JSON
+cat >"$CONFIG/plugins/known_marketplaces.json" <<JSON
+{"test-mk":{"source":{"source":"directory","path":"$MK"},"installLocation":"$MK"}}
+JSON
+
+# `gh` and `codex` are stubbed so the preflight stays offline; the assertions
+# below are about the plugin check, but doctor's overall ok covers all four.
+mkdir -p "$SANDBOX/doctorstub"
+cat >"$SANDBOX/doctorstub/gh" <<'STUB'
+#!/bin/sh
+case "$1" in
+  --version) echo "gh version 0.0.0 (stub)" ;;
+  auth) echo "  - Active account: true (account stub-user)" ;;
+esac
+exit 0
+STUB
+cat >"$SANDBOX/doctorstub/codex" <<'STUB'
+#!/bin/sh
+case "$1" in
+  --version) echo "codex-cli 0.0.0" ;;
+  login) echo "Logged in using stub" >&2 ;;
+esac
+exit 0
+STUB
+chmod +x "$SANDBOX/doctorstub/gh" "$SANDBOX/doctorstub/codex"
+
+doctor_json() {
+  CLAUDE_CONFIG_DIR="$CONFIG" PATH="$SANDBOX/doctorstub:$PATH" \
+    node "$1/scripts/pr-workspace.mjs" doctor --json 2>/dev/null
+}
+field() {
+  node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{
+    const r=JSON.parse(s);const [head,tail]=process.argv[1].split(".");
+    console.log(String(tail?r.checks.find(c=>c.name===head)[tail]:r[head]));
+  })' "$1"
+}
+
+out="$(doctor_json "$INSTALLED")"
+check "an in-sync copy is not stale" "$(printf '%s' "$out" | field stale)" "false"
+contains "in-sync copy names its marketplace" "$(printf '%s' "$out" | field plugin.detail)" "matches test-mk"
+
+# The source tree itself is never stale: `claude --plugin-dir <source>` and a
+# symlinked install both run the very directory they would be compared against.
+out="$(doctor_json "$MK/plugins/codex-pr-reviewer")"
+contains "running from source is reported as such" \
+  "$(printf '%s' "$out" | field plugin.detail)" "running from source"
+
+# Now edit the source the way any prompt change does.
+echo "- an edited safety rule" >>"$MK/plugins/codex-pr-reviewer/commands/review.md"
+out="$(doctor_json "$INSTALLED")"
+check "an edited prompt makes the copy stale" "$(printf '%s' "$out" | field stale)" "true"
+contains "the changed prompt is named" "$(printf '%s' "$out" | field plugin.detail)" "commands/review.md"
+remedy="$(printf '%s' "$out" | field plugin.remedy)"
+contains "the remedy is runnable" "$remedy" "claude plugin update codex-pr-reviewer@test-mk"
+contains "the remedy says to restart" "$remedy" "restart Claude Code"
+# Warn-level: a stale copy still reviews correctly. Failing the preflight would
+# stop every review during development, which is not what staleness costs.
+check "staleness does not fail the preflight" "$(printf '%s' "$out" | field ok)" "true"
+
+# A file dropped upstream is stale too — the command it defines still loads.
+# Re-sync first, so the leftover is the only difference left to find.
+cp "$MK/plugins/codex-pr-reviewer/commands/review.md" "$INSTALLED/commands/review.md"
+printf 'a command deleted upstream\n' >"$INSTALLED/commands/removed.md"
+out="$(doctor_json "$INSTALLED")"
+check "a leftover file makes the copy stale" "$(printf '%s' "$out" | field stale)" "true"
+check "the leftover is the only difference" \
+  "$(printf '%s' "$out" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>console.log(JSON.parse(s).checks.find(c=>c.name==="plugin").changed.join(",")))')" \
+  "commands/removed.md"
+
+# An unknown marketplace layout must not fail the preflight: plenty of installs
+# have no local source to compare against at all.
+rm -f "$CONFIG/plugins/known_marketplaces.json"
+out="$(doctor_json "$INSTALLED")"
+check "no known marketplace is not stale" "$(printf '%s' "$out" | field stale)" "false"
+contains "no source is stated plainly" "$(printf '%s' "$out" | field plugin.detail)" "no local source"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]
