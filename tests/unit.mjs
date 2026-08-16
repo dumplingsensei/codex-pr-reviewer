@@ -24,7 +24,9 @@ const {
   slugToDir,
   entryKey,
   hashPluginDir,
-  diffFileHashes
+  diffFileHashes,
+  isInsideDir,
+  digestOf
 } = await import(path.join(pluginDir, "scripts", "pr-workspace.mjs"));
 
 let failures = 0;
@@ -145,6 +147,38 @@ const shipped = hashPluginDir(pluginDir);
 eq("hashes the command prompts", shipped.has("commands/review.md"), true);
 eq("keys are relative to the root", shipped.has("scripts/pr-workspace.mjs"), true);
 eq("a tree matches itself", diffFileHashes(shipped, hashPluginDir(pluginDir)), []);
+
+describe("isInsideDir");
+// Paths that do not exist on disk, so the assertions are about the path algebra
+// rather than about whatever /tmp happens to be a symlink to today.
+const reviewsRoot = "/nonexistent-cache/reviews";
+eq("a file in the directory", isInsideDir(reviewsRoot, `${reviewsRoot}/o__r-pr7.md`), true);
+eq("the directory itself is not inside itself", isInsideDir(reviewsRoot, reviewsRoot), false);
+eq("an unrelated path", isInsideDir(reviewsRoot, "/nonexistent-cache/elsewhere/x.md"), false);
+eq("a traversal that escapes", isInsideDir(reviewsRoot, `${reviewsRoot}/../elsewhere/x.md`), false);
+eq("a traversal that lands back inside", isInsideDir(reviewsRoot, `${reviewsRoot}/../reviews/x.md`), true);
+// The string-prefix version of this check calls a sibling directory a child.
+eq("a sibling sharing a prefix", isInsideDir(reviewsRoot, "/nonexistent-cache/reviews-old/x.md"), false);
+
+describe("digestOf");
+eq("known sha256", digestOf(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+eq("differs on one byte", digestOf("a") === digestOf("b"), false);
+
+describe("tool grants");
+// Posting is the one irreversible act here, so only the command that posts may
+// hold a grant that can reach it — and it reaches it through the script, not
+// through `gh`. A blanket Bash(gh:*) would also carry `gh pr review`,
+// `gh pr merge`, and `gh api` into commands that must never use them.
+for (const command of ["review.md", "list.md", "sweep.md", "clean.md"]) {
+  const front = fs.readFileSync(path.join(pluginDir, "commands", command), "utf8").split("---")[1];
+  const grants = /allowed-tools:(.*)/.exec(front)[1];
+  eq(`${command} has no blanket gh grant`, grants.includes("Bash(gh:*)"), false);
+  eq(`${command} has no blanket git grant`, grants.includes("Bash(git:*)"), false);
+}
+const reviewGrants = /allowed-tools:(.*)/.exec(
+  fs.readFileSync(path.join(pluginDir, "commands", "review.md"), "utf8")
+)[1];
+eq("review.md reaches gh only through the script", reviewGrants.includes("gh"), false);
 
 describe("release stamps");
 // Each command prompt names the version it was written for, and compares it at

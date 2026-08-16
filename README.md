@@ -105,7 +105,8 @@ Fork PRs work without adding remotes: GitHub serves `refs/pull/<N>/head` from th
 ## Safety
 
 - **PR content is untrusted input.** Every Codex run passes `-s read-only` explicitly rather than relying on config defaults, and the plugin never runs the PR's build, tests, or hooks. The commands instruct Claude to treat text inside a diff as data to review, never as instructions to follow.
-- **Nothing is posted without asking.** Reviews print to your terminal. `--post` additionally requires an explicit confirmation showing the exact comment body. `/codex-pr-reviewer:sweep` cannot post at all.
+- **Nothing is posted without asking — and not everything can be posted.** Reviews print to your terminal, and `--post` additionally requires an explicit confirmation showing the exact comment body. Publishing then goes through `pr-workspace.mjs post`, which refuses, in code, any file that is not a review this plugin wrote, that belongs to a different PR, that came from a run Codex produced no output for, or whose bytes are not the ones that were approved. Those rules used to live only in the command prompt, where a stale copy or a persuasive diff could get around them.
+- **Only the command that posts can reach posting.** `/codex-pr-reviewer:review` is granted `Bash(node:*)` and nothing else — it reaches `git` and `gh` through the script, which is where the checks are. `/codex-pr-reviewer:sweep` holds three read-only `gh` subcommands, so it cannot comment on a PR at all, and `/codex-pr-reviewer:clean` holds two read-only `git` ones.
 - **Local paths are stripped** from review output before it is saved, so a posted comment never leaks your filesystem layout.
 - **Cleanup is precise.** The plugin records what it created in a manifest and `/codex-pr-reviewer:clean` removes only that — it will not touch unrelated worktrees or branches.
 - **A stale install cannot post.** The rules above only hold if the running copy is the one you edited, so the preflight checks that and `--post` is withdrawn when it is not. See [Updating](#updating).
@@ -131,6 +132,8 @@ pr-workspace.mjs doctor  [--json]
                  review  <pr> [--repo …] [--context] [--model M] [--effort E]
                               [--profile P] [--trust-worktree] [--no-prepare]
                               [--dry-run] [--json]
+                 post    <pr> --review <path> --confirm <digest> [--repo …]
+                              [--again] [--dry-run] [--json]
                  list    [--repo owner/repo] [--json]
                  clean   [--pr N | --repo owner/repo | --all | --older-than DAYS]
                          [--purge-clones] [--dry-run] [--json]
@@ -154,6 +157,16 @@ largest open PR is 4,111 lines across 66 files. Pass `--order newest` for queue
 order. The skipped large PRs are named before the run, so nothing is dropped
 silently, and a specific PR is always reachable via
 `/codex-pr-reviewer:review <pr>`.
+
+`post` is the only path to a published comment. `review` prints a `Digest` line
+alongside `Saved to …`; `post` takes that digest as `--confirm` and refuses to
+publish a file whose bytes do not match it. Re-running on a PR is normal and
+leaves several saved reviews behind, so "the review for PR #42" is ambiguous in
+a way that "the review with this digest" is not — the digest is what carries an
+approval from the body someone actually read to the bytes that get posted. It is
+not a secret, and no refusal quotes it back: a caller that has lost it has also
+lost the approval it stood for. A successful post is recorded on the PR's
+manifest entry, so posting the same review twice needs an explicit `--again`.
 
 `--context` passes the PR title and description to the reviewer as stated intent, explicitly framed as a claim rather than as instructions. It is off by default so runs stay comparable to a plain `codex review`.
 
