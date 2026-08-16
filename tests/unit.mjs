@@ -26,7 +26,8 @@ const {
   hashPluginDir,
   diffFileHashes,
   isInsideDir,
-  digestOf
+  digestOf,
+  selectReviewFiles
 } = await import(path.join(pluginDir, "scripts", "pr-workspace.mjs"));
 
 let failures = 0;
@@ -159,6 +160,30 @@ eq("a traversal that escapes", isInsideDir(reviewsRoot, `${reviewsRoot}/../elsew
 eq("a traversal that lands back inside", isInsideDir(reviewsRoot, `${reviewsRoot}/../reviews/x.md`), true);
 // The string-prefix version of this check calls a sibling directory a child.
 eq("a sibling sharing a prefix", isInsideDir(reviewsRoot, "/nonexistent-cache/reviews-old/x.md"), false);
+
+describe("selectReviewFiles");
+const listing = [
+  "o__r-pr7-2026-01-01T00-00-00-000Z.md",
+  "o__r-pr7-2026-02-02T00-00-00-000Z.md",
+  "o__r-pr70-2026-01-01T00-00-00-000Z.md",
+  "o__other-pr7-2026-01-01T00-00-00-000Z.md",
+  "manifest.json"
+];
+eq(
+  "newest first, one PR",
+  selectReviewFiles(listing, [{ repo: "o/r", number: 7 }]),
+  ["o__r-pr7-2026-02-02T00-00-00-000Z.md", "o__r-pr7-2026-01-01T00-00-00-000Z.md"]
+);
+// The trailing dash in the prefix is what keeps #7 from swallowing #70.
+eq("a longer number is not a prefix match", selectReviewFiles(listing, [{ repo: "o/r", number: 70 }]), [
+  "o__r-pr70-2026-01-01T00-00-00-000Z.md"
+]);
+eq("another repo, same number", selectReviewFiles(listing, [{ repo: "o/other", number: 7 }]), [
+  "o__other-pr7-2026-01-01T00-00-00-000Z.md"
+]);
+eq("repo case does not matter", selectReviewFiles(listing, [{ repo: "O/R", number: 7 }]).length, 2);
+eq("no entries selects nothing", selectReviewFiles(listing, []), []);
+eq("an unprepared PR selects nothing", selectReviewFiles(listing, [{ repo: "o/r", number: 9 }]), []);
 
 describe("digestOf");
 eq("known sha256", digestOf(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
