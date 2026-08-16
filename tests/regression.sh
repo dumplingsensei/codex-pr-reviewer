@@ -378,16 +378,26 @@ check "and that review is still there" \
 
 # A review that could not be deleted must hold its PR in the manifest: reviews
 # of a PR no longer recorded there can never be selected again.
+#
+# The obstruction is a directory sitting where a review file is expected, which
+# `unlink` refuses for every user. A read-only parent directory would not do:
+# root ignores directory permissions, so the suite would pass as you and fail in
+# any container that runs it as root.
+OBSTRUCTION="$REVIEWS/o__r-pr7-2026-04-04T00-00-00-000Z.md"
+mkdir "$OBSTRUCTION"
 DIGEST="$(plan_field reviewsDigest)"
-chmod 500 "$REVIEWS"
 out="$(node "$SCRIPT" clean --all --purge-reviews --confirm-reviews "$DIGEST" 2>&1)"
-chmod 700 "$REVIEWS"
 contains "a failed review deletion is reported" "$out" "could not remove review"
 check "its entry stays for a retry" "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key"')" "1"
+check "the reviews that could be deleted were" \
+  "$(ls "$REVIEWS" | grep -c '^o__r-pr7-2026-0[123]-')" "0"
 
+# Cleared, the retry finishes the job — including a review saved since.
+rmdir "$OBSTRUCTION"
+mk_review "$REVIEWS/o__r-pr7-2026-05-05T00-00-00-000Z.md"
 DIGEST="$(plan_field reviewsDigest)"
 out="$(node "$SCRIPT" clean --all --purge-reviews --confirm-reviews "$DIGEST" 2>&1)"
-check "the retry removes all three" "$(printf '%s' "$out" | grep -c '^  - review ')" "3"
+check "the retry removes what is left" "$(printf '%s' "$out" | grep -c '^  - review ')" "1"
 check "another repo's colliding review survives" \
   "$([[ -f "$REVIEWS/o__r-pr7-archive-pr9-$STAMP.md" ]] && echo present || echo gone)" "present"
 check "an unrelated review survives" \
