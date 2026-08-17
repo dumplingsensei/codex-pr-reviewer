@@ -109,7 +109,7 @@ Fork PRs work without adding remotes: GitHub serves `refs/pull/<N>/head` from th
 - **Only the command that posts can reach posting.** `/codex-pr-reviewer:review` is granted `Bash(node:*)` and nothing else — it reaches `git` and `gh` through the script, which is where the checks are. `/codex-pr-reviewer:sweep` holds three read-only `gh` subcommands, so it cannot comment on a PR at all, and `/codex-pr-reviewer:clean` holds two read-only `git` ones.
 - **Local paths are stripped** from review output before it is saved, so a posted comment never leaks your filesystem layout.
 - **Cleanup is precise.** The plugin records what it created in a manifest and `/codex-pr-reviewer:clean` removes only that — it will not touch unrelated worktrees or branches. Saved reviews are output rather than scratch state, so they survive every clean unless `--purge-reviews` asks for them by name, and that deletion is bound to the list a dry run showed.
-- **A review in flight is left alone.** A running review is reading a worktree and has not written its output yet, so cleanup holds its PR back — worktree, branches, and shared clone included — and says which, rather than deleting state out from under a paid run.
+- **A review in flight is left alone.** A running review is reading a worktree and has not written its output yet, so cleanup holds its PR back — worktree, branches, and shared clone included — and says which, rather than deleting state out from under a paid run. This is a guard, not a lock: it does not close the window described under [Script reference](#script-reference), where a clean cannot see a review that had not started yet.
 - **A stale install cannot post.** The rules above only hold if the running copy is the one you edited, so the preflight checks that and `--post` is withdrawn when it is not. See [Updating](#updating).
 
 ## Cache layout
@@ -171,6 +171,14 @@ not a secret, and no refusal quotes it back: a caller that has lost it has also
 lost the approval it stood for. A successful post is recorded on the PR's
 manifest entry, so posting the same review twice needs an explicit `--again`.
 
+`clean --pr` accepts the same references `review` does, with one difference
+worth knowing: a **bare number is not scoped to the current repository**.
+`review 42` resolves the repo from the directory you are in, while
+`clean --pr 42` selects PR #42 in every repository the manifest knows about.
+That is usually what is wanted when clearing up, and `/codex-pr-reviewer:clean`
+names the repository each entry lives in before it asks — but pass
+`owner/repo#42`, or add `--repo`, when only one is meant.
+
 `clean --purge-reviews` is the only way to delete saved reviews, and it is
 deliberately awkward. It is not implied by `--all` the way `--purge-clones` is:
 a clone can be re-fetched, a review is the output of a paid run and cannot be
@@ -198,6 +206,16 @@ expires, because a recycled pid must not be able to block cleanup forever.
 then a finished review re-records its own PR so its output stays selectable —
 a backstop, not a substitute: an overridden run may already have lost the
 worktree it was reading.
+
+The guard is not synchronization, and one window is left open deliberately: a
+`clean` that took its snapshot before a review recorded itself cannot hold back
+a marker that does not exist yet, so that review may still lose the worktree it
+is reading and fail. The cost is bounded rather than avoided — the review
+re-records its own PR when it saves, so an output that *was* produced stays
+reachable. `prepare` is likewise free to refresh a worktree a review is reading,
+which is what re-running on a PR mid-review does. Closing either properly means
+locking, and a lock that outlives a crashed run is a worse failure than the one
+it prevents.
 
 `--context` passes the PR title and description to the reviewer as stated intent, explicitly framed as a claim rather than as instructions. It is off by default so runs stay comparable to a plain `codex review`.
 
@@ -235,6 +253,14 @@ Point it at any public PR:
 ./tests/integration.sh cli/cli 13899
 ```
 
+CI runs the two offline suites on every push and pull request, across Node 18 —
+the documented floor — and 22, on Linux and macOS. The integration suite runs
+weekly and on demand instead: it needs the network and an upstream PR that still
+exists, and neither of those should be able to block a commit. It stubs `codex`
+there for the same reason the suite never calls it — the binary is needed only
+to satisfy `doctor`'s preflight, which would otherwise turn every CI run into a
+silent skip.
+
 ## License
 
-MIT
+[MIT](LICENSE)

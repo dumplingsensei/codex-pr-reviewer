@@ -1,0 +1,84 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "owner/repo for the integration suite"
+        default: "cli/cli"
+      pr:
+        description: "pull request number for the integration suite"
+        default: "13899"
+  schedule:
+    # The integration suite is the only thing that proves the worktree diff is
+    # GitHub's diff, and it needs the network. Weekly, so that assertion does
+    # not depend on someone remembering to run it.
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    # unit + regression need no network, no GitHub account, and never touch the
+    # real cache, so they gate every push. The matrix covers the documented
+    # floor (Node 18) and the platform the plugin is developed on.
+    name: offline · node ${{ matrix.node }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: ["18", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # Pure helpers, plus the release stamps that keep four version literals in
+      # step. A stamp left behind at release time silently disables the only
+      # signal a session gets that its prompts are older than the plugin.
+      - run: node tests/unit.mjs
+      # Every case here is a defect that shipped once, driven against synthetic
+      # repositories and a stub `codex` in an isolated XDG_CACHE_HOME.
+      - run: ./tests/regression.sh
+
+  integration:
+    # Real git and gh against a public PR; never invokes Codex. Scheduled and
+    # manual only: it depends on the network and on an upstream PR still being
+    # there, and neither of those should be able to block a commit.
+    name: integration · real git and gh
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Stub the Codex CLI
+        # This suite never invokes Codex — it asserts that what Codex would be
+        # handed is byte-for-byte GitHub's diff. `codex` is needed only because
+        # the suite gates on `doctor`, which refuses an unhealthy toolchain and
+        # would otherwise turn every CI run into a silent SKIP.
+        run: |
+          mkdir -p "$RUNNER_TEMP/stub"
+          cat >"$RUNNER_TEMP/stub/codex" <<'STUB'
+          #!/bin/sh
+          case "$1" in
+            --version) echo "codex-cli 0.0.0 (ci stub)" ;;
+            login) echo "Logged in using a CI stub" >&2 ;;
+          esac
+          exit 0
+          STUB
+          chmod +x "$RUNNER_TEMP/stub/codex"
+          echo "$RUNNER_TEMP/stub" >>"$GITHUB_PATH"
+      - name: Integration suite
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./tests/integration.sh \
+            "${{ github.event.inputs.repo || 'cli/cli' }}" \
+            "${{ github.event.inputs.pr || '13899' }}"

@@ -49,6 +49,7 @@ Raw slash-command arguments:
 ## Notes
 
 - The script only removes what it recorded in its own manifest, so it will not touch unrelated worktrees or branches.
+- `--pr` takes `42`, `owner/repo#42`, or a PR URL — but a **bare number is not scoped to the current repository** the way `/codex-pr-reviewer:review 42` is. It selects PR #42 in *every* repository the manifest knows about, which is usually what you want when clearing up and occasionally not. This is why step 2 names the repository each entry lives in: read those back before confirming, and say `owner/repo#42` or add `--repo` when only one is meant.
 - `--all` implies `--purge-clones`, which also deletes cached clones under the cache directory. Point this out before confirming, since re-cloning a large repo is slow.
 - Cached clones are shared between PRs of the same repository. They are purged only after every selected entry has been processed, and only when no remaining entry still needs them.
 - A missing worktree directory does **not** mean there is nothing to clean: the `codex-pr/*` branches and plugin refs still live in the host repository, and the manifest entry is the only record of them. `/codex-pr-reviewer:list` flags these; cleaning still removes them.

@@ -54,7 +54,7 @@ You are reading code written by someone else, fetched from the internet.
 
 5. **Run the review.**
    ```bash
-   node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" review <pr> [--repo …] [--context] [--effort …] [--model …] --no-prepare
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" review <pr> [--repo …] [--context] [--effort …] [--model …] [--profile …] --no-prepare
    ```
    `--no-prepare` is safe here because step 3 already prepared the worktree. Add `--dry-run` first if the user asks what will actually be run. For background mode, launch it with `Bash(run_in_background: true)`, then tell the user the review is running and stop for this turn — do not poll.
 
