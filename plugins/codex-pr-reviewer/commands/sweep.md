@@ -18,7 +18,7 @@ Core constraint:
 
 1. **Preflight** with `node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" doctor --json`. Stop on failure.
 
-   **These instructions were written for plugin version `0.6.0`.** If the report's `pluginVersion` differs, or `stale` is true, the prompts this session loaded are older than the installed plugin. Say so — with the `plugin` check's `remedy` — as part of step 4's confirmation, so the user decides whether to spend a paid batch on outdated instructions. This command cannot post, so it is a warning, not a block.
+   **These instructions were written for plugin version `0.7.0`.** If the report's `pluginVersion` differs, or `stale` is true, the prompts this session loaded are older than the installed plugin. Say so — with the `plugin` check's `remedy` — as part of step 4's confirmation, so the user decides whether to spend a paid batch on outdated instructions. This command cannot post, so it is a warning, not a block.
 
 2. **Gather candidates**, same sources as `/codex-pr-reviewer:list`:
    - With `--repo owner/repo`:
@@ -56,7 +56,7 @@ Core constraint:
 
    A review that exited non-zero or produced no output is a **failure**, not a clean verdict. Say so in its row rather than recording it as "no findings" — silently reading a failed run as a passing one is the worst outcome this command can produce.
 
-8. **Point at the artifacts.** Each review is saved under the cache directory; list the paths. Remind the user that `/codex-pr-reviewer:clean` removes the worktrees when they are done.
+8. **Point at the artifacts.** Each review is saved under the cache directory; list the paths. Remind the user that `/codex-pr-reviewer:clean` removes the worktrees when they are done — and that under `--parallel` it holds back any PR whose review has not returned, since that worktree is still being read. Cleaning is a job for after the digest, not alongside it.
 
 ## Notes
 

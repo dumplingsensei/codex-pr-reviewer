@@ -109,6 +109,7 @@ Fork PRs work without adding remotes: GitHub serves `refs/pull/<N>/head` from th
 - **Only the command that posts can reach posting.** `/codex-pr-reviewer:review` is granted `Bash(node:*)` and nothing else — it reaches `git` and `gh` through the script, which is where the checks are. `/codex-pr-reviewer:sweep` holds three read-only `gh` subcommands, so it cannot comment on a PR at all, and `/codex-pr-reviewer:clean` holds two read-only `git` ones.
 - **Local paths are stripped** from review output before it is saved, so a posted comment never leaks your filesystem layout.
 - **Cleanup is precise.** The plugin records what it created in a manifest and `/codex-pr-reviewer:clean` removes only that — it will not touch unrelated worktrees or branches. Saved reviews are output rather than scratch state, so they survive every clean unless `--purge-reviews` asks for them by name, and that deletion is bound to the list a dry run showed.
+- **A review in flight is left alone.** A running review is reading a worktree and has not written its output yet, so cleanup holds its PR back — worktree, branches, and shared clone included — and says which, rather than deleting state out from under a paid run.
 - **A stale install cannot post.** The rules above only hold if the running copy is the one you edited, so the preflight checks that and `--post` is withdrawn when it is not. See [Updating](#updating).
 
 ## Cache layout
@@ -120,6 +121,7 @@ manifest.json                     what the plugin created, for precise cleanup
 repos/owner__repo/                cached clones (only for repos you lack locally)
 worktrees/owner__repo/pr-42/      the isolated checkout Codex reads
 reviews/owner__repo-pr42-*.md     saved review documents
+runs/owner__repo-pr42-<pid>.json  a review in flight, so cleanup leaves it alone
 ```
 
 ## Script reference
@@ -137,7 +139,7 @@ pr-workspace.mjs doctor  [--json]
                  list    [--repo owner/repo] [--json]
                  clean   [--pr N | --repo owner/repo | --all | --older-than DAYS]
                          [--purge-clones] [--purge-reviews --confirm-reviews <digest>]
-                         [--dry-run] [--json]
+                         [--include-running] [--dry-run] [--json]
 ```
 
 `review --dry-run` prints the exact `codex` command it would run, without
@@ -183,6 +185,20 @@ review that will not delete holds its PR in the manifest, because reviews of a P
 absent from the manifest can never be selected again — which is also why every
 run reports how many it kept.
 
+A review that is *still running* is the other way that reachability is lost, and
+the digest cannot catch it: the run has not written its file yet, so it appears
+in no snapshot, and cleaning its PR meanwhile removes the manifest entry any
+later `--purge-reviews` would have selected it through. So `review` records a
+small marker under `runs/` before handing work to Codex — pid, host, start time,
+and where it will save — and `clean` holds those entries back instead, worktree
+and branches included, since the run is reading that checkout. A marker whose
+process is gone stands for nothing and is swept; one older than six hours
+expires, because a recycled pid must not be able to block cleanup forever.
+`--include-running` overrides the guard for a marker left by a crashed run, and
+then a finished review re-records its own PR so its output stays selectable —
+a backstop, not a substitute: an overridden run may already have lost the
+worktree it was reading.
+
 `--context` passes the PR title and description to the reviewer as stated intent, explicitly framed as a claim rather than as instructions. It is off by default so runs stay comparable to a plain `codex review`.
 
 `--trust-worktree` adds a per-invocation `projects."<worktree>".trust_level="trusted"` override. It is off by default and never writes to `~/.codex/config.toml`. Testing showed Codex does not gate on project trust for read-only reviews, so you should not normally need it.
@@ -197,12 +213,15 @@ node tests/unit.mjs          # pure helpers, no network
 
 `regression.sh` pins the defects found in code review — the symlinked-entrypoint
 guard, `--dry-run` side effects, manifest corruption handling, shared-clone
-purging, review output hygiene, everything `post` must refuse, and the
-`--purge-reviews` guards. It runs entirely against synthetic repositories in an
-isolated `XDG_CACHE_HOME`, so it needs no network or GitHub account and never
-touches your real cache. Its failure cases are forced by mechanisms that do not
-depend on who runs it — a directory where a file is expected, not a read-only
-parent that root would ignore.
+purging, review output hygiene, everything `post` must refuse, the
+`--purge-reviews` guards, and both halves of the in-flight race: a clean holding
+back a live run, and a review re-recording its PR when one is overridden. It
+drives that case with a stub `codex` that runs a real `clean` mid-review, so the
+concurrency is genuine rather than simulated. It runs entirely against synthetic
+repositories in an isolated `XDG_CACHE_HOME`, so it needs no network or GitHub
+account and never touches your real cache. Its failure cases are forced by
+mechanisms that do not depend on who runs it — a directory where a file is
+expected, not a read-only parent that root would ignore.
 
 The integration suite is the one that matters: it prepares a real fork PR and
 asserts that the worktree's diff against the pinned merge-base is byte-identical

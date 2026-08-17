@@ -32,8 +32,8 @@ You are reading code written by someone else, fetched from the internet.
    ```
    If a check fails, show its `remedy` and stop. Do not try to work around a missing or unauthenticated tool. The `plugin` check is warn-level: it never fails the preflight on its own, so read it explicitly.
 
-   **These instructions were written for plugin version `0.6.0`.** The rules below are the only thing standing between a failed or unapproved review and someone else's PR, so a run following an outdated copy of them must not publish:
-   - If the report's `pluginVersion` is not `0.6.0`, the prompt you are following was loaded at session start from an older install than the script that just answered. Restarting Claude Code is what fixes that.
+   **These instructions were written for plugin version `0.7.0`.** The rules below are the only thing standing between a failed or unapproved review and someone else's PR, so a run following an outdated copy of them must not publish:
+   - If the report's `pluginVersion` is not `0.7.0`, the prompt you are following was loaded at session start from an older install than the script that just answered. Restarting Claude Code is what fixes that.
    - If `stale` is true, the installed copy no longer matches its source — show the `plugin` check's `remedy` verbatim.
 
    On either signal: say so in one line, and treat `--post` as **unavailable for the rest of this run**. Review, print, and save exactly as normal; just do not offer to publish, and do not publish if asked. Everything else proceeds.
@@ -59,6 +59,8 @@ You are reading code written by someone else, fetched from the internet.
    `--no-prepare` is safe here because step 3 already prepared the worktree. Add `--dry-run` first if the user asks what will actually be run. For background mode, launch it with `Bash(run_in_background: true)`, then tell the user the review is running and stop for this turn — do not poll.
 
 6. **Show the result.** Print Codex's output exactly as it came back. The script saves a copy and prints `Saved to <path>` followed by `Digest <value>` — that path is what step 7 posts, and that digest is what authorizes posting it. Mention the path once; keep the digest for step 7.
+
+   If it also logs `Re-recorded <pr> in the manifest`, a `clean` removed this PR's record while the review was running. The review itself is fine and postable; say it happened, because the worktree and branches it names are gone.
 
    If the script exits non-zero, or the review body is empty, or it reads `_Codex produced no review output._`, then **the review failed**. Say so, show any stderr, and stop. Do not continue to step 7 — a failed run must never be published.
 

@@ -10,6 +10,7 @@
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,7 +31,8 @@ const {
   reviewStamp,
   reviewFileMatches,
   selectReviewFiles,
-  reviewSnapshotDigest
+  reviewSnapshotDigest,
+  runIsLive
 } = await import(path.join(pluginDir, "scripts", "pr-workspace.mjs"));
 
 let failures = 0;
@@ -234,6 +236,36 @@ eq("empty is stable", reviewSnapshotDigest([]), reviewSnapshotDigest([]));
 describe("digestOf");
 eq("known sha256", digestOf(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
 eq("differs on one byte", digestOf("a") === digestOf("b"), false);
+
+describe("runIsLive");
+// A live marker is what stops `clean` deleting the worktree a review is reading.
+// Reading a dead marker as live blocks cleanup; reading a live one as dead is
+// what the whole guard exists to prevent — so both directions are pinned here.
+// A dead pid needs a process to outlive, so that case is in regression.sh.
+const marker = (extra) => ({
+  key: "o/r#7",
+  pid: process.pid,
+  host: os.hostname(),
+  startedAt: new Date().toISOString(),
+  ...extra
+});
+const longAgo = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+eq("this very process", runIsLive(marker()), true);
+// No review takes this long, and a recycled pid must not block cleanup forever.
+eq("older than any real review", runIsLive(marker({ startedAt: longAgo })), false);
+eq("no start time", runIsLive(marker({ startedAt: undefined })), false);
+eq("an unreadable start time", runIsLive(marker({ startedAt: "whenever" })), false);
+// `process.kill(0, 0)` probes our own process group and succeeds, so a marker
+// with no usable pid would otherwise report every stale run as a live one.
+eq("pid 0", runIsLive(marker({ pid: 0 })), false);
+eq("a negative pid", runIsLive(marker({ pid: -1 })), false);
+eq("a pid that is a string", runIsLive(marker({ pid: String(process.pid) })), false);
+eq("no pid at all", runIsLive(marker({ pid: undefined })), false);
+// Another machine's pid cannot be probed from here, so the age cap is all there
+// is: believed while fresh, gone once it is not.
+eq("a fresh run on another host", runIsLive(marker({ host: "elsewhere", pid: 999_999 }), Date.now(), "here"), true);
+eq("a stale run on another host", runIsLive(marker({ host: "elsewhere", startedAt: longAgo }), Date.now(), "here"), false);
+eq("the same host, injected", runIsLive(marker({ host: "here", pid: 0 }), Date.now(), "here"), false);
 
 describe("tool grants");
 // Posting is the one irreversible act here, so only the command that posts may

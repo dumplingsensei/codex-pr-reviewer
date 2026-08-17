@@ -430,6 +430,141 @@ contains "an empty clean still reports them" "$out" "Kept 2 saved reviews"
 contains "and says there was nothing to clean" "$out" "Nothing to clean."
 rm -f "$CACHE/manifest.json"
 
+note "a review in flight is not cleaned out from under itself"
+# Regression: nothing recorded that a review was running, so `clean` removed the
+# worktree codex was reading and the manifest entry its output needs — and the
+# review then wrote a file no later --purge-reviews could ever select, because
+# selection starts from the manifest entry that had just been dropped.
+rm -rf "$CACHE"
+RUN_WT="$SANDBOX/inflight-wt"
+mkdir -p "$CACHE" "$REVIEWS" "$RUN_WT" "$SANDBOX/inflight-stub"
+
+inflight_manifest() {
+  cat >"$CACHE/manifest.json" <<JSON
+{"version":1,"entries":[
+ {"key":"o/r#7","repo":"o/r","number":7,"title":"t","url":"u","state":"OPEN","author":"a",
+  "worktree":"$RUN_WT","repoDir":"$SANDBOX/none","remote":"origin","mode":"clone",
+  "headBranch":"codex-pr/7","baseBranch":"codex-pr/7-base","refs":[],
+  "headSha":"abcdef1234567890","mergeBase":"abcdef1234567890","baseRefName":"main",
+  "additions":1,"deletions":0,"changedFiles":1,"preparedAt":"2026-01-01T00:00:00.000Z"}
+]}
+JSON
+}
+json_at() {
+  node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));
+    const v=process.argv[2].split(".").reduce((o,k)=>(o == null ? o : o[k]), j);
+    console.log(Array.isArray(v) ? v.length : String(v))' "$1" "$2"
+}
+
+inflight_manifest
+mk_review "$REVIEWS/o__r-pr7-$STAMP.md"
+# A marker for a review that really is running, written the way the script does.
+sleep 120 &
+LIVE_PID=$!
+node -e 'const fs=require("node:fs"),os=require("node:os"),[,dir,pid,saving]=process.argv;
+  fs.mkdirSync(dir,{recursive:true});
+  fs.writeFileSync(`${dir}/o__r-pr7-${pid}.json`, JSON.stringify({
+    key:"o/r#7",repo:"o/r",number:7,pid:Number(pid),host:os.hostname(),
+    startedAt:new Date().toISOString(),reviewPath:saving}))' \
+  "$CACHE/runs" "$LIVE_PID" "$REVIEWS/o__r-pr7-$STAMP.md"
+
+node "$SCRIPT" clean --all --purge-reviews --dry-run --json >"$SANDBOX/inflight-plan.json" 2>/dev/null
+check "the plan removes nothing while a review runs" \
+  "$(json_at "$SANDBOX/inflight-plan.json" wouldRemove)" "0"
+check "and plans no review deletion" "$(json_at "$SANDBOX/inflight-plan.json" reviews)" "0"
+check "the running review is reported" "$(json_at "$SANDBOX/inflight-plan.json" running)" "1"
+check "and marked as held" "$(json_at "$SANDBOX/inflight-plan.json" running.0.held)" "true"
+
+out="$(node "$SCRIPT" clean --all --purge-reviews 2>&1)"
+contains "a real run holds the entry back" "$out" "Held back 1 entry"
+contains "and names the PR it held" "$out" "o/r#7"
+contains "and how to override it" "$out" "--include-running"
+check "it does not claim there was nothing to clean" \
+  "$(printf '%s' "$out" | grep -c 'Nothing to clean')" "0"
+# An empty deletion set is nothing to approve, so the digest is not demanded.
+check "and asks for no confirmation it has no subject for" \
+  "$(printf '%s' "$out" | grep -c 'confirm-reviews')" "0"
+check "the held entry stays in the manifest" \
+  "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key": "o/r#7"')" "1"
+check "the worktree being read survives" \
+  "$([[ -d "$RUN_WT" ]] && echo present || echo gone)" "present"
+check "so does its saved review" "$(ls "$REVIEWS" | wc -l | tr -d ' ')" "1"
+
+# A cached clone shared with a held entry has to survive the batch too: it is the
+# repository the running review is reading, and --all implies --purge-clones.
+HELD_CLONE="$CACHE/repos/o__r"
+mkdir -p "$HELD_CLONE" "$SANDBOX/wt-8"
+cat >"$CACHE/manifest.json" <<JSON
+{"version":1,"entries":[
+ {"key":"o/r#7","repo":"o/r","number":7,"title":"t","url":"u","state":"OPEN","author":"a",
+  "worktree":"$RUN_WT","repoDir":"$HELD_CLONE","remote":"origin","mode":"clone",
+  "headBranch":"codex-pr/7","baseBranch":"codex-pr/7-base","refs":[],
+  "headSha":"0","mergeBase":"0","baseRefName":"main","additions":1,"deletions":0,
+  "changedFiles":1,"preparedAt":"2026-01-01T00:00:00.000Z"},
+ {"key":"o/r#8","repo":"o/r","number":8,"title":"t8","url":"u8","state":"OPEN","author":"a",
+  "worktree":"$SANDBOX/wt-8","repoDir":"$HELD_CLONE","remote":"origin","mode":"clone",
+  "headBranch":"codex-pr/8","baseBranch":"codex-pr/8-base","refs":[],
+  "headSha":"0","mergeBase":"0","baseRefName":"main","additions":1,"deletions":0,
+  "changedFiles":1,"preparedAt":"2026-01-01T00:00:00.000Z"}
+]}
+JSON
+out="$(node "$SCRIPT" clean --all 2>&1)"
+contains "the entry with no review running is still cleaned" "$out" "o/r#8"
+contains "and the shared clone is kept for the held one" "$out" "still used by another prepared PR"
+check "so the repository being reviewed survives" \
+  "$([[ -d "$HELD_CLONE" ]] && echo present || echo gone)" "present"
+check "and only the held entry is left" \
+  "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key"')" "1"
+
+# The override exists so a leaked guard can never wedge cleanup — and it says so.
+inflight_manifest
+out="$(node "$SCRIPT" clean --all --include-running 2>&1)"
+contains "--include-running says what it is overriding" "$out" "still running"
+check "and cleans the entry anyway" \
+  "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key"')" "0"
+
+# A killed review leaves its marker behind. A pid that is gone means the run is:
+# it must hold nothing back, and the marker must not survive the next clean.
+kill "$LIVE_PID" 2>/dev/null
+wait "$LIVE_PID" 2>/dev/null
+inflight_manifest
+mkdir -p "$RUN_WT"
+out="$(node "$SCRIPT" clean --all 2>&1)"
+check "a dead run holds nothing back" "$(printf '%s' "$out" | grep -c 'Held back')" "0"
+check "and its marker is swept" "$(ls "$CACHE/runs" 2>/dev/null | wc -l | tr -d ' ')" "0"
+check "the entry is cleaned" "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key"')" "0"
+
+# The other half of the race: a clean that overrides the guard — or that took its
+# snapshot before this run recorded itself — leaves the finished review with no
+# manifest entry, and a review whose PR is absent from the manifest can never be
+# selected again. The stub below is that clean, running while codex "reviews".
+inflight_manifest
+mkdir -p "$RUN_WT"
+rm -f "$REVIEWS"/*.md
+cat >"$SANDBOX/inflight-stub/codex" <<STUB
+#!/bin/sh
+case "\$1" in --version) echo "codex-cli stub" ; exit 0 ;; esac
+ls "$CACHE/runs" | sed 's/^/marker: /'
+node "$SCRIPT" clean --all --purge-reviews --dry-run >"$SANDBOX/held-mid-review.out" 2>&1
+node "$SCRIPT" clean --all --include-running >"$SANDBOX/override-mid-review.out" 2>&1
+echo "P1 finding from a review that outlived its manifest entry"
+exit 0
+STUB
+chmod +x "$SANDBOX/inflight-stub/codex"
+
+out="$(PATH="$SANDBOX/inflight-stub:$PATH" node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+contains "the marker is visible while the review runs" "$out" "marker: o__r-pr7-"
+contains "a clean during the review holds the entry back" \
+  "$(cat "$SANDBOX/held-mid-review.out")" "Held back 1 entry"
+contains "the override reports what it took anyway" \
+  "$(cat "$SANDBOX/override-mid-review.out")" "still running"
+contains "the finished review re-records its PR" "$out" "Re-recorded o/r#7"
+check "the entry is back in the manifest" \
+  "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key": "o/r#7"')" "1"
+check "so a later purge can still select the review" "$(plan_field reviews)" "1"
+check "and the marker is gone once the review finished" \
+  "$(ls "$CACHE/runs" 2>/dev/null | wc -l | tr -d ' ')" "0"
+
 note "doctor detects a stale installed copy"
 # Regression: an edited command prompt reached neither the installed copy nor a
 # running session, and nothing said so. Every safety rule that decides whether a

@@ -291,6 +291,179 @@ function upsertEntry(entry) {
 }
 
 /* ------------------------------------------------------------------ *
+ * run markers
+ *
+ * A review is a long, paid, read-only run against a worktree that any other
+ * process is free to delete. Nothing recorded that a run was under way, so a
+ * `clean` starting mid-review removed the worktree codex was reading and the
+ * manifest entry the review needs to stay reachable — and then the review
+ * finished and wrote its output into a directory where no later
+ * `--purge-reviews` could ever select it, because selection starts from the
+ * manifest entry that had just been dropped.
+ *
+ * One small file per running review holds what another process needs in order
+ * to decide whether that run is still real: its pid, the machine that owns it,
+ * when it started, and where it will save. `clean` holds those entries back
+ * rather than pulling state out from under them, and `review` re-records its
+ * own entry if it was cleaned anyway.
+ * ------------------------------------------------------------------ */
+
+const runsDir = () => path.join(cacheRoot(), "runs");
+
+// One marker per run, not per PR: two reviews of the same PR can overlap, and a
+// shared filename would have the first to finish delete the second's marker.
+const runMarkerPath = (repo, number, pid = process.pid) =>
+  path.join(runsDir(), `${slugToDir(repo)}-pr${number}-${pid}.json`);
+
+/**
+ * How long a marker is believed at all. A review takes minutes, so a marker
+ * older than this describes a run that is gone however alive its pid looks:
+ * pids are recycled, and a marker able to block cleanup forever would be worse
+ * than one that expires early. It is also the only bound available when the
+ * marker was written by another machine against a shared cache.
+ */
+const RUN_MARKER_TTL_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * True when a marker still stands for a review that could be running. `now` and
+ * `hostname` are injectable so both fallbacks can be tested without spawning
+ * anything.
+ */
+export function runIsLive(marker, now = Date.now(), hostname = os.hostname()) {
+  const startedAt = Date.parse(marker?.startedAt ?? "");
+  if (!Number.isFinite(startedAt) || now - startedAt > RUN_MARKER_TTL_MS) return false;
+  // Another machine's pid says nothing here, so the TTL above is all there is.
+  if (marker.host && marker.host !== hostname) return true;
+  // Signal 0 sends nothing; it only asks whether the process is there. A
+  // non-positive pid addresses a process group, so it never identifies a run.
+  if (!Number.isInteger(marker.pid) || marker.pid <= 0) return false;
+  try {
+    process.kill(marker.pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM"; // running, just not ours to signal
+  }
+}
+
+/**
+ * Every marker on disk. One whose `startedAt` is missing or unparseable ages
+ * from the file's own mtime instead, so a damaged field cannot produce a marker
+ * that never expires and holds an entry back for good.
+ */
+function readRunMarkers() {
+  let names;
+  try {
+    names = fs.readdirSync(runsDir());
+  } catch {
+    return []; // no runs directory yet is the normal state
+  }
+
+  const markers = [];
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const file = path.join(runsDir(), name);
+    let parsed = null;
+    try {
+      parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch {
+      parsed = null; // unreadable or not JSON: there is no run here to believe
+    }
+
+    // The file's own mtime is the fallback clock, and only the clock: a stat
+    // that fails must not discard a marker that parsed perfectly well.
+    let startedAt = parsed?.startedAt;
+    if (!Number.isFinite(Date.parse(startedAt))) {
+      let mtimeMs = 0;
+      try {
+        mtimeMs = fs.statSync(file).mtimeMs;
+      } catch {
+        /* no age at all, so the marker expires immediately */
+      }
+      startedAt = new Date(mtimeMs).toISOString();
+    }
+    markers.push({ ...(parsed ?? {}), startedAt, file });
+  }
+  return markers;
+}
+
+/** The live run for a manifest key, if there is one. */
+function liveRunFor(key, markers) {
+  return markers.find((marker) => marker.key === key && runIsLive(marker)) ?? null;
+}
+
+/**
+ * Records that a review is running, before codex is handed minutes of work.
+ * Written with the manifest's write-then-rename, so a concurrent reader never
+ * sees half a marker and reads a live run as a dead one. Best effort: a marker
+ * that cannot be written must not stop the review it describes.
+ */
+function beginRun(entry, reviewPath) {
+  const file = runMarkerPath(entry.repo, entry.number);
+  const marker = {
+    key: entry.key,
+    repo: entry.repo,
+    number: entry.number,
+    pid: process.pid,
+    host: os.hostname(),
+    startedAt: new Date().toISOString(),
+    reviewPath
+  };
+  try {
+    fs.mkdirSync(runsDir(), { recursive: true });
+    const temporary = `${file}.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify(marker, null, 2)}\n`);
+    fs.renameSync(temporary, file);
+    return file;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Clears a marker. Called from a `finally`, and a killed process leaves its
+ * marker behind — which `runIsLive` reads as gone, and the next `clean` sweeps.
+ */
+function endRun(file) {
+  if (!file) return;
+  try {
+    fs.rmSync(file, { force: true });
+  } catch {
+    /* a leftover marker expires on its own */
+  }
+}
+
+/**
+ * Puts an entry back in the manifest if it left while its review was running.
+ *
+ * A `clean` that overrode the running-review guard — or that had already taken
+ * its snapshot before this run recorded itself — removes the entry for the PR
+ * this review belongs to, and a review whose PR is not in the manifest can
+ * never be selected by a later `--purge-reviews`. Re-recording costs an entry
+ * whose worktree may be gone, which `list` already reports plainly; losing the
+ * review announces nothing at all.
+ */
+function restoreEntryIfDropped(entry) {
+  try {
+    const manifest = readManifest();
+    if (manifest.entries.some((item) => item.key === entry.key)) return false;
+    writeManifest({ ...manifest, entries: [...manifest.entries, entry] });
+    log(
+      `Re-recorded ${entry.key} in the manifest: it was cleaned while this review ran, ` +
+        "and a review whose PR is not recorded there cannot be selected by a later clean."
+    );
+    return true;
+  } catch (error) {
+    // The review itself succeeded and is already saved. Say what could not be
+    // recorded rather than failing a run that produced a real review.
+    log(
+      `Could not re-record ${entry.key} in the manifest (${error.message}). ` +
+        "The saved review is on disk, but `clean --purge-reviews` will not select it."
+    );
+    return false;
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * PR reference resolution
  * ------------------------------------------------------------------ */
 
@@ -1037,58 +1210,74 @@ async function commandReview(argv, cwd) {
 
   fs.mkdirSync(reviewsDir(), { recursive: true });
   const outputPath = reviewOutputPath(entry);
+  // Declared before the run rather than after it: a concurrent `clean` needs to
+  // know this worktree is being read while codex is still reading it.
+  const runMarker = beginRun(entry, outputPath);
 
-  log(`Running: codex ${codexArgs.slice(0, 4).join(" ")} … review --base ${entry.baseBranch}`);
-  // With --json the review text must not share stdout with the JSON payload.
-  const { status, stdout } = await streamCodex(codexArgs, {
-    echo: options.json ? process.stderr : process.stdout
-  });
+  try {
+    log(`Running: codex ${codexArgs.slice(0, 4).join(" ")} … review --base ${entry.baseBranch}`);
+    // With --json the review text must not share stdout with the JSON payload.
+    const { status, stdout } = await streamCodex(codexArgs, {
+      echo: options.json ? process.stderr : process.stdout
+    });
 
-  const body = stripWorktreePaths(stdout, entry.worktree).trim();
-  // `||` not `??`: a failed `codex --version` yields "", which is not nullish.
-  const model = options.model || run("codex", ["--version"]).stdout.trim() || "codex";
-  const document = [
-    REVIEW_MARKER,
-    `# Codex review — ${entry.repo}#${entry.number}`,
-    "",
-    `**${entry.title}** by @${entry.author}`,
-    entry.url,
-    "",
-    `Base \`${entry.baseRefName}\` @ \`${entry.mergeBase.slice(0, 12)}\` · head \`${entry.headSha.slice(0, 12)}\` · ${describeSize(entry)}`,
-    "",
-    "---",
-    "",
-    body || NO_REVIEW_BODY,
-    "",
-    "---",
-    "",
-    `<sub>Automated review by ${model} against the merge-base of \`${entry.baseRefName}\`. Findings are advisory and may be wrong — verify before acting.</sub>`,
-    ""
-  ].join("\n");
-  fs.writeFileSync(outputPath, document);
-  const digest = digestOf(document);
+    const body = stripWorktreePaths(stdout, entry.worktree).trim();
+    // `||` not `??`: a failed `codex --version` yields "", which is not nullish.
+    const model = options.model || run("codex", ["--version"]).stdout.trim() || "codex";
+    const document = [
+      REVIEW_MARKER,
+      `# Codex review — ${entry.repo}#${entry.number}`,
+      "",
+      `**${entry.title}** by @${entry.author}`,
+      entry.url,
+      "",
+      `Base \`${entry.baseRefName}\` @ \`${entry.mergeBase.slice(0, 12)}\` · head \`${entry.headSha.slice(0, 12)}\` · ${describeSize(entry)}`,
+      "",
+      "---",
+      "",
+      body || NO_REVIEW_BODY,
+      "",
+      "---",
+      "",
+      `<sub>Automated review by ${model} against the merge-base of \`${entry.baseRefName}\`. Findings are advisory and may be wrong — verify before acting.</sub>`,
+      ""
+    ].join("\n");
+    fs.writeFileSync(outputPath, document);
+    const digest = digestOf(document);
+    // Held until here, after the file exists: a review is only reachable once
+    // both its own bytes and its PR's manifest entry are on disk.
+    const restored = restoreEntryIfDropped(entry);
 
-  if (options.json) {
-    process.stdout.write(
-      `${JSON.stringify(
-        { ...entry, reviewPath: outputPath, reviewDigest: digest, exitCode: status },
-        null,
-        2
-      )}\n`
-    );
-  } else {
-    process.stdout.write(`\nSaved to ${outputPath}\n`);
-    // `post --confirm` takes this digest: it is what ties a publish back to the
-    // exact bytes that were reviewed and approved, across turns and re-runs.
-    process.stdout.write(`Digest ${digest.slice(0, 12)}\n`);
+    if (options.json) {
+      process.stdout.write(
+        `${JSON.stringify(
+          {
+            ...entry,
+            reviewPath: outputPath,
+            reviewDigest: digest,
+            manifestRestored: restored,
+            exitCode: status
+          },
+          null,
+          2
+        )}\n`
+      );
+    } else {
+      process.stdout.write(`\nSaved to ${outputPath}\n`);
+      // `post --confirm` takes this digest: it is what ties a publish back to the
+      // exact bytes that were reviewed and approved, across turns and re-runs.
+      process.stdout.write(`Digest ${digest.slice(0, 12)}\n`);
+    }
+
+    if (status !== 0) log(`Note: codex exited ${status}.`);
+    // Our exit status reports whether *this* wrapper did its job. A review that
+    // ran and was saved is a success even if codex exited nonzero — callers like
+    // `sweep` would otherwise mark healthy PRs as failed. Codex's own status is
+    // carried in the JSON `exitCode` field and logged above.
+    return body ? 0 : (status || 1);
+  } finally {
+    endRun(runMarker);
   }
-
-  if (status !== 0) log(`Note: codex exited ${status}.`);
-  // Our exit status reports whether *this* wrapper did its job. A review that
-  // ran and was saved is a success even if codex exited nonzero — callers like
-  // `sweep` would otherwise mark healthy PRs as failed. Codex's own status is
-  // carried in the JSON `exitCode` field and logged above.
-  return body ? 0 : (status || 1);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1450,7 +1639,6 @@ function purgeUnusedClones(processed, survivors) {
     }
   }
   return notes;
-  return { removed, failed };
 }
 
 /**
@@ -1500,14 +1688,62 @@ function describeKeptReviews(count, purgeReviews) {
   }\n`;
 }
 
+/**
+ * The entries a review is still running against — held back by default, cleaned
+ * anyway under `--include-running`. Said on every path that reports a clean,
+ * for the same reason kept reviews are: an entry nobody is told about is one
+ * nobody comes back for.
+ */
+function describeRunning(runs, includeRunning) {
+  if (runs.length === 0) return "";
+  const count = `${runs.length} entr${runs.length === 1 ? "y" : "ies"}`;
+  const lines = runs
+    .map((run) => {
+      const pid = run.pid ? `, pid ${run.pid}` : "";
+      const saving = run.reviewPath ? ` → will save ${path.basename(run.reviewPath)}` : "";
+      return `  - ${run.key} (running since ${run.startedAt}${pid})${saving}`;
+    })
+    .join("\n");
+
+  return includeRunning
+    ? `\nCleaning ${count} with a review still running (--include-running). Those reviews read the worktrees being removed and may fail; each re-records its PR when it saves.\n${lines}\n`
+    : `\nHeld back ${count} with a review still running:\n${lines}\nWait for the review to finish, or pass --include-running to clean it anyway.\n`;
+}
+
 function commandClean(argv) {
   const { options } = parseArgs(argv, {
     valueOptions: ["pr", "repo", "older-than", "confirm-reviews"],
-    booleanOptions: ["json", "all", "dry-run", "purge-clones", "purge-reviews"]
+    booleanOptions: ["json", "all", "dry-run", "purge-clones", "purge-reviews", "include-running"]
   });
 
   const manifest = readManifest();
-  const targets = selectForClean(manifest.entries, options);
+  const selected = selectForClean(manifest.entries, options);
+
+  // A review still running is reading the worktree this would delete, and writes
+  // its output after any snapshot taken here — into a file no later
+  // `--purge-reviews` could select, since selection starts from the manifest
+  // entry this run would have removed. So hold those entries back and say which:
+  // the run finishes in minutes, and the next clean takes them. `review`
+  // re-records its own entry if this guard is overridden, which is the backstop
+  // rather than the fix — an overridden run may still lose its worktree.
+  const markers = readRunMarkers();
+  const includeRunning = Boolean(options["include-running"]);
+  const running = selected.flatMap((entry) => {
+    const run = liveRunFor(entry.key, markers);
+    return run
+      ? [
+          {
+            key: entry.key,
+            startedAt: run.startedAt,
+            pid: Number.isInteger(run.pid) ? run.pid : null,
+            reviewPath: run.reviewPath ?? null,
+            held: !includeRunning
+          }
+        ]
+      : [];
+  });
+  const heldKeys = new Set(running.filter((run) => run.held).map((run) => run.key));
+  const targets = selected.filter((entry) => !heldKeys.has(entry.key));
 
   // Deliberately not implied by `--all`, the way `--purge-clones` is. A clone
   // can be re-fetched; a review is the output of a Codex run the user paid for
@@ -1531,36 +1767,61 @@ function commandClean(argv) {
     }));
     const digest = reviewSnapshotDigest(allDoomed).slice(0, 12);
     const wouldKeep = savedReviewCount() - allDoomed.length;
+
+    if (options.json) {
+      process.stdout.write(
+        `${JSON.stringify(
+          {
+            wouldRemove: plan,
+            reviews: allDoomed,
+            reviewsDigest: allDoomed.length > 0 ? digest : null,
+            running,
+            keptReviews: { count: wouldKeep, dir: reviewsDir() }
+          },
+          null,
+          2
+        )}\n`
+      );
+      return 0;
+    }
+
+    // "Nothing to clean." is only true when nothing was held back; a run that
+    // declined to touch an entry has something to report, not nothing.
+    const body =
+      plan.length === 0
+        ? running.length === 0
+          ? "Nothing to clean.\n"
+          : ""
+        : `${plan
+            .map(
+              (item) =>
+                `${item.key}\n  worktree  ${item.worktree}\n  branches  ${item.branches.join(", ")}\n  in repo   ${item.repoDir}${
+                  item.reviews.length > 0
+                    ? `\n  reviews   ${item.reviews.map((file) => path.basename(file)).join("\n            ")}`
+                    : ""
+                }`
+            )
+            .join("\n\n")}\n${
+            allDoomed.length > 0
+              ? `\n${allDoomed.length} saved review${allDoomed.length === 1 ? "" : "s"} would be deleted permanently.\nReviews digest ${digest}\n`
+              : ""
+          }`;
     process.stdout.write(
-      options.json
-        ? `${JSON.stringify(
-            {
-              wouldRemove: plan,
-              reviews: allDoomed,
-              reviewsDigest: allDoomed.length > 0 ? digest : null,
-              keptReviews: { count: wouldKeep, dir: reviewsDir() }
-            },
-            null,
-            2
-          )}\n`
-        : plan.length === 0
-          ? `Nothing to clean.\n${describeKeptReviews(wouldKeep, purgeReviews)}`
-          : `${plan
-              .map(
-                (item) =>
-                  `${item.key}\n  worktree  ${item.worktree}\n  branches  ${item.branches.join(", ")}\n  in repo   ${item.repoDir}${
-                    item.reviews.length > 0
-                      ? `\n  reviews   ${item.reviews.map((file) => path.basename(file)).join("\n            ")}`
-                      : ""
-                  }`
-              )
-              .join("\n\n")}\n${
-              allDoomed.length > 0
-                ? `\n${allDoomed.length} saved review${allDoomed.length === 1 ? "" : "s"} would be deleted permanently.\nReviews digest ${digest}\n`
-                : ""
-            }${describeKeptReviews(wouldKeep, purgeReviews)}`
+      `${body}${describeRunning(running, includeRunning)}${describeKeptReviews(wouldKeep, purgeReviews)}`
     );
     return 0;
+  }
+
+  // Only now that this is a real run: a marker whose process is gone stands for
+  // nothing, so drop it rather than let `runs/` fill with the debris of
+  // interrupted reviews. `--dry-run` stays free of side effects.
+  for (const marker of markers) {
+    if (runIsLive(marker)) continue;
+    try {
+      fs.rmSync(marker.file, { force: true });
+    } catch {
+      /* a marker that will not delete expires on its own */
+    }
   }
 
   // Nothing to approve when nothing would be deleted, and the check would then
@@ -1594,10 +1855,16 @@ function commandClean(argv) {
   // Only entries that were fully removed leave the manifest. Anything that
   // failed keeps its record so it can be retried — reporting success while
   // orphaning branches in the user's repo is the worse outcome.
+  //
+  // Re-read rather than writing back the snapshot this run started from: a
+  // review that finished in the meantime has re-recorded its own entry, and a
+  // `prepare` may have added one, both of which writing the stale list back
+  // would erase — re-creating the very unreachable review this guard is for.
   const cleared = new Set(results.filter((r) => r.failed.length === 0).map((r) => r.key));
+  const latest = readManifest();
   writeManifest({
-    ...manifest,
-    entries: manifest.entries.filter((entry) => !cleared.has(entry.key))
+    ...latest,
+    entries: latest.entries.filter((entry) => !cleared.has(entry.key))
   });
 
   const failures = results.filter((result) => result.failed.length > 0);
@@ -1610,6 +1877,7 @@ function commandClean(argv) {
           cleaned: results,
           clones: clonesRemoved,
           incomplete: failures.map((f) => f.key),
+          running,
           keptReviews: { count: kept, dir: reviewsDir() }
         },
         null,
@@ -1619,7 +1887,9 @@ function commandClean(argv) {
     return failures.length === 0 ? 0 : 1;
   }
   if (results.length === 0) {
-    process.stdout.write(`Nothing to clean.\n${describeKeptReviews(kept, purgeReviews)}`);
+    process.stdout.write(
+      `${running.length === 0 ? "Nothing to clean.\n" : ""}${describeRunning(running, includeRunning)}${describeKeptReviews(kept, purgeReviews)}`
+    );
     return 0;
   }
   for (const result of results) {
@@ -1636,6 +1906,7 @@ function commandClean(argv) {
       `\n${failures.length} entr${failures.length === 1 ? "y was" : "ies were"} left in the manifest so cleanup can be retried.\n`
     );
   }
+  process.stdout.write(describeRunning(running, includeRunning));
   process.stdout.write(describeKeptReviews(kept, purgeReviews));
   return failures.length === 0 ? 0 : 1;
 }
@@ -1655,7 +1926,7 @@ const USAGE = `pr-workspace.mjs — review GitHub PRs with Codex
   list    [--repo owner/repo] [--json]
   clean   [--pr N | --repo owner/repo | --all | --older-than DAYS]
           [--purge-clones] [--purge-reviews --confirm-reviews <digest>]
-          [--dry-run] [--json]
+          [--include-running] [--dry-run] [--json]
 
 <pr> accepts 42, #42, owner/repo#42, or a github.com pull request URL.
 `;
