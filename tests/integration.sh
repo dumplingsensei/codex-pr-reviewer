@@ -81,6 +81,7 @@ if [[ -z "$META" ]]; then
   exit 1
 fi
 WT="$(field worktree)"
+HEAD_BRANCH="$(field headBranch)"
 BASE_BRANCH="$(field baseBranch)"
 HEAD_SHA="$(field headSha)"
 REPO_DIR="$(field repoDir)"
@@ -111,10 +112,23 @@ check "entry present" \
   "1"
 
 note "clean removes exactly what it created"
-node "$SCRIPT" clean --pr "$REPO#$PR" >/dev/null 2>&1
+# Two steps, as the command does it: a clean refuses to act on a plan it was not
+# shown. Confirming a digest read straight back from the same dry run is fine
+# here and is not fine in the command, where a person has to see the plan first.
+PLAN="$(node "$SCRIPT" clean --pr "$REPO#$PR" --dry-run --json 2>/dev/null | node -e '
+  let raw = "";
+  process.stdin.on("data", (c) => (raw += c));
+  process.stdin.on("end", () => {
+    try { process.stdout.write(String(JSON.parse(raw).planDigest ?? "")); } catch {}
+  });')"
+check "the dry run offers a plan digest" "$([[ -n "$PLAN" ]] && echo yes || echo no)" "yes"
+node "$SCRIPT" clean --pr "$REPO#$PR" --confirm-plan "$PLAN" >/dev/null 2>&1
 check "worktree gone" "$([[ -e "$WT" ]] && echo present || echo gone)" "gone"
+# Named from the plan, not rebuilt here: branches are namespaced by repository,
+# and an assertion that reconstructs the name can pass by looking for one that
+# was never going to exist.
 check "branches gone" \
-  "$(git -C "$REPO_DIR" branch --list "codex-pr/$PR" "codex-pr/$PR-base" | wc -l | tr -d ' ')" \
+  "$(git -C "$REPO_DIR" branch --list "$HEAD_BRANCH" "$BASE_BRANCH" | wc -l | tr -d ' ')" \
   "0"
 check "refs gone" \
   "$(git -C "$REPO_DIR" for-each-ref "refs/codex-pr-reviewer/pr/$PR" | wc -l | tr -d ' ')" \
