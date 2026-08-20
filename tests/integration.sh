@@ -101,6 +101,24 @@ OURS_STAT="$(git -C "$WT" diff --numstat "$BASE_BRANCH" -- | awk '{a+=$1;d+=$2} 
 THEIRS_STAT="$(gh pr view "$PR" --repo "$REPO" --json additions,deletions --jq '"+\(.additions) -\(.deletions)"')"
 check "additions/deletions" "$OURS_STAT" "$THEIRS_STAT"
 
+# The claim this suite exists to make is that what Codex is handed is *exactly*
+# GitHub's diff, and the two checks above do not establish it: the same file
+# list and the same totals are satisfied by diffs that differ line for line.
+# This compares the patches themselves.
+#
+# The one normalisation is the blob-hash abbreviation on `index` lines — GitHub
+# renders 11 hex characters and local git 8, which is a display width, not a
+# difference in content. Everything else, hunk headers included, must match byte
+# for byte.
+norm_diff() { sed -E '/^index /s/([0-9a-f]{8})[0-9a-f]+/\1/g'; }
+git -C "$WT" diff "$BASE_BRANCH" -- | norm_diff >"$SANDBOX/ours.diff"
+gh pr diff "$PR" --repo "$REPO" | norm_diff >"$SANDBOX/theirs.diff"
+check "the patch is byte-for-byte GitHub's" \
+  "$(cmp -s "$SANDBOX/ours.diff" "$SANDBOX/theirs.diff" && echo identical || echo differs)" \
+  "identical"
+check "and it is not vacuously empty" \
+  "$([[ -s "$SANDBOX/ours.diff" ]] && echo nonempty || echo empty)" "nonempty"
+
 note "prepare is idempotent"
 node "$SCRIPT" prepare "$REPO#$PR" --clone >/dev/null 2>&1
 check "second run exits 0" "$?" "0"

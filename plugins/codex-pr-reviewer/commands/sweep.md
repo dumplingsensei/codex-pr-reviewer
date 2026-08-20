@@ -18,15 +18,22 @@ Core constraint:
 
 1. **Preflight** with `node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" doctor --json`. Stop on failure.
 
-   **These instructions were written for plugin version `0.9.0`.** If the report's `pluginVersion` differs, or `stale` is true, the prompts this session loaded are older than the installed plugin. Say so — with the `plugin` check's `remedy` — as part of step 4's confirmation, so the user decides whether to spend a paid batch on outdated instructions. It is a warning rather than a block: a batch that runs on slightly older instructions still produces reviews the user reads themselves.
+   **These instructions were written for plugin version `0.9.1`.** If the report's `pluginVersion` differs, or `stale` is true, the prompts this session loaded are older than the installed plugin. Say so — with the `plugin` check's `remedy` — as part of step 4's confirmation, so the user decides whether to spend a paid batch on outdated instructions. It is a warning rather than a block: a batch that runs on slightly older instructions still produces reviews the user reads themselves.
 
-2. **Gather candidates**, same sources as `/codex-pr-reviewer:list`:
+2. **Gather candidates.** These must be the *same* sources `/codex-pr-reviewer:list` uses, or the batch is drawn from a different queue than the one the user was shown:
    - With `--repo owner/repo`:
      ```bash
      gh pr list --repo <owner/repo> --state open --limit 50 \
-       --json number,title,author,isDraft,additions,deletions,changedFiles,url
+       --json number,title,author,createdAt,isDraft,additions,deletions,changedFiles,url
      ```
-   - Otherwise: `gh search prs --review-requested=@me --state=open --limit 50 --json number,title,author,repository,url`
+   - Otherwise **both** of these, exactly as `list` does — review requests and assignments are different queues and a PR can be in either:
+     ```bash
+     gh search prs --review-requested=@me --state=open --limit 50 --json number,title,author,repository,createdAt,url
+     gh search prs --assignee=@me --state=open --limit 50 --json number,title,author,repository,createdAt,url
+     ```
+     **Merge them, then de-duplicate on `url`, the same key `/codex-pr-reviewer:list` uses.** A PR you were asked to review *and* assigned appears in both, and two 50-item searches otherwise yield up to 100 rows with duplicates competing for places in the batch — which is a paid Codex run spent reviewing the same PR twice.
+
+   `createdAt` is fetched because step 3's `--order newest` sorts on it. Without it that flag silently falls back to whatever order the API returned.
 
    Fetch **more candidates than `--limit`** — the whole point of step 3 is to choose among them.
 
@@ -34,7 +41,9 @@ Core constraint:
 
    Sort ascending by total churn (`additions + deletions`), tie-breaking on `changedFiles`. Then take the first `--limit`.
 
-   This is the default because every PR in the batch costs a separate paid Codex run: reviewing the five smallest gets five reviews for roughly the price of one large one, and a 3,000-line refactor sitting at the top of a busy queue would otherwise consume the whole budget. `--order newest` restores queue order for anyone who wants it.
+   This is the default because every PR in the batch costs a separate paid Codex run: reviewing the five smallest gets five reviews for roughly the price of one large one, and a 3,000-line refactor sitting at the top of a busy queue would otherwise consume the whole budget.
+
+   `--order newest` sorts descending by `createdAt`, which step 2 fetches for exactly this. If any candidate is missing it, say so and sort those last rather than guessing at an order.
 
    `gh search prs` does **not** return size fields. On that path, fetch them for the candidate set first:
    ```bash

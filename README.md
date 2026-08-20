@@ -295,6 +295,11 @@ there for the same reason the suite never calls it — the binary is needed only
 to satisfy `doctor`'s preflight, which would otherwise turn every CI run into a
 silent skip.
 
+## Changelog
+
+Release notes are in [CHANGELOG.md](CHANGELOG.md), and each release is tagged
+`v<version>`.
+
 ## License
 
 [MIT](LICENSE)

@@ -243,8 +243,17 @@ function readManifest() {
   let raw;
   try {
     raw = fs.readFileSync(manifestPath(), "utf8");
-  } catch {
-    return emptyManifest(); // no manifest yet is the normal first-run state
+  } catch (error) {
+    // Only "it is not there" means first run. A permissions problem, an I/O
+    // error, or a directory where the file should be all used to read as an
+    // empty manifest — which is the same shape as "you have nothing prepared",
+    // and would have this plugin cheerfully re-create branches it already owns
+    // while losing the record of the ones it cannot see.
+    if (error.code === "ENOENT") return emptyManifest();
+    throw new UserError(
+      `Could not read the review manifest at ${manifestPath()} (${error.code ?? error.message}).`,
+      "Fix the permissions or move the file aside; this is not the same as having no manifest."
+    );
   }
 
   let parsed;
@@ -254,7 +263,7 @@ function readManifest() {
     // Never silently reset: the manifest is the only record of branches and
     // refs created inside the user's real repositories.
     const backup = `${manifestPath()}.corrupt-${Date.now()}`;
-    fs.writeFileSync(backup, raw);
+    fs.writeFileSync(backup, raw, { mode: 0o600 });
     throw new UserError(
       `The review manifest at ${manifestPath()} is not valid JSON (${error.message}).`,
       `A copy was saved to ${backup}. Repair it, or delete it and clean up any leftover \`codex-pr/*\` branches by hand.`
@@ -276,21 +285,125 @@ function readManifest() {
   return parsed;
 }
 
+/**
+ * Creates a directory only this user can enter, and repairs one that predates
+ * this rule.
+ *
+ * Everything under the cache is private by nature: saved reviews of code that
+ * is often not public, and a manifest naming paths inside the user's own
+ * repositories. Left to the process umask these were created 0755 and 0644,
+ * which on a shared or multi-account machine is readable by everyone. `mode:`
+ * alone would not fix an existing install, since mkdir ignores it when the
+ * directory is already there — hence the chmod.
+ */
+function ensurePrivateDir(dir) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(dir, 0o700);
+  } catch {
+    // A directory we cannot chmod is one somebody else owns; the operations
+    // that follow will fail with a better message than this could give.
+  }
+}
+
+/**
+ * Blocks this thread. Node has no sync sleep; this is the standard stand-in,
+ * and the waits here are tens of milliseconds while another process renames a
+ * small file.
+ */
+const sleepSync = (ms) => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
+
+// Long enough to outlast a slow rename under load, short enough that a crashed
+// holder does not make the next command look hung.
+const LOCK_STALE_MS = 10_000;
+const LOCK_WAIT_MS = 5_000;
+
+/**
+ * Serializes read-modify-write of the manifest across processes.
+ *
+ * Writing is already atomic — write to a temporary file, rename over — so the
+ * file on disk is never torn. That is a different problem from this one. Every
+ * mutation here reads the whole manifest, changes one entry, and writes the
+ * whole thing back, so two of them overlapping means the second silently
+ * discards the first: `sweep` prepares several PRs concurrently, and a
+ * background review re-recording its entry can land in the middle of a clean.
+ * The lost entry is a branch and a worktree in a real repository that nothing
+ * has a record of any more.
+ *
+ * A lock that outlives its holder is its own failure, so this one expires. Ten
+ * seconds is far longer than any critical section here, which is a read, a
+ * small edit, and a rename.
+ */
+function withManifestLock(fn) {
+  ensurePrivateDir(cacheRoot());
+  const lockPath = `${manifestPath()}.lock`;
+  const deadline = Date.now() + LOCK_WAIT_MS;
+
+  for (;;) {
+    try {
+      fs.closeSync(fs.openSync(lockPath, "wx", 0o600));
+      break;
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+
+      let age = Infinity;
+      try {
+        age = Date.now() - fs.statSync(lockPath).mtimeMs;
+      } catch {
+        continue; // released between the open and the stat; try again
+      }
+      if (age > LOCK_STALE_MS) {
+        // Whoever held this is gone. Reclaiming is safe precisely because the
+        // critical section is short: nothing legitimate holds it this long.
+        fs.rmSync(lockPath, { force: true });
+        continue;
+      }
+      if (Date.now() > deadline) {
+        throw new UserError(
+          `Timed out waiting for the review manifest lock at ${lockPath}.`,
+          "Another codex-pr-reviewer command is holding it. If none is running, delete that file."
+        );
+      }
+      sleepSync(50);
+    }
+  }
+
+  try {
+    return fn();
+  } finally {
+    fs.rmSync(lockPath, { force: true });
+  }
+}
+
+/** Read-modify-write under the lock. `mutate` returns the manifest to store. */
+export function mutateManifest(mutate) {
+  return withManifestLock(() => {
+    const manifest = readManifest();
+    const next = mutate(manifest);
+    if (next) writeManifest(next);
+    return next;
+  });
+}
+
 function writeManifest(manifest) {
-  fs.mkdirSync(cacheRoot(), { recursive: true });
+  ensurePrivateDir(cacheRoot());
   // Write-then-rename so an interrupted write cannot truncate the manifest.
   const temporary = `${manifestPath()}.${process.pid}.tmp`;
   fs.writeFileSync(
     temporary,
-    `${JSON.stringify({ ...manifest, version: MANIFEST_VERSION }, null, 2)}\n`
+    `${JSON.stringify({ ...manifest, version: MANIFEST_VERSION }, null, 2)}\n`,
+    { mode: 0o600 }
   );
   fs.renameSync(temporary, manifestPath());
 }
 
 function upsertEntry(entry) {
-  const manifest = readManifest();
-  const others = manifest.entries.filter((item) => item.key !== entry.key);
-  writeManifest({ ...manifest, entries: [...others, entry] });
+  mutateManifest((manifest) => ({
+    ...manifest,
+    entries: [...manifest.entries.filter((item) => item.key !== entry.key), entry]
+  }));
 }
 
 /* ------------------------------------------------------------------ *
@@ -412,9 +525,9 @@ function beginRun(entry, reviewPath) {
     reviewPath
   };
   try {
-    fs.mkdirSync(runsDir(), { recursive: true });
+    ensurePrivateDir(runsDir());
     const temporary = `${file}.tmp`;
-    fs.writeFileSync(temporary, `${JSON.stringify(marker, null, 2)}\n`);
+    fs.writeFileSync(temporary, `${JSON.stringify(marker, null, 2)}\n`, { mode: 0o600 });
     fs.renameSync(temporary, file);
     return file;
   } catch {
@@ -447,9 +560,12 @@ function endRun(file) {
  */
 function restoreEntryIfDropped(entry) {
   try {
-    const manifest = readManifest();
-    if (manifest.entries.some((item) => item.key === entry.key)) return false;
-    writeManifest({ ...manifest, entries: [...manifest.entries, entry] });
+    const restored = mutateManifest((manifest) =>
+      manifest.entries.some((item) => item.key === entry.key)
+        ? null // already there — another process re-recorded it first
+        : { ...manifest, entries: [...manifest.entries, entry] }
+    );
+    if (!restored) return false;
     log(
       `Re-recorded ${entry.key} in the manifest: it was cleaned while this review ran, ` +
         "and a review whose PR is not recorded there cannot be selected by a later clean."
@@ -591,7 +707,7 @@ function resolveHostRepo(slug, cwd, options = {}) {
   }
 
   log(`Cloning ${slug} into the review cache (blobless)…`);
-  fs.mkdirSync(clonesDir(), { recursive: true });
+  ensurePrivateDir(clonesDir());
   fs.rmSync(repoDir, { recursive: true, force: true });
   const clone = gh(["repo", "clone", slug, repoDir, "--", "--filter=blob:none", "--no-tags", "--quiet"]);
   if (clone.status !== 0) {
@@ -936,7 +1052,7 @@ function ensureWorktree(repoDir, worktree, headBranch, headRef) {
   if (registered) git(repoDir, ["worktree", "remove", "--force", worktree]);
   fs.rmSync(worktree, { recursive: true, force: true });
   git(repoDir, ["worktree", "prune"]);
-  fs.mkdirSync(path.dirname(worktree), { recursive: true });
+  ensurePrivateDir(path.dirname(worktree));
   gitChecked(repoDir, ["worktree", "add", "--force", "-B", headBranch, worktree, headRef]);
 }
 
@@ -1206,6 +1322,50 @@ export function stripWorktreePaths(text, worktree) {
     .replaceAll(new RegExp(escaped, "g"), ".");
 }
 
+/**
+ * Confirms a worktree `--no-prepare` is about to review is still the one that
+ * was prepared.
+ *
+ * `--no-prepare` exists so the command can prepare once and review without
+ * paying for a second round of git and API calls, and it took the manifest
+ * entirely on trust. The gap between the two steps is not small: a `clean` runs
+ * in it, a person opens the directory, a branch gets checked out somewhere
+ * else. Reviewing whatever is there now and labelling the result with the head
+ * the manifest remembers produces a review that is wrong about which commits it
+ * read, which is worse than not running.
+ *
+ * Cheap enough to do every time — three git commands against a local checkout.
+ */
+function verifyPreparedWorktree(entry) {
+  const stop = (message, remedy) => {
+    throw new UserError(message, remedy ?? "Re-run without --no-prepare to rebuild it.");
+  };
+
+  if (!fs.existsSync(entry.worktree)) {
+    stop(`The worktree for ${entry.key} is gone (${entry.worktree}).`);
+  }
+  const root = git(entry.worktree, ["rev-parse", "--show-toplevel"]);
+  if (root.status !== 0 || realPath(root.stdout.trim()) !== realPath(entry.worktree)) {
+    stop(`${entry.worktree} is no longer a git worktree of its own.`);
+  }
+
+  const head = git(entry.worktree, ["rev-parse", "HEAD"]).stdout.trim();
+  if (entry.headSha && head && head !== entry.headSha) {
+    stop(
+      `The worktree for ${entry.key} is at ${head.slice(0, 12)}, not the ${String(entry.headSha).slice(0, 12)} that was prepared.`,
+      "Re-run without --no-prepare to fetch the current head and review that."
+    );
+  }
+
+  const base = git(entry.worktree, ["rev-parse", entry.baseBranch]).stdout.trim();
+  if (entry.mergeBase && base && base !== entry.mergeBase) {
+    stop(
+      `\`${entry.baseBranch}\` is at ${base.slice(0, 12)}, not the merge-base ${String(entry.mergeBase).slice(0, 12)} that was prepared.`,
+      "The diff would not be GitHub's diff. Re-run without --no-prepare."
+    );
+  }
+}
+
 async function commandReview(argv, cwd) {
   const { options, positionals } = parseArgs(argv, REVIEW_SCHEMA);
   const dryRun = Boolean(options["dry-run"]);
@@ -1227,6 +1387,8 @@ async function commandReview(argv, cwd) {
       // Nothing prepared yet — the paths are pure functions of slug and number,
       // so the planned command can still be shown honestly.
       entry = { ...target, repo: target.slug, title: "(not prepared yet)", unprepared: true };
+    } else if (!dryRun) {
+      verifyPreparedWorktree(entry);
     }
   } else {
     ({ entry } = prepare(options, positionals, cwd));
@@ -1272,7 +1434,7 @@ async function commandReview(argv, cwd) {
     return 0;
   }
 
-  fs.mkdirSync(reviewsDir(), { recursive: true });
+  ensurePrivateDir(reviewsDir());
   const outputPath = reviewOutputPath(entry);
   // Declared before the run rather than after it: a concurrent `clean` needs to
   // know this worktree is being read while codex is still reading it.
@@ -1306,7 +1468,7 @@ async function commandReview(argv, cwd) {
       `<sub>Automated review by ${model} against the merge-base of \`${entry.baseRefName}\`. Findings are advisory and may be wrong — verify before acting.</sub>`,
       ""
     ].join("\n");
-    fs.writeFileSync(outputPath, document);
+    fs.writeFileSync(outputPath, document, { mode: 0o600 });
     const digest = digestOf(document);
     // Held until here, after the file exists: a review is only reachable once
     // both its own bytes and its PR's manifest entry are on disk.
@@ -1383,7 +1545,12 @@ function commandList(argv) {
   const filtered = options.repo
     ? annotated.filter((entry) => canonicalSlug(entry.repo) === canonicalSlug(options.repo))
     : annotated;
-  const sorted = [...filtered].sort((a, b) => b.preparedAt.localeCompare(a.preparedAt));
+  // `?? ""` rather than assuming the field: a manifest is a file on disk that
+  // people do edit, and an entry missing one key should not turn `list` — the
+  // command someone reaches for when things look wrong — into a stack trace.
+  const sorted = [...filtered].sort((a, b) =>
+    String(b.preparedAt ?? "").localeCompare(String(a.preparedAt ?? ""))
+  );
 
   if (options.json) {
     process.stdout.write(`${JSON.stringify({ entries: sorted }, null, 2)}\n`);
@@ -1489,6 +1656,20 @@ function removeEntry(entry) {
         failed.push(`ref ${ref}: ${(result.stderr || "").trim().split("\n")[0]}`);
       }
     }
+  }
+
+  // `rmSync(..., { recursive: true })` on a path read straight out of a JSON
+  // file is only safe while that file is exactly what this plugin wrote. The
+  // manifest lives in a cache directory, is edited by hand when something goes
+  // wrong, and is the sort of thing a stray script writes to; nothing so far
+  // has checked that the path being deleted is one this plugin could have
+  // created. Recompute where it must be and refuse anything else.
+  const expected = path.join(worktreesDir(), slugToDir(entry.repo), `pr-${entry.number}`);
+  if (realPath(entry.worktree) !== realPath(expected)) {
+    failed.push(
+      `worktree ${entry.worktree}: not where a worktree for ${entry.key} belongs (${expected}) — left alone`
+    );
+    return { removed, failed };
   }
 
   fs.rmSync(entry.worktree, { recursive: true, force: true });
@@ -1788,11 +1969,10 @@ function commandClean(argv) {
   // `prepare` may have added one, both of which writing the stale list back
   // would erase — re-creating the very unreachable review this guard is for.
   const cleared = new Set(results.filter((r) => r.failed.length === 0).map((r) => r.key));
-  const latest = readManifest();
-  writeManifest({
+  mutateManifest((latest) => ({
     ...latest,
     entries: latest.entries.filter((entry) => !cleared.has(entry.key))
-  });
+  }));
 
   const failures = results.filter((result) => result.failed.length > 0);
   const kept = savedReviewCount();

@@ -17,12 +17,14 @@ Raw slash-command arguments:
      gh pr list --repo <owner/repo> --state open --limit <N> \
        --json number,title,author,createdAt,updatedAt,isDraft,additions,deletions,changedFiles,url,statusCheckRollup,reviewDecision
      ```
-   - With no `--repo`, find what is assigned to the user across GitHub. Run both and merge, de-duplicating on `url`, and keep track of which query produced each row:
+   - With no `--repo`, find what is assigned to the user across GitHub. Run both:
      ```bash
      gh search prs --review-requested=@me --state=open --limit <N> --json number,title,author,repository,createdAt,isDraft,url
      gh search prs --assignee=@me --state=open --limit <N> --json number,title,author,repository,createdAt,isDraft,url
      ```
-     These mean different things — review-requested is work waiting on you, assigned is work owned by you — so label the reason rather than blurring them into one list.
+     These mean different things — review-requested is work waiting on you, assigned is work owned by you — so keep track of which query produced each row and label the reason rather than blurring them into one list.
+
+     **Merge, de-duplicate on `url`, and only then take `<N>`.** Each search is limited to `<N>` on its own, so the merge holds up to `2N` rows, and a PR that is both review-requested and assigned is in both — which would list it twice and push a real entry off the end. A row in both queues gets both labels, not two lines.
    - If neither returns anything, fall back to the current directory's repository, but only if it actually resolves to one:
      ```bash
      gh repo view --json nameWithOwner

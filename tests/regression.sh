@@ -168,7 +168,10 @@ git -C "$UPSTREAM" checkout --quiet main
 HOST="$CACHE/repos/o__r"
 mkdir -p "$CACHE/repos"
 git clone --quiet "$UPSTREAM" "$HOST"
-WT="$SANDBOX/wt-7"
+WT="$CACHE/worktrees/o__r/pr-7"
+# Worktrees live at <cache>/worktrees/<owner>__<repo>/pr-<n>, and `clean` will
+# not recursively delete a path that is not there. Fixtures used to invent
+# convenient paths, which meant they exercised a layout prepare never produces.
 git -C "$HOST" fetch --quiet origin '+refs/pull/7/head:refs/codex-pr-reviewer/pr/7'
 git -C "$HOST" branch --force codex-pr/7-base "$(git -C "$HOST" merge-base origin/main refs/codex-pr-reviewer/pr/7)"
 git -C "$HOST" worktree add --quiet --force -B codex-pr/7 "$WT" refs/codex-pr-reviewer/pr/7
@@ -188,7 +191,7 @@ cat >"$CACHE/manifest.json" <<JSON
   "baseRefName":"main","additions":1,"deletions":0,"changedFiles":1,
   "preparedAt":"2026-01-01T00:00:00.000Z"},
  {"key":"o/r#9","repo":"o/r","number":9,"title":"t9","url":"u9","state":"OPEN","author":"a",
-  "worktree":"$SANDBOX/wt-9","repoDir":"$HOST","remote":"origin","mode":"clone",
+  "worktree":"$CACHE/worktrees/o__r/pr-9","repoDir":"$HOST","remote":"origin","mode":"clone",
   "headBranch":"codex-pr/9","baseBranch":"codex-pr/9-base","refs":[],
   "headSha":"0","mergeBase":"0","baseRefName":"main","additions":1,"deletions":0,
   "changedFiles":1,"preparedAt":"2026-01-01T00:00:00.000Z"}
@@ -224,7 +227,7 @@ check "target branches are gone" \
 
 # Regression: a failed branch deletion was swallowed and the manifest entry
 # dropped anyway, so the leftover branch could never be cleaned.
-git -C "$HOST" worktree add --quiet --force -B codex-pr/9 "$SANDBOX/wt-9" main
+git -C "$HOST" worktree add --quiet --force -B codex-pr/9 "$CACHE/worktrees/o__r/pr-9" main
 git -C "$HOST" branch --force codex-pr/9-base main
 git -C "$HOST" checkout --quiet -b blocker codex-pr/9-base 2>/dev/null || true
 git -C "$HOST" checkout --quiet codex-pr/9-base
@@ -248,12 +251,22 @@ STUB
 chmod +x "$SANDBOX/stub/codex"
 
 git -C "$HOST" checkout --quiet main
+# `review --no-prepare` now checks the worktree is still the one that was
+# prepared — it exists, it is a worktree of its own, and its HEAD and base are
+# the commits the manifest recorded. So the fixture is a real worktree at real
+# OIDs rather than a directory and two invented hashes.
+git -C "$HOST" fetch --quiet origin '+refs/pull/7/head:refs/codex-pr-reviewer/pr/7'
+git -C "$HOST" worktree add --quiet --force -B codex-pr/o__r/7 "$WT" refs/codex-pr-reviewer/pr/7
+git -C "$HOST" branch --force codex-pr/o__r/7-base \
+  "$(git -C "$HOST" merge-base origin/main refs/codex-pr-reviewer/pr/7)"
+WT_HEAD="$(git -C "$WT" rev-parse HEAD)"
+WT_BASE="$(git -C "$HOST" rev-parse refs/heads/codex-pr/o__r/7-base)"
 cat >"$CACHE/manifest.json" <<JSON
 {"version":1,"entries":[
  {"key":"o/r#7","repo":"o/r","number":7,"title":"t","url":"u","state":"OPEN","author":"a",
   "worktree":"$WT","repoDir":"$HOST","remote":"origin","mode":"clone",
-  "headBranch":"codex-pr/7","baseBranch":"codex-pr/7-base","refs":[],
-  "headSha":"abcdef1234567890","mergeBase":"abcdef1234567890","baseRefName":"main",
+  "headBranch":"codex-pr/o__r/7","baseBranch":"codex-pr/o__r/7-base","refs":[],
+  "headSha":"$WT_HEAD","mergeBase":"$WT_BASE","baseRefName":"main",
   "additions":1,"deletions":0,"changedFiles":1,"preparedAt":"2026-01-01T00:00:00.000Z"}
 ]}
 JSON
@@ -276,6 +289,23 @@ check "wrapper exits 0 when the review was saved" "$?" "0"
 saved="$(ls -t "$CACHE"/reviews/*.md 2>/dev/null | head -1)"
 contains "footer names a model" "$(cat "$saved")" "Automated review by codex"
 
+# Regression: --no-prepare took the manifest entirely on trust. The gap between
+# preparing and reviewing is where a clean runs, where somebody opens the
+# directory, where a branch gets checked out elsewhere — and a review of
+# whatever is there now, labelled with the head the manifest remembers, is wrong
+# about which commits it read.
+git -C "$WT" checkout --quiet --detach HEAD~1 2>/dev/null || git -C "$WT" commit --quiet --allow-empty -m moved
+out="$(PATH="$SANDBOX/stub:$PATH" node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+contains "a moved worktree head is refused" "$out" "not the"
+contains "and says how to fix it" "$out" "--no-prepare"
+git -C "$WT" checkout --quiet -B codex-pr/o__r/7 "$WT_HEAD"
+
+# The same check, one step earlier: the directory is not there at all.
+mv "$WT" "$WT.moved"
+out="$(PATH="$SANDBOX/stub:$PATH" node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+contains "a worktree that is gone is refused" "$out" "is gone"
+mv "$WT.moved" "$WT"
+
 note "batch clean of two PRs sharing one cached clone"
 # Regression: the shared-clone guard compared against post-batch survivors, so
 # with --all the FIRST entry deleted the clone and every later entry in the same
@@ -292,13 +322,13 @@ OID_BASE="$(git -C "$HOST" rev-parse refs/heads/codex-pr/21-base)"
 cat >"$CACHE/manifest.json" <<JSON
 {"version":1,"entries":[
  {"key":"o/r#21","repo":"o/r","number":21,"title":"t","url":"u","state":"OPEN","author":"a",
-  "worktree":"$SANDBOX/wt-21","repoDir":"$HOST","remote":"origin","mode":"clone",
+  "worktree":"$CACHE/worktrees/o__r/pr-21","repoDir":"$HOST","remote":"origin","mode":"clone",
   "headBranch":"codex-pr/21","baseBranch":"codex-pr/21-base",
   "refs":["refs/codex-pr-reviewer/pr/21"],"headSha":"$OID_HEAD","mergeBase":"$OID_BASE",
   "baseRefName":"main","additions":1,"deletions":0,"changedFiles":1,
   "preparedAt":"2026-01-01T00:00:00.000Z"},
  {"key":"o/r#22","repo":"o/r","number":22,"title":"t","url":"u","state":"OPEN","author":"a",
-  "worktree":"$SANDBOX/wt-22","repoDir":"$HOST","remote":"origin","mode":"clone",
+  "worktree":"$CACHE/worktrees/o__r/pr-22","repoDir":"$HOST","remote":"origin","mode":"clone",
   "headBranch":"codex-pr/22","baseBranch":"codex-pr/22-base",
   "refs":["refs/codex-pr-reviewer/pr/22"],"headSha":"$OID_HEAD","mergeBase":"$OID_BASE",
   "baseRefName":"main","additions":1,"deletions":0,"changedFiles":1,
@@ -315,6 +345,58 @@ check "clone is purged exactly once" \
 check "clone is gone" "$([[ -d "$HOST" ]] && echo present || echo gone)" "gone"
 check "manifest is emptied" \
   "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key"')" "0"
+
+note "a recursive delete does not trust the path it was handed"
+# The manifest is a JSON file in a cache directory: hand-edited when something
+# goes wrong, and writable by anything running as this user. `clean` fed
+# entry.worktree straight to rmSync(recursive) without checking it was a path
+# this plugin could have created.
+rm -rf "$CACHE"; mkdir -p "$CACHE" "$SANDBOX/precious"
+printf 'do not delete me\n' >"$SANDBOX/precious/keep.txt"
+cat >"$CACHE/manifest.json" <<JSON
+{"version":1,"entries":[
+ {"key":"o/r#31","repo":"o/r","number":31,"title":"t","url":"u","state":"OPEN","author":"a",
+  "worktree":"$SANDBOX/precious","repoDir":"$SANDBOX/none","remote":"origin","mode":"clone",
+  "headBranch":"codex-pr/o__r/31","baseBranch":"codex-pr/o__r/31-base","refs":[],
+  "headSha":"0","mergeBase":"0","baseRefName":"main","additions":1,"deletions":0,
+  "changedFiles":1,"preparedAt":"2026-01-01T00:00:00.000Z"}
+]}
+JSON
+out="$(cclean --all 2>&1)"
+contains "a worktree outside the cache layout is refused" "$out" "not where a worktree for o/r#31 belongs"
+check "and the directory is still there" \
+  "$([[ -f "$SANDBOX/precious/keep.txt" ]] && echo kept || echo deleted)" "kept"
+check "the entry stays for a retry" \
+  "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key"')" "1"
+rm -rf "$CACHE" "$SANDBOX/precious"
+
+note "concurrent manifest writers do not lose each other's entries"
+# Regression: writing was atomic — temp file, rename over — but mutating was
+# not. Every change reads the whole manifest, edits one entry, and writes it all
+# back, so two overlapping ones meant the second silently discarded the first.
+# `sweep` prepares several PRs at once and a background review re-records its
+# own entry, so this is the normal case, not a rare one. A lost entry is a
+# branch and a worktree in a real repository that nothing has a record of.
+rm -rf "$CACHE"
+# The module path goes through the environment, not argv: `node -e` puts the
+# first argument in argv[1], where it would match the module's own path and
+# satisfy the direct-invocation guard — running main() instead of importing.
+for i in $(seq 1 8); do
+  CPR_MODULE="$SCRIPT" CPR_N="$i" node -e '
+    const { mutateManifest } = await import(process.env.CPR_MODULE);
+    const number = Number(process.env.CPR_N);
+    mutateManifest((m) => ({
+      ...m,
+      entries: [...m.entries, { key: `o/r#${number}`, repo: "o/r", number, preparedAt: new Date().toISOString() }]
+    }));
+  ' &
+done
+wait
+check "all 8 concurrent writers survived" \
+  "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key"')" "8"
+check "the lock file is released" \
+  "$(ls "$CACHE"/manifest.json.lock 2>/dev/null | wc -l | tr -d ' ')" "0"
+rm -rf "$CACHE"
 
 note "saved reviews are identifiable on disk"
 # `post` was removed in 0.9.0 and with it every assertion about publishing.
@@ -341,7 +423,7 @@ note "clean --purge-reviews cannot overreach"
 # another repository's reviews, a plan recomputed by the process that acts on
 # it, and a failed deletion that cleared its manifest entry anyway.
 rm -rf "$CACHE"
-PURGE_WT="$SANDBOX/purge-wt"
+PURGE_WT="$CACHE/worktrees/o__r/pr-7"
 mkdir -p "$REVIEWS" "$PURGE_WT"
 mk_review() { printf '<!-- codex-pr-reviewer exit=0 -->\n# Codex review\n\nP1: a finding.\n' >"$1"; }
 plan_field() {
@@ -444,16 +526,39 @@ note "a review in flight is not cleaned out from under itself"
 # review then wrote a file no later --purge-reviews could ever select, because
 # selection starts from the manifest entry that had just been dropped.
 rm -rf "$CACHE"
-RUN_WT="$SANDBOX/inflight-wt"
-mkdir -p "$CACHE" "$REVIEWS" "$RUN_WT" "$SANDBOX/inflight-stub"
+RUN_WT="$CACHE/worktrees/o__r/pr-7"
+# $HOST lives under $CACHE, so the wipe above takes it too. This block builds
+# its own host repo — and it has to be a real one, because the review below
+# goes through --no-prepare, which will not run against a directory that merely
+# looks like a prepared worktree.
+RUN_HOST="$CACHE/repos/o__r"
+mkdir -p "$CACHE" "$REVIEWS" "$SANDBOX/inflight-stub"
+
+# Rebuilt between cases rather than mkdir'd back: the cleans below delete the
+# clone as well as the worktree, and a --no-prepare review checks that what it
+# is about to read is a real worktree at the commits the manifest recorded.
+# Call this before inflight_manifest — the OIDs change each time.
+remake_run_worktree() {
+  rm -rf "$RUN_HOST" "$RUN_WT"
+  mkdir -p "$RUN_HOST"
+  git -C "$RUN_HOST" init --quiet -b main
+  git -C "$RUN_HOST" config user.email t@t && git -C "$RUN_HOST" config user.name t
+  echo base >"$RUN_HOST/f.txt"
+  git -C "$RUN_HOST" add -A && git -C "$RUN_HOST" commit --quiet -m base
+  git -C "$RUN_HOST" branch --force codex-pr/o__r/7-base main
+  git -C "$RUN_HOST" worktree add --quiet --force -B codex-pr/o__r/7 "$RUN_WT" main
+  RUN_HEAD="$(git -C "$RUN_WT" rev-parse HEAD)"
+  RUN_BASE="$(git -C "$RUN_HOST" rev-parse refs/heads/codex-pr/o__r/7-base)"
+}
+remake_run_worktree
 
 inflight_manifest() {
   cat >"$CACHE/manifest.json" <<JSON
 {"version":1,"entries":[
  {"key":"o/r#7","repo":"o/r","number":7,"title":"t","url":"u","state":"OPEN","author":"a",
-  "worktree":"$RUN_WT","repoDir":"$SANDBOX/none","remote":"origin","mode":"clone",
-  "headBranch":"codex-pr/7","baseBranch":"codex-pr/7-base","refs":[],
-  "headSha":"abcdef1234567890","mergeBase":"abcdef1234567890","baseRefName":"main",
+  "worktree":"$RUN_WT","repoDir":"$RUN_HOST","remote":"origin","mode":"clone",
+  "headBranch":"codex-pr/o__r/7","baseBranch":"codex-pr/o__r/7-base","refs":[],
+  "headSha":"$RUN_HEAD","mergeBase":"$RUN_BASE","baseRefName":"main",
   "additions":1,"deletions":0,"changedFiles":1,"preparedAt":"2026-01-01T00:00:00.000Z"}
 ]}
 JSON
@@ -501,7 +606,7 @@ check "so does its saved review" "$(ls "$REVIEWS" | wc -l | tr -d ' ')" "1"
 # A cached clone shared with a held entry has to survive the batch too: it is the
 # repository the running review is reading, and --all implies --purge-clones.
 HELD_CLONE="$CACHE/repos/o__r"
-mkdir -p "$HELD_CLONE" "$SANDBOX/wt-8"
+mkdir -p "$HELD_CLONE" "$CACHE/worktrees/o__r/pr-8"
 cat >"$CACHE/manifest.json" <<JSON
 {"version":1,"entries":[
  {"key":"o/r#7","repo":"o/r","number":7,"title":"t","url":"u","state":"OPEN","author":"a",
@@ -510,7 +615,7 @@ cat >"$CACHE/manifest.json" <<JSON
   "headSha":"0","mergeBase":"0","baseRefName":"main","additions":1,"deletions":0,
   "changedFiles":1,"preparedAt":"2026-01-01T00:00:00.000Z"},
  {"key":"o/r#8","repo":"o/r","number":8,"title":"t8","url":"u8","state":"OPEN","author":"a",
-  "worktree":"$SANDBOX/wt-8","repoDir":"$HELD_CLONE","remote":"origin","mode":"clone",
+  "worktree":"$CACHE/worktrees/o__r/pr-8","repoDir":"$HELD_CLONE","remote":"origin","mode":"clone",
   "headBranch":"codex-pr/8","baseBranch":"codex-pr/8-base","refs":[],
   "headSha":"0","mergeBase":"0","baseRefName":"main","additions":1,"deletions":0,
   "changedFiles":1,"preparedAt":"2026-01-01T00:00:00.000Z"}
@@ -535,8 +640,8 @@ check "and cleans the entry anyway" \
 # it must hold nothing back, and the marker must not survive the next clean.
 kill "$LIVE_PID" 2>/dev/null
 wait "$LIVE_PID" 2>/dev/null
+remake_run_worktree
 inflight_manifest
-mkdir -p "$RUN_WT"
 out="$(cclean --all 2>&1)"
 check "a dead run holds nothing back" "$(printf '%s' "$out" | grep -c 'Held back')" "0"
 check "and its marker is swept" "$(ls "$CACHE/runs" 2>/dev/null | wc -l | tr -d ' ')" "0"
@@ -546,8 +651,8 @@ check "the entry is cleaned" "$(node "$SCRIPT" list --json 2>/dev/null | grep -c
 # snapshot before this run recorded itself — leaves the finished review with no
 # manifest entry, and a review whose PR is absent from the manifest can never be
 # selected again. The stub below is that clean, running while codex "reviews".
+remake_run_worktree
 inflight_manifest
-mkdir -p "$RUN_WT"
 rm -f "$REVIEWS"/*.md
 cat >"$SANDBOX/inflight-stub/codex" <<STUB
 #!/bin/sh

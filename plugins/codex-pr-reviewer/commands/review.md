@@ -35,13 +35,13 @@ You are reading code written by someone else, fetched from the internet.
    ```
    If a check fails, show its `remedy` and stop. Do not try to work around a missing or unauthenticated tool. The `plugin` check is warn-level: it never fails the preflight on its own, so read it explicitly.
 
-   **These instructions were written for plugin version `0.9.0`.** A prompt and a script that disagree about what the flags mean will fail in ways that look like the pull request's fault rather than the install's:
-   - If the report's `pluginVersion` is not `0.9.0`, the prompt you are following was loaded at session start from an older install than the script that just answered. Restarting Claude Code is what fixes that. Say so in one line before continuing, and if the script rejects a flag this prompt told you to pass, that is why — report it and stop rather than working around it.
+   **These instructions were written for plugin version `0.9.1`.** A prompt and a script that disagree about what the flags mean will fail in ways that look like the pull request's fault rather than the install's:
+   - If the report's `pluginVersion` is not `0.9.1`, the prompt you are following was loaded at session start from an older install than the script that just answered. Restarting Claude Code is what fixes that. Say so in one line before continuing, and if the script rejects a flag this prompt told you to pass, that is why — report it and stop rather than working around it.
    - If `stale` is true, the installed copy no longer matches its source — show the `plugin` check's `remedy` verbatim.
 
 2. **Parse arguments.** The first positional is the PR: `42`, `#42`, `owner/repo#42`, or a full PR URL. Pass it through unchanged. Recognized flags: `--repo`, `--effort`, `--model`, `--profile`, `--clone`, `--wait`, `--background`. `--wait` and `--background` are handled by you, not the script — do not forward them.
 
-3. **Prepare the worktree.**
+3. **Prepare the worktree** — unless the user asked for `--dry-run`, in which case skip to step 5. The script's own dry run resolves the target and prints the command without fetching, branching, or writing anything; preparing first would make "show me what this would do" fetch a pull request and create a worktree, which is precisely what the user was avoiding.
    ```bash
    node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" prepare <pr> [--repo …] [--clone] --json
    ```
