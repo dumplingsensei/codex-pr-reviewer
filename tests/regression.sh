@@ -370,6 +370,34 @@ check "the entry stays for a retry" \
   "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key"')" "1"
 rm -rf "$CACHE" "$SANDBOX/precious"
 
+note "doctor checks the codex interface, not just that codex exists"
+# Regression in spirit: --context shipped broken across several releases because
+# nothing asked the binary whether it accepted what the plugin was building.
+# `--help` exits 0 for a subcommand that does not exist, so the flag text is the
+# only usable signal.
+mkdir -p "$SANDBOX/oldcodex"
+cat >"$SANDBOX/oldcodex/codex" <<'STUB'
+#!/bin/sh
+case "$1" in
+  --version) echo "codex-cli 0.0.1 (pre --base)" ; exit 0 ;;
+  login) echo "Logged in using a stub" >&2 ; exit 0 ;;
+  review) echo "Usage: codex review [OPTIONS]" ; echo "      --uncommitted" ; exit 0 ;;
+esac
+exit 0
+STUB
+chmod +x "$SANDBOX/oldcodex/codex"
+out="$(PATH="$SANDBOX/oldcodex:$PATH" node "$SCRIPT" doctor 2>&1)"
+contains "a codex without --base is refused" "$out" "does not accept --base"
+contains "and the remedy names the upgrade" "$out" "npm install -g @openai/codex"
+check "and doctor fails rather than warning" \
+  "$(PATH="$SANDBOX/oldcodex:$PATH" node "$SCRIPT" doctor >/dev/null 2>&1; echo $?)" "1"
+
+# The same stub, with --base present, gets past the interface check.
+sed -i.bak 's/--uncommitted/--base <BRANCH>/' "$SANDBOX/oldcodex/codex"
+out="$(PATH="$SANDBOX/oldcodex:$PATH" node "$SCRIPT" doctor 2>&1)"
+check "a codex that accepts --base passes" \
+  "$(printf '%s' "$out" | grep -c 'does not accept --base')" "0"
+
 note "concurrent manifest writers do not lose each other's entries"
 # Regression: writing was atomic — temp file, rename over — but mutating was
 # not. Every change reads the whole manifest, edits one entry, and writes it all
@@ -719,6 +747,9 @@ cat >"$SANDBOX/doctorstub/codex" <<'STUB'
 case "$1" in
   --version) echo "codex-cli 0.0.0" ;;
   login) echo "Logged in using stub" >&2 ;;
+  # doctor asks whether this codex accepts `review --base`, since being
+  # installed is not the same as speaking the interface the plugin builds.
+  review) echo "      --base <BRANCH>" ;;
 esac
 exit 0
 STUB

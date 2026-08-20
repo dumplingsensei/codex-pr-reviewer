@@ -5,6 +5,17 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.2
+
+- `doctor` checks that the installed Codex speaks the interface this plugin
+  builds against — that `codex review` accepts `--base` — rather than only that
+  Codex exists and is logged in. Tested by capability, not by version number:
+  the release that added `review --base` is not documented, and a renumbering
+  would invalidate a floor anyway. `--context` is the case this is for; it
+  shipped broken across several releases because nothing asked.
+- Adds [SECURITY.md](SECURITY.md): what is in scope, what is known and accepted,
+  and a private reporting path.
+
 ## 0.9.1
 
 Hardening found by an external security review, in the places that survived

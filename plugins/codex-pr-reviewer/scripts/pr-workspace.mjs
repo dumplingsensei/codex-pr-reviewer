@@ -946,6 +946,31 @@ function checkCodex() {
       remedy: "Install the Codex CLI: `npm install -g @openai/codex`"
     };
   }
+  // Being installed is not the same as speaking the interface this plugin
+  // builds against. `--context` is the cautionary case: it appended a
+  // positional prompt that `codex review --base` rejects outright, and the flag
+  // shipped broken across several releases because nothing checked.
+  //
+  // Tested by capability rather than by version number. A floor would be a
+  // guess — the Codex CLI does not document which release added `review
+  // --base`, and a renumbering would invalidate it either way — while this asks
+  // the binary in front of us the only question that matters. It costs about
+  // 30ms and needs no network.
+  //
+  // `--help` exits 0 for a subcommand that does not exist, printing top-level
+  // help, so the exit status proves nothing and the flag text is the signal.
+  const reviewHelp = run("codex", ["review", "--help"]);
+  const helpText = `${reviewHelp.stdout}${reviewHelp.stderr}`;
+  if (!helpText.includes("--base")) {
+    return {
+      name: "codex",
+      ok: false,
+      detail: `${version.stdout.trim()} — \`codex review\` does not accept --base`,
+      remedy:
+        "This plugin pins the diff to the merge-base with `codex review --base <branch>`, which this Codex does not support. Update the Codex CLI: `npm install -g @openai/codex`."
+    };
+  }
+
   const login = run("codex", ["login", "status"]);
   // `codex login status` reports on stderr, not stdout.
   const loginText = `${login.stdout}${login.stderr}`.trim().split("\n")[0] ?? "";

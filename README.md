@@ -295,6 +295,11 @@ there for the same reason the suite never calls it — the binary is needed only
 to satisfy `doctor`'s preflight, which would otherwise turn every CI run into a
 silent skip.
 
+## Security
+
+Reporting a vulnerability, what is in scope, and what is known and accepted:
+[SECURITY.md](SECURITY.md).
+
 ## Changelog
 
 Release notes are in [CHANGELOG.md](CHANGELOG.md), and each release is tagged
