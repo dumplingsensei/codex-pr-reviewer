@@ -392,11 +392,37 @@ contains "and the remedy names the upgrade" "$out" "npm install -g @openai/codex
 check "and doctor fails rather than warning" \
   "$(PATH="$SANDBOX/oldcodex:$PATH" node "$SCRIPT" doctor >/dev/null 2>&1; echo $?)" "1"
 
-# The same stub, with --base present, gets past the interface check.
-sed -i.bak 's/--uncommitted/--base <BRANCH>/' "$SANDBOX/oldcodex/codex"
+# A codex whose `review --help` never answers is a different problem from one
+# that answers without --base, and telling someone to reinstall the CLI cannot
+# fix a crash or a hang.
+cat >"$SANDBOX/oldcodex/codex" <<'STUB'
+#!/bin/sh
+case "$1" in
+  --version) echo "codex-cli 0.0.1" ;;
+  login) echo "Logged in using a stub" >&2 ; exit 0 ;;
+  review) echo "error: could not connect" >&2 ; exit 70 ;;
+esac
+exit 0
+STUB
 out="$(PATH="$SANDBOX/oldcodex:$PATH" node "$SCRIPT" doctor 2>&1)"
-check "a codex that accepts --base passes" \
-  "$(printf '%s' "$out" | grep -c 'does not accept --base')" "0"
+contains "a probe that fails is not reported as a missing flag" "$out" "exited 70"
+check "and does not send the user to reinstall" \
+  "$(printf '%s' "$out" | grep -c 'npm install -g @openai/codex')" "0"
+
+# The same stub, answering with --base. Asserted on doctor's exit status, not on
+# the absence of one message: "no complaint about --base" is also satisfied by a
+# doctor that fell over for some entirely unrelated reason.
+cat >"$SANDBOX/oldcodex/codex" <<'STUB'
+#!/bin/sh
+case "$1" in
+  --version) echo "codex-cli 0.0.1" ;;
+  login) echo "Logged in using a stub" >&2 ; exit 0 ;;
+  review) echo "      --base <BRANCH>" ; exit 0 ;;
+esac
+exit 0
+STUB
+check "a codex that accepts --base passes the preflight" \
+  "$(PATH="$SANDBOX/oldcodex:$SANDBOX/doctorstub:$PATH" node "$SCRIPT" doctor >/dev/null 2>&1; echo $?)" "0"
 
 note "concurrent manifest writers do not lose each other's entries"
 # Regression: writing was atomic — temp file, rename over — but mutating was

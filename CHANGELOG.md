@@ -5,6 +5,20 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.3
+
+Fixes two defects in 0.9.2, both found by review of that commit.
+
+- The Codex interface probe read only the text of `codex review --help` and
+  ignored its exit status. `run()` returns status 124 with a synthetic
+  "timed out" line on a timeout, and a crash returns whatever the binary wrote —
+  neither contains `--base`, so a hung or broken Codex was reported as one that
+  does not support the flag, with a remedy telling the user to reinstall. The
+  two are now separate diagnoses.
+- The test covering the passing case asserted that doctor's output did *not*
+  contain one specific complaint, which any failure for any other reason also
+  satisfies. It now asserts the exit status.
+
 ## 0.9.2
 
 - `doctor` checks that the installed Codex speaks the interface this plugin

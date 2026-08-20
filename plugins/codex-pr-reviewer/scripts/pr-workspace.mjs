@@ -72,6 +72,17 @@ function run(command, args, options = {}) {
   };
 }
 
+/**
+ * Everything a subprocess said, in order, for checks that scan output rather
+ * than parse it.
+ *
+ * `run()` encodes a convention nothing else does: a timeout comes back as
+ * status 124 with a synthetic "timed out after Ns" line appended to stderr. A
+ * caller that concatenates the two streams and forgets to look at `status` will
+ * happily search that text for a flag name and conclude the flag is missing.
+ */
+const combinedOutput = (result) => `${result.stdout}${result.stderr}`;
+
 function runChecked(command, args, options = {}) {
   const result = run(command, args, options);
   if (result.error?.code === "ENOENT") {
@@ -890,6 +901,11 @@ function checkPluginBuild() {
 // healthy toolchain and then failed at the first clone.
 const GIT_MIN = [2, 19];
 
+// Stated once. Both codex remedies name it, and only one of them is reachable
+// in the test suite, so a rename would leave the other pointing at a package
+// that no longer exists with the suite still green.
+const CODEX_INSTALL = "npm install -g @openai/codex";
+
 function checkGit() {
   const result = run("git", ["--version"]);
   const wanted = GIT_MIN.join(".");
@@ -943,7 +959,7 @@ function checkCodex() {
       name: "codex",
       ok: false,
       detail: "not installed",
-      remedy: "Install the Codex CLI: `npm install -g @openai/codex`"
+      remedy: `Install the Codex CLI: \`${CODEX_INSTALL}\``
     };
   }
   // Being installed is not the same as speaking the interface this plugin
@@ -960,20 +976,33 @@ function checkCodex() {
   // `--help` exits 0 for a subcommand that does not exist, printing top-level
   // help, so the exit status proves nothing and the flag text is the signal.
   const reviewHelp = run("codex", ["review", "--help"]);
-  const helpText = `${reviewHelp.stdout}${reviewHelp.stderr}`;
-  if (!helpText.includes("--base")) {
+  // Distinguish "it answered, and the flag is not there" from "it never
+  // answered". A crash or a timeout produces output with no `--base` in it, and
+  // reading only the text turns a hung binary into "update the Codex CLI" —
+  // advice that cannot fix the actual problem and hides it.
+  if (reviewHelp.status !== 0) {
+    return {
+      name: "codex",
+      ok: false,
+      detail: `${version.stdout.trim()} — \`codex review --help\` ${reviewHelp.timedOut ? "timed out" : `exited ${reviewHelp.status}`}`,
+      remedy: `Could not ask this Codex what \`review\` accepts: ${
+        combinedOutput(reviewHelp).trim().split("\n").slice(-1)[0] || "no output"
+      }`
+    };
+  }
+  if (!combinedOutput(reviewHelp).includes("--base")) {
     return {
       name: "codex",
       ok: false,
       detail: `${version.stdout.trim()} — \`codex review\` does not accept --base`,
       remedy:
-        "This plugin pins the diff to the merge-base with `codex review --base <branch>`, which this Codex does not support. Update the Codex CLI: `npm install -g @openai/codex`."
+        `This plugin pins the diff to the merge-base with \`codex review --base <branch>\`, which this Codex does not support. Update the Codex CLI: \`${CODEX_INSTALL}\`.`
     };
   }
 
   const login = run("codex", ["login", "status"]);
   // `codex login status` reports on stderr, not stdout.
-  const loginText = `${login.stdout}${login.stderr}`.trim().split("\n")[0] ?? "";
+  const loginText = combinedOutput(login).trim().split("\n")[0] ?? "";
   const loggedIn = login.status === 0 && /logged in/i.test(loginText);
   return {
     name: "codex",
