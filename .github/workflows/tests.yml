@@ -34,8 +34,12 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         node: ["18", "22"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Pinned to major tags: patch and minor updates arrive on their own, and
+      # Dependabot proposes the majors rather than a red build announcing them.
+      # setup-node's automatic package-manager caching, added in v5, stays inert
+      # here because the repo has no package.json — adding one switches it on.
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
       # Pure helpers, plus the release stamps that keep four version literals in
@@ -54,8 +58,8 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - name: Stub the Codex CLI

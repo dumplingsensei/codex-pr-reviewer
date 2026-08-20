@@ -1,0 +1,15 @@
+# Action majors are the only recurring maintenance this repository has: the
+# pins in .github/workflows/ go stale on GitHub's schedule, not on ours, and a
+# runtime deprecation lands as a warning on every job before it lands as a
+# failure. Dependabot turns that into a pull request, which is the difference
+# between maintenance that is rare and maintenance that is a surprise.
+#
+# Monthly, because majors are infrequent and a weekly check would open nothing
+# most weeks. Only github-actions: there is no package.json here, and no
+# third-party code to update.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
