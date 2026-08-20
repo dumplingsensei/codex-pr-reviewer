@@ -26,7 +26,7 @@ Choose **user** scope when prompted, not project scope: the point is to review
 PRs from whichever repository you happen to be working in, so scoping the plugin
 to a single directory defeats it.
 
-Requires `codex` (logged in), `gh` (authenticated), `git` ≥ 2.5, and Node ≥ 18. Run `/codex-pr-reviewer:review` and it will tell you if anything is missing, or check directly:
+Requires `codex` (logged in), `gh` (authenticated), `git` ≥ 2.19, and Node ≥ 18. Run `/codex-pr-reviewer:review` and it will tell you if anything is missing, or check directly:
 
 ```
 node plugins/codex-pr-reviewer/scripts/pr-workspace.mjs doctor
@@ -105,11 +105,15 @@ Fork PRs work without adding remotes: GitHub serves `refs/pull/<N>/head` from th
 ## Safety
 
 - **PR content is untrusted input.** Every Codex run passes `-s read-only` explicitly rather than relying on config defaults, and the plugin never runs the PR's build, tests, or hooks. The commands instruct Claude to treat text inside a diff as data to review, never as instructions to follow.
+- **The reviewer's instructions cannot come from the PR.** Codex reads project documents — `AGENTS.md` and its fallbacks — from its working directory before it starts, and that directory *is* the pull request. Reviews run with `project_doc_max_bytes=0`, so a PR cannot rewrite the instructions of the reviewer sent to inspect it. The anti-injection rules in the command prompts bind Claude; they are not inherited by the Codex process, which is why this is enforced on the command line instead.
+- **Checkout cannot execute the PR either.** Fetching a PR writes attacker-authored bytes into a working tree before Codex's sandbox exists, and git runs hooks and filters during that write. Every git this plugin causes to run — including the one `gh` spawns — is given `core.hooksPath` pointing at an empty directory and neutralised LFS filters, through `GIT_CONFIG_*`. Without it, a repository configuring hooks into the tree, which is exactly what Husky does, lets a PR touching `.husky/post-checkout` run a script the moment its worktree is created.
 - **Nothing is posted without asking — and not everything can be posted.** Reviews print to your terminal, and `--post` additionally requires an explicit confirmation showing the exact comment body. Publishing then goes through `pr-workspace.mjs post`, which refuses, in code, any file that is not a review this plugin wrote, that belongs to a different PR, that came from a run Codex produced no output for, or whose bytes are not the ones that were approved. Those rules used to live only in the command prompt, where a stale copy or a persuasive diff could get around them.
-- **Only the command that posts can reach posting.** `/codex-pr-reviewer:review` is granted `Bash(node:*)` and nothing else — it reaches `git` and `gh` through the script, which is where the checks are. `/codex-pr-reviewer:sweep` holds three read-only `gh` subcommands, so it cannot comment on a PR at all, and `/codex-pr-reviewer:clean` holds two read-only `git` ones.
+- **Only the command that posts can reach posting.** `/codex-pr-reviewer:review` pre-approves one Bash rule: `pr-workspace.mjs` by its full path. It reaches `git` and `gh` through the script, which is where the checks are. Pre-approval is not a sandbox — `allowed-tools` grants permission rather than removing capability, so `node -e` remains callable and simply stops being silent, arriving as a permission prompt instead. The narrow rule is what makes that prompt the boundary. `/codex-pr-reviewer:sweep` holds three read-only `gh` subcommands, so it cannot comment on a PR at all, and `/codex-pr-reviewer:clean` holds two read-only `git` ones.
 - **Local paths are stripped** from review output before it is saved, so a posted comment never leaks your filesystem layout.
-- **Cleanup is precise.** The plugin records what it created in a manifest and `/codex-pr-reviewer:clean` removes only that — it will not touch unrelated worktrees or branches. Saved reviews are output rather than scratch state, so they survive every clean unless `--purge-reviews` asks for them by name, and that deletion is bound to the list a dry run showed.
+- **Cleanup is precise.** The plugin records what it created in a manifest and `/codex-pr-reviewer:clean` removes only that — it will not touch unrelated worktrees or branches. Saved reviews are output rather than scratch state, so they survive every clean unless `--purge-reviews` asks for them by name. The whole removal is bound to the plan a dry run showed, through `--confirm-plan`: a clean is two processes, and between them a review can finish or a sweep can prepare more PRs that a selector like `--all` would then match. Branches are deleted only while they still point at the commit the manifest recorded, so a name that has been reused since is left alone.
 - **A review in flight is left alone.** A running review is reading a worktree and has not written its output yet, so cleanup holds its PR back — worktree, branches, and shared clone included — and says which, rather than deleting state out from under a paid run. This is a guard, not a lock: it does not close the window described under [Script reference](#script-reference), where a clean cannot see a review that had not started yet.
+- **What is fetched is what GitHub says it is.** The head commit written into the worktree is compared against the `headRefOid` the API reports, and a mismatch stops the run. Metadata and code otherwise arrive by different paths — `gh` for one, whichever remote matched the slug for the other — with nothing comparing them.
+- **A failed run cannot be published.** Codex can exit nonzero and still print a body; an interrupted run emits `Review was interrupted…` on stdout. The exit status is recorded in the saved document, covered by the same digest that authorizes posting, and `post` refuses anything that did not exit 0.
 - **A stale install cannot post.** The rules above only hold if the running copy is the one you edited, so the preflight checks that and `--post` is withdrawn when it is not. See [Updating](#updating).
 
 ## Cache layout
@@ -131,9 +135,8 @@ The commands are thin; the git and `gh` choreography lives in one zero-dependenc
 ```
 pr-workspace.mjs doctor  [--json]
                  prepare <pr> [--repo owner/repo] [--clone] [--json]
-                 review  <pr> [--repo …] [--context] [--model M] [--effort E]
-                              [--profile P] [--trust-worktree] [--no-prepare]
-                              [--dry-run] [--json]
+                 review  <pr> [--repo …] [--model M] [--effort E]
+                              [--profile P] [--no-prepare] [--dry-run] [--json]
                  post    <pr> --review <path> --confirm <digest> [--repo …]
                               [--again] [--dry-run] [--json]
                  list    [--repo owner/repo] [--json]
@@ -217,9 +220,11 @@ which is what re-running on a PR mid-review does. Closing either properly means
 locking, and a lock that outlives a crashed run is a worse failure than the one
 it prevents.
 
-`--context` passes the PR title and description to the reviewer as stated intent, explicitly framed as a claim rather than as instructions. It is off by default so runs stay comparable to a plain `codex review`.
+`--context` and `--trust-worktree` were removed in 0.8.0, and passing either is an error rather than a silent no-op.
 
-`--trust-worktree` adds a per-invocation `projects."<worktree>".trust_level="trusted"` override. It is off by default and never writes to `~/.codex/config.toml`. Testing showed Codex does not gate on project trust for read-only reviews, so you should not normally need it.
+`--context` appended the PR title and description to the command as a positional prompt. `codex review` refuses that alongside `--base` — *the argument '--base <BRANCH>' cannot be used with '[PROMPT]'* — so every run that used it failed at argument parsing. It was documented, advertised in the command prompt, and had never once worked; nothing in the test suite caught it because nothing there invokes a real Codex.
+
+`--trust-worktree` enabled project `.codex` configuration for the worktree, which is a repository fetched from the internet. That is a configuration file inside untrusted code being given effect, which is not something a flag should be able to ask for.
 
 ## Tests
 
@@ -253,8 +258,12 @@ Point it at any public PR:
 ./tests/integration.sh cli/cli 13899
 ```
 
-CI runs the two offline suites on every push and pull request, across Node 18 —
-the documented floor — and 22, on Linux and macOS. The integration suite runs
+CI runs the two offline suites on every pull request and on pushes to `main`,
+across Node 18 — the documented floor — and 22, on Linux and macOS. One leg also
+runs `tests/version-guard.sh`, which fails the build when shipped plugin content
+changed without the version moving: Claude Code resolves an install by version
+and caches it, so a fixed prompt that keeps the old number reaches nobody who
+already has the plugin. The integration suite runs
 weekly and on demand instead: it needs the network and an upstream PR that still
 exists, and neither of those should be able to block a commit. It stubs `codex`
 there for the same reason the suite never calls it — the binary is needed only

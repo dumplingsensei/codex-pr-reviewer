@@ -1,7 +1,7 @@
 ---
 description: Review several GitHub pull requests with Codex and produce one digest
 argument-hint: '[--repo owner/repo] [--limit N] [--order smallest|newest] [--parallel] [--effort low|medium|high|xhigh]'
-allowed-tools: Read, Grep, Glob, AskUserQuestion, Bash(node:*), Bash(gh pr list:*), Bash(gh pr view:*), Bash(gh search prs:*)
+allowed-tools: Read, Grep, Glob, AskUserQuestion, Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs *), Bash(gh pr list:*), Bash(gh pr view:*), Bash(gh search prs:*)
 ---
 
 Review a batch of pull requests with Codex and summarize them together.
@@ -18,7 +18,7 @@ Core constraint:
 
 1. **Preflight** with `node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" doctor --json`. Stop on failure.
 
-   **These instructions were written for plugin version `0.7.0`.** If the report's `pluginVersion` differs, or `stale` is true, the prompts this session loaded are older than the installed plugin. Say so — with the `plugin` check's `remedy` — as part of step 4's confirmation, so the user decides whether to spend a paid batch on outdated instructions. This command cannot post, so it is a warning, not a block.
+   **These instructions were written for plugin version `0.8.0`.** If the report's `pluginVersion` differs, or `stale` is true, the prompts this session loaded are older than the installed plugin. Say so — with the `plugin` check's `remedy` — as part of step 4's confirmation, so the user decides whether to spend a paid batch on outdated instructions. This command cannot post, so it is a warning, not a block.
 
 2. **Gather candidates**, same sources as `/codex-pr-reviewer:list`:
    - With `--repo owner/repo`:

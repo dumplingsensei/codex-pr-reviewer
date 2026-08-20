@@ -311,5 +311,24 @@ for (const command of ["review.md", "sweep.md"]) {
   eq(`${command} has one version literal throughout`, literals, [version]);
 }
 
+describe("packaging");
+// marketplace.json ships `./plugins/codex-pr-reviewer`, so anything left at the
+// repository root is not in what a user installs. The licence has to be inside
+// the packaged directory to reach them, and identical to the root copy or the
+// two say different things about the same code.
+const rootLicense = path.join(root, "LICENSE");
+const pluginLicense = path.join(pluginDir, "LICENSE");
+eq("the plugin directory carries a LICENSE", fs.existsSync(pluginLicense), true);
+eq(
+  "it is byte-identical to the root one",
+  fs.existsSync(pluginLicense) && fs.readFileSync(pluginLicense, "utf8"),
+  fs.readFileSync(rootLicense, "utf8")
+);
+eq(
+  "plugin.json declares the licence it ships",
+  readJson(path.join(pluginDir, ".claude-plugin", "plugin.json")).license,
+  "MIT"
+);
+
 console.log(failures === 0 ? "\nAll unit tests passed." : `\n${failures} test(s) failed.`);
 process.exitCode = failures === 0 ? 0 : 1;

@@ -17,6 +17,14 @@ REPO="${1:-cli/cli}"
 PR="${2:-13899}"
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/plugins/codex-pr-reviewer/scripts/pr-workspace.mjs"
 
+# Isolate the cache BEFORE anything can write to it or trap on it. Without this
+# the cleanup trap below runs `clean` against the real cache, so merely invoking
+# this script — including down the preflight's SKIP path, which exits 0 and
+# still fires the trap — could delete a worktree, branches, refs, and manifest
+# entry belonging to a review the user actually wanted.
+SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/cpr-integration.XXXXXX")"
+export XDG_CACHE_HOME="$SANDBOX/cache"
+
 pass=0
 fail=0
 
@@ -34,8 +42,11 @@ check() {
 note() { printf '\n%s\n' "$1"; }
 
 cleanup() {
-  # Never leave a worktree or codex-pr/* branches behind, even on an early exit.
-  node "$SCRIPT" clean --pr "$REPO#$PR" >/dev/null 2>&1 || true
+  # Both are scoped to the sandbox: XDG_CACHE_HOME is exported above, and every
+  # prepare below passes --clone, so no repository outside $SANDBOX is ever
+  # registered and there is nothing of the user's for this to reach.
+  node "$SCRIPT" clean --pr "$REPO#$PR" --purge-clones >/dev/null 2>&1 || true
+  rm -rf "$SANDBOX"
 }
 trap cleanup EXIT
 
@@ -50,14 +61,21 @@ field() {
 
 note "preflight"
 if ! node "$SCRIPT" doctor >/dev/null 2>&1; then
-  echo "  SKIP — doctor reports an unhealthy toolchain:"
   node "$SCRIPT" doctor 2>&1 | sed 's/^/    /'
-  exit 0 # a skip is not a failure
+  # A skip is not a failure when a person runs this on a machine without a
+  # logged-in toolchain. It *is* a failure in CI, where a silent skip turns the
+  # only test of the real git/gh plumbing into a job that proves nothing.
+  if [[ -n "${CPR_REQUIRE_TOOLCHAIN:-}" ]]; then
+    echo "  FAIL toolchain unhealthy and CPR_REQUIRE_TOOLCHAIN is set"
+    exit 1
+  fi
+  echo "  SKIP — doctor reports an unhealthy toolchain"
+  exit 0
 fi
 echo "  ok   toolchain healthy"
 
 note "prepare $REPO#$PR"
-META="$(node "$SCRIPT" prepare "$REPO#$PR" --json 2>/dev/null)"
+META="$(node "$SCRIPT" prepare "$REPO#$PR" --clone --json 2>/dev/null)"
 if [[ -z "$META" ]]; then
   echo "  FAIL prepare produced no JSON"
   exit 1
@@ -83,7 +101,7 @@ THEIRS_STAT="$(gh pr view "$PR" --repo "$REPO" --json additions,deletions --jq '
 check "additions/deletions" "$OURS_STAT" "$THEIRS_STAT"
 
 note "prepare is idempotent"
-node "$SCRIPT" prepare "$REPO#$PR" >/dev/null 2>&1
+node "$SCRIPT" prepare "$REPO#$PR" --clone >/dev/null 2>&1
 check "second run exits 0" "$?" "0"
 check "head unchanged" "$(git -C "$WT" rev-parse HEAD)" "$HEAD_SHA"
 

@@ -45,6 +45,45 @@ contains() {
 
 note() { printf '\n%s\n' "$1"; }
 
+# A clean is two steps by design: a dry run shows the plan, and the confirmed
+# run has to name the plan it was shown. `cclean` is that pair, so these tests
+# exercise the same path the slash command takes rather than a shortcut past it.
+plan_digest() {
+  node "$SCRIPT" clean "$@" --dry-run --json 2>/dev/null | node -e '
+    let raw = "";
+    process.stdin.on("data", (c) => (raw += c));
+    process.stdin.on("end", () => {
+      try { process.stdout.write(String(JSON.parse(raw).planDigest ?? "")); } catch {}
+    });'
+}
+cclean() {
+  local digest
+  digest="$(plan_digest "$@")"
+  if [[ -n "$digest" ]]; then
+    node "$SCRIPT" clean "$@" --confirm-plan "$digest"
+  else
+    node "$SCRIPT" clean "$@"
+  fi
+}
+
+# The same two steps as an executable, for the codex stub further down: that
+# runs as its own /bin/sh process and inherits no functions from here.
+mkdir -p "$SANDBOX"
+cat >"$SANDBOX/cclean.sh" <<CCLEAN
+#!/bin/sh
+digest=\$(node "$SCRIPT" clean "\$@" --dry-run --json 2>/dev/null | node -e '
+  let raw = "";
+  process.stdin.on("data", (c) => (raw += c));
+  process.stdin.on("end", () => {
+    try { process.stdout.write(String(JSON.parse(raw).planDigest ?? "")); } catch {}
+  });')
+if [ -n "\$digest" ]; then
+  exec node "$SCRIPT" clean "\$@" --confirm-plan "\$digest"
+fi
+exec node "$SCRIPT" clean "\$@"
+CCLEAN
+chmod +x "$SANDBOX/cclean.sh"
+
 # ---------------------------------------------------------------------------
 
 note "invocation through a symlink still runs main()"
@@ -84,6 +123,21 @@ else
 fi
 contains "--effort reaches the codex command" "$out" 'model_reasoning_effort="high"'
 
+# Codex reads AGENTS.md from its working directory before it starts, and that
+# directory is the pull request. Left on, a PR rewrites the instructions of the
+# reviewer sent to inspect it; review.md's anti-injection rules bind Claude, not
+# this child process.
+contains "project documents are disabled for the review" "$out" "project_doc_max_bytes=0"
+
+# Both flags were removed rather than repaired: --context appended a positional
+# prompt that `codex review --base` rejects outright ("the argument '--base
+# <BRANCH>' cannot be used with '[PROMPT]'"), so it had never worked; and
+# --trust-worktree enabled project .codex config from an internet-fetched PR.
+out="$(node "$SCRIPT" review 42 --repo o/r --context --dry-run 2>&1)"
+contains "--context is gone, not silently ignored" "$out" "Unknown option"
+out="$(node "$SCRIPT" review 42 --repo o/r --trust-worktree --dry-run 2>&1)"
+contains "--trust-worktree is gone" "$out" "Unknown option"
+
 note "--dry-run has no side effects"
 # Regression: the dry-run check sat after prepare(), so it fetched, branched
 # and built a worktree before printing the command it "would" run.
@@ -118,6 +172,10 @@ WT="$SANDBOX/wt-7"
 git -C "$HOST" fetch --quiet origin '+refs/pull/7/head:refs/codex-pr-reviewer/pr/7'
 git -C "$HOST" branch --force codex-pr/7-base "$(git -C "$HOST" merge-base origin/main refs/codex-pr-reviewer/pr/7)"
 git -C "$HOST" worktree add --quiet --force -B codex-pr/7 "$WT" refs/codex-pr-reviewer/pr/7
+# `clean` deletes a branch only when its tip is still the commit the manifest
+# recorded, so these have to be the real OIDs rather than placeholders.
+OID_7="$(git -C "$HOST" rev-parse refs/heads/codex-pr/7)"
+OID_7_BASE="$(git -C "$HOST" rev-parse refs/heads/codex-pr/7-base)"
 
 # Two entries sharing one repoDir, so the shared-clone case is exercised.
 mkdir -p "$CACHE"
@@ -126,7 +184,7 @@ cat >"$CACHE/manifest.json" <<JSON
  {"key":"o/r#7","repo":"o/r","number":7,"title":"t","url":"u","state":"OPEN","author":"a",
   "worktree":"$WT","repoDir":"$HOST","remote":"origin","mode":"clone",
   "headBranch":"codex-pr/7","baseBranch":"codex-pr/7-base",
-  "refs":["refs/codex-pr-reviewer/pr/7"],"headSha":"0","mergeBase":"0",
+  "refs":["refs/codex-pr-reviewer/pr/7"],"headSha":"$OID_7","mergeBase":"$OID_7_BASE",
   "baseRefName":"main","additions":1,"deletions":0,"changedFiles":1,
   "preparedAt":"2026-01-01T00:00:00.000Z"},
  {"key":"o/r#9","repo":"o/r","number":9,"title":"t9","url":"u9","state":"OPEN","author":"a",
@@ -146,7 +204,19 @@ check "list kept both entries" \
 
 # Regression: --purge-clones deleted a cached clone shared by another entry,
 # leaving that entry's worktree dead but still advertised.
-out="$(node "$SCRIPT" clean --pr o/r#7 --purge-clones 2>&1)"
+# Regression: only the reviews list was digest-bound, so everything else was
+# re-selected by the confirmed run. A PR prepared between the dry run and the
+# confirmation matched the same selector — `--all` most obviously — and was
+# removed without ever appearing in the plan anyone approved.
+STALE_PLAN="$(plan_digest --pr o/r#9)"
+out="$(node "$SCRIPT" clean --pr o/r#7 --confirm-plan "$STALE_PLAN" 2>&1)"
+contains "a digest for a different plan is refused" "$out" "no longer what that plan digest described"
+out="$(node "$SCRIPT" clean --pr o/r#7 2>&1)"
+contains "cleaning without a plan digest is refused" "$out" "without \`--confirm-plan"
+check "and nothing was removed" \
+  "$(git -C "$HOST" branch --list 'codex-pr/7*' | wc -l | tr -d ' ')" "2"
+
+out="$(cclean --pr o/r#7 --purge-clones 2>&1)"
 contains "shared clone is kept" "$out" "still used by another prepared PR"
 check "clone survives on disk" "$([[ -d "$HOST" ]] && echo yes || echo no)" "yes"
 check "target branches are gone" \
@@ -158,7 +228,7 @@ git -C "$HOST" worktree add --quiet --force -B codex-pr/9 "$SANDBOX/wt-9" main
 git -C "$HOST" branch --force codex-pr/9-base main
 git -C "$HOST" checkout --quiet -b blocker codex-pr/9-base 2>/dev/null || true
 git -C "$HOST" checkout --quiet codex-pr/9-base
-node "$SCRIPT" clean --pr o/r#9 >"$SANDBOX/clean.out" 2>&1
+cclean --pr o/r#9 >"$SANDBOX/clean.out" 2>&1
 status=$?
 contains "failed deletion is reported" "$(cat "$SANDBOX/clean.out")" "could not remove"
 check "clean exits nonzero on partial failure" "$status" "1"
@@ -216,24 +286,27 @@ for n in 21 22; do
   git -C "$HOST" branch --force "codex-pr/$n" refs/codex-pr-reviewer/pr/"$n"
   git -C "$HOST" branch --force "codex-pr/$n-base" main
 done
+# Both entries point at the same two commits, so one pair of OIDs describes both.
+OID_HEAD="$(git -C "$HOST" rev-parse refs/heads/codex-pr/21)"
+OID_BASE="$(git -C "$HOST" rev-parse refs/heads/codex-pr/21-base)"
 cat >"$CACHE/manifest.json" <<JSON
 {"version":1,"entries":[
  {"key":"o/r#21","repo":"o/r","number":21,"title":"t","url":"u","state":"OPEN","author":"a",
   "worktree":"$SANDBOX/wt-21","repoDir":"$HOST","remote":"origin","mode":"clone",
   "headBranch":"codex-pr/21","baseBranch":"codex-pr/21-base",
-  "refs":["refs/codex-pr-reviewer/pr/21"],"headSha":"0","mergeBase":"0",
+  "refs":["refs/codex-pr-reviewer/pr/21"],"headSha":"$OID_HEAD","mergeBase":"$OID_BASE",
   "baseRefName":"main","additions":1,"deletions":0,"changedFiles":1,
   "preparedAt":"2026-01-01T00:00:00.000Z"},
  {"key":"o/r#22","repo":"o/r","number":22,"title":"t","url":"u","state":"OPEN","author":"a",
   "worktree":"$SANDBOX/wt-22","repoDir":"$HOST","remote":"origin","mode":"clone",
   "headBranch":"codex-pr/22","baseBranch":"codex-pr/22-base",
-  "refs":["refs/codex-pr-reviewer/pr/22"],"headSha":"0","mergeBase":"0",
+  "refs":["refs/codex-pr-reviewer/pr/22"],"headSha":"$OID_HEAD","mergeBase":"$OID_BASE",
   "baseRefName":"main","additions":1,"deletions":0,"changedFiles":1,
   "preparedAt":"2026-01-01T00:00:00.000Z"}
 ]}
 JSON
 
-out="$(node "$SCRIPT" clean --all 2>&1)"
+out="$(cclean --all 2>&1)"
 # The second entry must report its own branches, not silently skip them.
 contains "later entry still removes its branches" "$out" "branch codex-pr/22"
 contains "later entry still removes its refs" "$out" "refs/codex-pr-reviewer/pr/22"
@@ -252,18 +325,38 @@ REVIEWS="$CACHE/reviews"
 # what identifies one: see the collision case below.
 STAMP="2026-01-01T00-00-00-000Z"
 mkdir -p "$REVIEWS" "$SANDBOX/ghstub"
-printf '<!-- codex-pr-reviewer -->\n# Codex review\n\nP1: a real finding.\n' >"$REVIEWS/o__r-pr7-$STAMP.md"
-printf '<!-- codex-pr-reviewer -->\n# Codex review\n\n_Codex produced no review output._\n' >"$REVIEWS/o__r-pr8-$STAMP.md"
+printf '<!-- codex-pr-reviewer exit=0 -->\n# Codex review\n\nP1: a real finding.\n' >"$REVIEWS/o__r-pr7-$STAMP.md"
+printf '<!-- codex-pr-reviewer exit=0 -->\n# Codex review\n\n_Codex produced no review output._\n' >"$REVIEWS/o__r-pr8-$STAMP.md"
 printf 'handwritten\n' >"$REVIEWS/o__r-pr9-$STAMP.md"
 printf 'elsewhere\n' >"$SANDBOX/outside.md"
-GOOD="$(node -e 'const {createHash}=require("node:crypto"),fs=require("node:fs");
-  console.log(createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex").slice(0,12))' \
-  "$REVIEWS/o__r-pr7-$STAMP.md")"
+digest_of() {
+  node -e 'const {createHash}=require("node:crypto"),fs=require("node:fs");
+    console.log(createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex").slice(0,12))' "$1"
+}
+GOOD="$(digest_of "$REVIEWS/o__r-pr7-$STAMP.md")"
 
 out="$(node "$SCRIPT" post o/r#8 --repo o/r --review "$REVIEWS/o__r-pr8-$STAMP.md" --confirm "$GOOD" 2>&1)"
 contains "a failed review cannot be posted" "$out" "that review failed"
 out="$(node "$SCRIPT" post o/r#9 --repo o/r --review "$REVIEWS/o__r-pr9-$STAMP.md" --confirm "$GOOD" 2>&1)"
 contains "a file this plugin did not write is refused" "$out" "not a review this plugin generated"
+
+# Regression: codex can exit nonzero and still print a body — an interrupted run
+# emits "Review was interrupted…" on stdout — and the wrapper deliberately
+# reports success whenever a body was saved. Nothing carried the run's real
+# status as far as `post`, so a failed review was publishable.
+printf '<!-- codex-pr-reviewer exit=1 -->\n# Codex review\n\nReview was interrupted.\n' \
+  >"$REVIEWS/o__r-pr11-$STAMP.md"
+D11="$(digest_of "$REVIEWS/o__r-pr11-$STAMP.md")"
+out="$(node "$SCRIPT" post o/r#11 --repo o/r --review "$REVIEWS/o__r-pr11-$STAMP.md" --confirm "$D11" 2>&1)"
+contains "a review from a nonzero run is refused" "$out" "codex exited 1"
+
+# A review saved before the status was recorded cannot be shown to have
+# succeeded, so it is refused rather than assumed good.
+printf '<!-- codex-pr-reviewer -->\n# Codex review\n\nP1: from an older build.\n' \
+  >"$REVIEWS/o__r-pr12-$STAMP.md"
+D12="$(digest_of "$REVIEWS/o__r-pr12-$STAMP.md")"
+out="$(node "$SCRIPT" post o/r#12 --repo o/r --review "$REVIEWS/o__r-pr12-$STAMP.md" --confirm "$D12" 2>&1)"
+contains "a review with no recorded status is refused" "$out" "no record of how its run exited"
 out="$(node "$SCRIPT" post o/r#7 --repo o/r --review "$SANDBOX/outside.md" --confirm "$GOOD" 2>&1)"
 contains "a path outside the reviews directory is refused" "$out" "not inside"
 # Containment is decided on the resolved path, not on the spelling of it, so a
@@ -276,7 +369,7 @@ contains "a review of another PR is refused" "$out" "a different pull request"
 # A repository name can continue where the `<slug>-pr<N>-` prefix stops. This is
 # a review of o/r-pr7-archive#9; a prefix test reads it as one of o/r#7 and
 # publishes another repository's review to the wrong pull request.
-printf '<!-- codex-pr-reviewer -->\n# Codex review\n\nP1: from the archive repo.\n' \
+printf '<!-- codex-pr-reviewer exit=0 -->\n# Codex review\n\nP1: from the archive repo.\n' \
   >"$REVIEWS/o__r-pr7-archive-pr9-$STAMP.md"
 COLLIDE="$(node -e 'const {createHash}=require("node:crypto"),fs=require("node:fs");
   console.log(createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex").slice(0,12))' \
@@ -335,7 +428,7 @@ note "clean --purge-reviews cannot overreach"
 rm -rf "$CACHE"
 PURGE_WT="$SANDBOX/purge-wt"
 mkdir -p "$REVIEWS" "$PURGE_WT"
-mk_review() { printf '<!-- codex-pr-reviewer -->\n# Codex review\n\nP1: a finding.\n' >"$1"; }
+mk_review() { printf '<!-- codex-pr-reviewer exit=0 -->\n# Codex review\n\nP1: a finding.\n' >"$1"; }
 plan_field() {
   node "$SCRIPT" clean --all --purge-reviews --dry-run --json >"$SANDBOX/plan.json" 2>/dev/null
   node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));
@@ -361,17 +454,17 @@ mk_review "$REVIEWS/o__other-pr3-$STAMP.md"
 check "the plan covers this PR's reviews only" "$(plan_field reviews)" "2"
 DIGEST="$(plan_field reviewsDigest)"
 
-out="$(node "$SCRIPT" clean --all --purge-reviews 2>&1)"
+out="$(cclean --all --purge-reviews 2>&1)"
 contains "purging without a confirmed snapshot is refused" "$out" "--confirm-reviews"
 check "a refused run deletes nothing" "$(ls "$REVIEWS" | wc -l | tr -d ' ')" "4"
-out="$(node "$SCRIPT" clean --all --purge-reviews --confirm-reviews 000000000000 2>&1)"
+out="$(cclean --all --purge-reviews --confirm-reviews 000000000000 2>&1)"
 contains "a digest for another set is refused" "$out" "not the ones that digest approved"
 check "still nothing deleted" "$(ls "$REVIEWS" | wc -l | tr -d ' ')" "4"
 
 # The plan is shown by one process and carried out by another. A review saved in
 # between — a background review, a sweep finishing — was in nobody's plan.
 mk_review "$REVIEWS/o__r-pr7-2026-03-03T00-00-00-000Z.md"
-out="$(node "$SCRIPT" clean --all --purge-reviews --confirm-reviews "$DIGEST" 2>&1)"
+out="$(cclean --all --purge-reviews --confirm-reviews "$DIGEST" 2>&1)"
 contains "a review saved after the plan aborts the run" "$out" "not the ones that digest approved"
 check "and that review is still there" \
   "$([[ -f "$REVIEWS/o__r-pr7-2026-03-03T00-00-00-000Z.md" ]] && echo present || echo gone)" "present"
@@ -386,7 +479,7 @@ check "and that review is still there" \
 OBSTRUCTION="$REVIEWS/o__r-pr7-2026-04-04T00-00-00-000Z.md"
 mkdir "$OBSTRUCTION"
 DIGEST="$(plan_field reviewsDigest)"
-out="$(node "$SCRIPT" clean --all --purge-reviews --confirm-reviews "$DIGEST" 2>&1)"
+out="$(cclean --all --purge-reviews --confirm-reviews "$DIGEST" 2>&1)"
 contains "a failed review deletion is reported" "$out" "could not remove review"
 check "its entry stays for a retry" "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key"')" "1"
 check "the reviews that could be deleted were" \
@@ -396,7 +489,7 @@ check "the reviews that could be deleted were" \
 rmdir "$OBSTRUCTION"
 mk_review "$REVIEWS/o__r-pr7-2026-05-05T00-00-00-000Z.md"
 DIGEST="$(plan_field reviewsDigest)"
-out="$(node "$SCRIPT" clean --all --purge-reviews --confirm-reviews "$DIGEST" 2>&1)"
+out="$(cclean --all --purge-reviews --confirm-reviews "$DIGEST" 2>&1)"
 check "the retry removes what is left" "$(printf '%s' "$out" | grep -c '^  - review ')" "1"
 check "another repo's colliding review survives" \
   "$([[ -f "$REVIEWS/o__r-pr7-archive-pr9-$STAMP.md" ]] && echo present || echo gone)" "present"
@@ -407,7 +500,7 @@ check "the manifest is empty" "$(node "$SCRIPT" list --json 2>/dev/null | grep -
 # Without the flag, reviews are untouched and no confirmation is needed.
 write_manifest
 mkdir -p "$PURGE_WT"
-out="$(node "$SCRIPT" clean --all 2>&1)"
+out="$(cclean --all 2>&1)"
 check "a plain clean keeps every review" "$(ls "$REVIEWS" | wc -l | tr -d ' ')" "2"
 contains "and says so" "$out" "Kept 2 saved reviews"
 
@@ -420,12 +513,12 @@ kept_json() {
 }
 write_manifest
 mkdir -p "$PURGE_WT"
-node "$SCRIPT" clean --all --json >"$SANDBOX/cleaned.json" 2>/dev/null
+cclean --all --json >"$SANDBOX/cleaned.json" 2>/dev/null
 check "a --json clean reports what it kept" "$(kept_json "$SANDBOX/cleaned.json")" "2"
 node "$SCRIPT" clean --all --purge-reviews --dry-run --json >"$SANDBOX/plan.json" 2>/dev/null
 check "a --json dry run reports what would remain" "$(kept_json "$SANDBOX/plan.json")" "2"
 # Nothing selected is still a run whose answer is "these reviews are still here".
-out="$(node "$SCRIPT" clean --all 2>&1)"
+out="$(cclean --all 2>&1)"
 contains "an empty clean still reports them" "$out" "Kept 2 saved reviews"
 contains "and says there was nothing to clean" "$out" "Nothing to clean."
 rm -f "$CACHE/manifest.json"
@@ -475,7 +568,7 @@ check "and plans no review deletion" "$(json_at "$SANDBOX/inflight-plan.json" re
 check "the running review is reported" "$(json_at "$SANDBOX/inflight-plan.json" running)" "1"
 check "and marked as held" "$(json_at "$SANDBOX/inflight-plan.json" running.0.held)" "true"
 
-out="$(node "$SCRIPT" clean --all --purge-reviews 2>&1)"
+out="$(cclean --all --purge-reviews 2>&1)"
 contains "a real run holds the entry back" "$out" "Held back 1 entry"
 contains "and names the PR it held" "$out" "o/r#7"
 contains "and how to override it" "$out" "--include-running"
@@ -508,7 +601,7 @@ cat >"$CACHE/manifest.json" <<JSON
   "changedFiles":1,"preparedAt":"2026-01-01T00:00:00.000Z"}
 ]}
 JSON
-out="$(node "$SCRIPT" clean --all 2>&1)"
+out="$(cclean --all 2>&1)"
 contains "the entry with no review running is still cleaned" "$out" "o/r#8"
 contains "and the shared clone is kept for the held one" "$out" "still used by another prepared PR"
 check "so the repository being reviewed survives" \
@@ -518,7 +611,7 @@ check "and only the held entry is left" \
 
 # The override exists so a leaked guard can never wedge cleanup — and it says so.
 inflight_manifest
-out="$(node "$SCRIPT" clean --all --include-running 2>&1)"
+out="$(cclean --all --include-running 2>&1)"
 contains "--include-running says what it is overriding" "$out" "still running"
 check "and cleans the entry anyway" \
   "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key"')" "0"
@@ -529,7 +622,7 @@ kill "$LIVE_PID" 2>/dev/null
 wait "$LIVE_PID" 2>/dev/null
 inflight_manifest
 mkdir -p "$RUN_WT"
-out="$(node "$SCRIPT" clean --all 2>&1)"
+out="$(cclean --all 2>&1)"
 check "a dead run holds nothing back" "$(printf '%s' "$out" | grep -c 'Held back')" "0"
 check "and its marker is swept" "$(ls "$CACHE/runs" 2>/dev/null | wc -l | tr -d ' ')" "0"
 check "the entry is cleaned" "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key"')" "0"
@@ -546,7 +639,7 @@ cat >"$SANDBOX/inflight-stub/codex" <<STUB
 case "\$1" in --version) echo "codex-cli stub" ; exit 0 ;; esac
 ls "$CACHE/runs" | sed 's/^/marker: /'
 node "$SCRIPT" clean --all --purge-reviews --dry-run >"$SANDBOX/held-mid-review.out" 2>&1
-node "$SCRIPT" clean --all --include-running >"$SANDBOX/override-mid-review.out" 2>&1
+"$SANDBOX/cclean.sh" --all --include-running >"$SANDBOX/override-mid-review.out" 2>&1
 echo "P1 finding from a review that outlived its manifest entry"
 exit 0
 STUB

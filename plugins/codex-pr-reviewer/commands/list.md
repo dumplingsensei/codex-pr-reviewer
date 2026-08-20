@@ -1,7 +1,7 @@
 ---
 description: Find GitHub pull requests waiting on your review
 argument-hint: '[--repo owner/repo] [--limit N]'
-allowed-tools: Read, Grep, Glob, AskUserQuestion, Bash(node:*), Bash(gh pr list:*), Bash(gh search prs:*), Bash(gh repo view:*)
+allowed-tools: Read, Grep, Glob, AskUserQuestion, Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs *), Bash(gh pr list:*), Bash(gh search prs:*), Bash(gh repo view:*)
 ---
 
 Show pull requests that are waiting on you, so you can pick one to review without leaving the session.
