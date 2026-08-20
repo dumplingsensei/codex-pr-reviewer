@@ -316,108 +316,23 @@ check "clone is gone" "$([[ -d "$HOST" ]] && echo present || echo gone)" "gone"
 check "manifest is emptied" \
   "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key"')" "0"
 
-note "post refuses everything that must never reach a PR"
-# The rules deciding what may be published used to live only in review.md, where
-# a stale prompt, a slip, or text inside a reviewed diff could get around them.
-# Each case below is one of those rules, now enforced where none of that applies.
+note "saved reviews are identifiable on disk"
+# `post` was removed in 0.9.0 and with it every assertion about publishing.
+# What is still worth pinning down is that a saved review is recognisable as
+# one — the marker and the name are what `clean --purge-reviews` selects on,
+# and what tells a person opening the file whether the run actually finished.
 REVIEWS="$CACHE/reviews"
 # Saved reviews are named `<slug>-pr<N>-<stamp>.md`, and the stamp is part of
-# what identifies one: see the collision case below.
+# what identifies one.
 STAMP="2026-01-01T00-00-00-000Z"
-mkdir -p "$REVIEWS" "$SANDBOX/ghstub"
+mkdir -p "$REVIEWS"
 printf '<!-- codex-pr-reviewer exit=0 -->\n# Codex review\n\nP1: a real finding.\n' >"$REVIEWS/o__r-pr7-$STAMP.md"
-printf '<!-- codex-pr-reviewer exit=0 -->\n# Codex review\n\n_Codex produced no review output._\n' >"$REVIEWS/o__r-pr8-$STAMP.md"
-printf 'handwritten\n' >"$REVIEWS/o__r-pr9-$STAMP.md"
-printf 'elsewhere\n' >"$SANDBOX/outside.md"
-digest_of() {
-  node -e 'const {createHash}=require("node:crypto"),fs=require("node:fs");
-    console.log(createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex").slice(0,12))' "$1"
-}
-GOOD="$(digest_of "$REVIEWS/o__r-pr7-$STAMP.md")"
+printf '<!-- codex-pr-reviewer exit=1 -->\n# Codex review\n\nReview was interrupted.\n' >"$REVIEWS/o__r-pr8-$STAMP.md"
 
-out="$(node "$SCRIPT" post o/r#8 --repo o/r --review "$REVIEWS/o__r-pr8-$STAMP.md" --confirm "$GOOD" 2>&1)"
-contains "a failed review cannot be posted" "$out" "that review failed"
-out="$(node "$SCRIPT" post o/r#9 --repo o/r --review "$REVIEWS/o__r-pr9-$STAMP.md" --confirm "$GOOD" 2>&1)"
-contains "a file this plugin did not write is refused" "$out" "not a review this plugin generated"
-
-# Regression: codex can exit nonzero and still print a body — an interrupted run
-# emits "Review was interrupted…" on stdout — and the wrapper deliberately
-# reports success whenever a body was saved. Nothing carried the run's real
-# status as far as `post`, so a failed review was publishable.
-printf '<!-- codex-pr-reviewer exit=1 -->\n# Codex review\n\nReview was interrupted.\n' \
-  >"$REVIEWS/o__r-pr11-$STAMP.md"
-D11="$(digest_of "$REVIEWS/o__r-pr11-$STAMP.md")"
-out="$(node "$SCRIPT" post o/r#11 --repo o/r --review "$REVIEWS/o__r-pr11-$STAMP.md" --confirm "$D11" 2>&1)"
-contains "a review from a nonzero run is refused" "$out" "codex exited 1"
-
-# A review saved before the status was recorded cannot be shown to have
-# succeeded, so it is refused rather than assumed good.
-printf '<!-- codex-pr-reviewer -->\n# Codex review\n\nP1: from an older build.\n' \
-  >"$REVIEWS/o__r-pr12-$STAMP.md"
-D12="$(digest_of "$REVIEWS/o__r-pr12-$STAMP.md")"
-out="$(node "$SCRIPT" post o/r#12 --repo o/r --review "$REVIEWS/o__r-pr12-$STAMP.md" --confirm "$D12" 2>&1)"
-contains "a review with no recorded status is refused" "$out" "no record of how its run exited"
-out="$(node "$SCRIPT" post o/r#7 --repo o/r --review "$SANDBOX/outside.md" --confirm "$GOOD" 2>&1)"
-contains "a path outside the reviews directory is refused" "$out" "not inside"
-# Containment is decided on the resolved path, not on the spelling of it, so a
-# `..` that lands back inside is fine and one that escapes is not. --dry-run
-# keeps this case off the network: nothing below has stubbed `gh` yet.
-out="$(node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/../reviews/o__r-pr7-$STAMP.md" --dry-run 2>&1)"
-contains "a traversal that lands inside is accepted" "$out" "gh pr comment 7"
-out="$(node "$SCRIPT" post o/r#8 --repo o/r --review "$REVIEWS/o__r-pr7-$STAMP.md" --confirm "$GOOD" 2>&1)"
-contains "a review of another PR is refused" "$out" "a different pull request"
-# A repository name can continue where the `<slug>-pr<N>-` prefix stops. This is
-# a review of o/r-pr7-archive#9; a prefix test reads it as one of o/r#7 and
-# publishes another repository's review to the wrong pull request.
-printf '<!-- codex-pr-reviewer exit=0 -->\n# Codex review\n\nP1: from the archive repo.\n' \
-  >"$REVIEWS/o__r-pr7-archive-pr9-$STAMP.md"
-COLLIDE="$(node -e 'const {createHash}=require("node:crypto"),fs=require("node:fs");
-  console.log(createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex").slice(0,12))' \
-  "$REVIEWS/o__r-pr7-archive-pr9-$STAMP.md")"
-out="$(node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-archive-pr9-$STAMP.md" --confirm "$COLLIDE" 2>&1)"
-contains "a repo whose name extends the prefix is refused" "$out" "a different pull request"
-out="$(node "$SCRIPT" post "o/r-pr7-archive#9" --repo o/r-pr7-archive --review "$REVIEWS/o__r-pr7-archive-pr9-$STAMP.md" --dry-run 2>&1)"
-contains "that same review reaches its own PR" "$out" "gh pr comment 9"
-out="$(node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-$STAMP.md" 2>&1)"
-contains "posting without --confirm is refused" "$out" "Refusing to post without"
-out="$(node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-$STAMP.md" --confirm 0000 2>&1)"
-contains "a truncated digest is refused" "$out" "too short"
-out="$(node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-$STAMP.md" --confirm 000000000000 2>&1)"
-contains "a digest for another review is refused" "$out" "is not the one that digest"
-# The digest is what carries an approval from the body that was shown. A failure
-# must not hand it back, or the next call just quotes it and posts anyway.
-check "no failure quotes the real digest" "$(printf '%s' "$out" | grep -c "$GOOD")" "0"
-
-# --dry-run must not post, and must not leak the digest either.
-cat >"$SANDBOX/ghstub/gh" <<'STUB'
-#!/bin/sh
-echo "https://github.com/o/r/pull/7#issuecomment-99"
-echo "$@" >>"$GH_CALLS"
-STUB
-chmod +x "$SANDBOX/ghstub/gh"
-export GH_CALLS="$SANDBOX/gh-calls.txt"
-: >"$GH_CALLS"
-out="$(PATH="$SANDBOX/ghstub:$PATH" node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-$STAMP.md" --dry-run --json 2>&1)"
-check "dry-run posts nothing" "$(wc -l <"$GH_CALLS" | tr -d ' ')" "0"
-check "dry-run does not hand back the digest" "$(printf '%s' "$out" | grep -c "$GOOD")" "0"
-
-# A prepared PR records what it published, so the same review cannot go twice.
-cat >"$CACHE/manifest.json" <<JSON
-{"version":1,"entries":[
- {"key":"o/r#7","repo":"o/r","number":7,"title":"t","url":"u","state":"OPEN","author":"a",
-  "worktree":"$SANDBOX/wt-post","repoDir":"$SANDBOX/none","remote":"origin","mode":"clone",
-  "headBranch":"codex-pr/7","baseBranch":"codex-pr/7-base","refs":[],
-  "headSha":"0","mergeBase":"0","baseRefName":"main","additions":1,"deletions":0,
-  "changedFiles":1,"preparedAt":"2026-01-01T00:00:00.000Z"}
-]}
-JSON
-out="$(PATH="$SANDBOX/ghstub:$PATH" node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-$STAMP.md" --confirm "$GOOD" 2>&1)"
-contains "an approved review posts and returns the URL" "$out" "issuecomment-99"
-contains "the post is recorded" "$(node "$SCRIPT" list --json 2>/dev/null)" "issuecomment-99"
-out="$(PATH="$SANDBOX/ghstub:$PATH" node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-$STAMP.md" --confirm "$GOOD" 2>&1)"
-contains "the same review is not posted twice" "$out" "already posted"
-out="$(PATH="$SANDBOX/ghstub:$PATH" node "$SCRIPT" post o/r#7 --repo o/r --review "$REVIEWS/o__r-pr7-$STAMP.md" --confirm "$GOOD" --again 2>&1)"
-contains "--again allows a deliberate duplicate" "$out" "issuecomment-99"
+contains "a review records the exit status of its run" \
+  "$(head -1 "$REVIEWS/o__r-pr7-$STAMP.md")" "exit=0"
+contains "a failed run is distinguishable on disk" \
+  "$(head -1 "$REVIEWS/o__r-pr8-$STAMP.md")" "exit=1"
 rm -f "$CACHE/manifest.json"
 
 note "clean --purge-reviews cannot overreach"
@@ -660,9 +575,9 @@ check "and the marker is gone once the review finished" \
 
 note "doctor detects a stale installed copy"
 # Regression: an edited command prompt reached neither the installed copy nor a
-# running session, and nothing said so. Every safety rule that decides whether a
-# review may be posted lives in those prompts, so a silently stale install means
-# --post is guarded by rules that are not the ones on disk.
+# running session, and nothing said so. The rules a run follows — what it may
+# fetch, what it may execute, what it may delete — live in those prompts, so a
+# silently stale install means the session is following a copy nobody edited.
 #
 # Simulate Claude Code's layout: a marketplace holding the source, and a copy of
 # it under <config>/plugins/cache/<marketplace>/<plugin>/<version>.

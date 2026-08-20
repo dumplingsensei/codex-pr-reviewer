@@ -26,7 +26,6 @@ const {
   entryKey,
   hashPluginDir,
   diffFileHashes,
-  isInsideDir,
   digestOf,
   reviewStamp,
   reviewFileMatches,
@@ -154,21 +153,10 @@ eq("hashes the command prompts", shipped.has("commands/review.md"), true);
 eq("keys are relative to the root", shipped.has("scripts/pr-workspace.mjs"), true);
 eq("a tree matches itself", diffFileHashes(shipped, hashPluginDir(pluginDir)), []);
 
-describe("isInsideDir");
-// Paths that do not exist on disk, so the assertions are about the path algebra
-// rather than about whatever /tmp happens to be a symlink to today.
-const reviewsRoot = "/nonexistent-cache/reviews";
-eq("a file in the directory", isInsideDir(reviewsRoot, `${reviewsRoot}/o__r-pr7.md`), true);
-eq("the directory itself is not inside itself", isInsideDir(reviewsRoot, reviewsRoot), false);
-eq("an unrelated path", isInsideDir(reviewsRoot, "/nonexistent-cache/elsewhere/x.md"), false);
-eq("a traversal that escapes", isInsideDir(reviewsRoot, `${reviewsRoot}/../elsewhere/x.md`), false);
-eq("a traversal that lands back inside", isInsideDir(reviewsRoot, `${reviewsRoot}/../reviews/x.md`), true);
-// The string-prefix version of this check calls a sibling directory a child.
-eq("a sibling sharing a prefix", isInsideDir(reviewsRoot, "/nonexistent-cache/reviews-old/x.md"), false);
-
 describe("reviewStamp");
 // The matcher below anchors on the shape of this stamp. If the two ever drift,
-// every saved review stops being recognised as one — including by `post`.
+// every saved review stops being recognised as one, and `--purge-reviews` stops
+// being able to select the reviews it is meant to remove.
 eq("matches the pattern the matcher expects", /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/.test(reviewStamp()), true);
 eq(
   "is the ISO timestamp with : and . swapped out",

@@ -205,11 +205,6 @@ const REVIEW_SCHEMA = {
   aliasMap: { m: "model" }
 };
 
-const POST_SCHEMA = {
-  valueOptions: ["pr", "repo", "review", "confirm"],
-  booleanOptions: ["json", "dry-run", "again"]
-};
-
 /* ------------------------------------------------------------------ *
  * cache + manifest
  * ------------------------------------------------------------------ */
@@ -729,8 +724,9 @@ function findPluginSource(pluginName, installedRoot) {
 
 /**
  * Warn-level: a stale copy still reviews correctly, and blocking every review
- * on an unreleased edit would be intolerable during development. What it must
- * block is publishing — the command prompts refuse `--post` on a stale build.
+ * on an unreleased edit would be intolerable during development. What it has to
+ * do is say so, loudly enough that a flag the prompts describe and the script no
+ * longer accepts is read as a stale install rather than a broken pull request.
  */
 function checkPluginBuild() {
   const root = pluginRoot();
@@ -1087,26 +1083,24 @@ function describeEntry(entry) {
  * review
  * ------------------------------------------------------------------ */
 
-// Every saved review opens with this marker, and `post` refuses any file that
-// does not. It is what makes "publish a review" mean "publish something this
-// plugin generated", rather than whatever path a caller was talked into.
+// Every saved review opens with this marker, so a file in the reviews
+// directory can be told apart from anything else that lands there.
 const REVIEW_MARKER = "<!-- codex-pr-reviewer";
 
 /**
  * Codex's own exit status, carried in the first line of the document.
  *
- * It lives here rather than in the manifest because the manifest is mutable
- * and separable: a review is posted by path, and the entry it came from can be
- * cleaned away in between. In the document it is covered by the same digest
- * that authorizes the publish, so a run's status cannot be edited without
- * invalidating the approval that quotes it.
+ * The wrapper reports its own success separately — a review that ran and was
+ * saved is a result even when codex failed, so `sweep` does not mark healthy
+ * PRs broken — which leaves the file itself as the only durable record of
+ * whether the run finished. It is in the document rather than the manifest
+ * because the manifest is mutable and separable: the entry a review came from
+ * can be cleaned away while the review stays on disk.
  */
 const reviewMarker = (exitCode) => `${REVIEW_MARKER} exit=${exitCode} -->`;
-const REVIEW_EXIT_PATTERN = /^<!-- codex-pr-reviewer exit=(\d+) -->/;
 
-// Written in place of the review body when codex returned nothing. `post`
-// refuses a document containing it: a run that produced no review is a failed
-// run, and a failed run must never reach someone else's pull request.
+// Written in place of the review body when codex returned nothing, so a saved
+// file that looks complete cannot be mistaken for a run that produced findings.
 const NO_REVIEW_BODY = "_Codex produced no review output._";
 
 /** sha256 of a saved review, used to bind an approval to the exact bytes. */
@@ -1131,9 +1125,9 @@ function reviewOutputPath(entry) {
  * because a repository name may itself continue where that prefix stops. A
  * review of `o/r-pr7-archive#9` is saved as `o__r-pr7-archive-pr9-<stamp>.md`,
  * which starts with `o__r-pr7-` and so reads as a review of `o/r#7`. Getting
- * that wrong deletes another repository's review under `--purge-reviews`, and
- * publishes it to the wrong pull request under `post`. Requiring the stamp to
- * follow the number removes the ambiguity: `archive-pr9-…` is not a stamp.
+ * that wrong deletes another repository's review under `--purge-reviews`.
+ * Requiring the stamp to follow the number removes the ambiguity:
+ * `archive-pr9-…` is not a stamp.
  */
 export function reviewFileMatches(name, repo, number) {
   const head = escapeRegex(`${slugToDir(repo)}-pr${number}-`);
@@ -1333,10 +1327,7 @@ async function commandReview(argv, cwd) {
         )}\n`
       );
     } else {
-      process.stdout.write(`\nSaved to ${outputPath}\n`);
-      // `post --confirm` takes this digest: it is what ties a publish back to the
-      // exact bytes that were reviewed and approved, across turns and re-runs.
-      process.stdout.write(`Digest ${digest.slice(0, 12)}\n`);
+        process.stdout.write(`\nSaved to ${outputPath}\n`);
     }
 
     if (status !== 0) log(`Note: codex exited ${status}.`);
@@ -1348,207 +1339,6 @@ async function commandReview(argv, cwd) {
   } finally {
     endRun(runMarker);
   }
-}
-
-/* ------------------------------------------------------------------ *
- * post
- *
- * Publishing is the one irreversible thing this plugin does, and until now
- * every rule governing it lived in a command prompt: whether the review had
- * actually succeeded, whether the body was the approved one, whether the file
- * even came from this plugin. Prompt rules are load-bearing but they are also
- * the part that goes stale, that a session can be running an older copy of,
- * and that text inside a reviewed diff will try to argue with.
- *
- * These checks are the same rules, enforced where none of that applies. The
- * prompt still decides *whether* to publish — it asks the user, and it may
- * refuse on its own. This decides what is publishable at all.
- * ------------------------------------------------------------------ */
-
-/** True when `child` is inside `parent`, symlinks resolved, `..` defeated. */
-export function isInsideDir(parent, child) {
-  const from = realPath(parent);
-  const to = realPath(child);
-  const relative = path.relative(from, to);
-  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
-}
-
-/**
- * Loads a saved review and refuses everything that must never be published.
- * Each rejection names the rule it broke: a caller that cannot post should be
- * able to say why without guessing.
- */
-function loadPostableReview(reviewPath, target) {
-  if (!reviewPath) {
-    throw new UserError(
-      "No review to post: `--review <path>` is required.",
-      "Pass the path that `review` printed as `Saved to …`."
-    );
-  }
-
-  const resolved = path.resolve(reviewPath);
-  // Only this plugin's own reviews directory. A path argument is exactly the
-  // kind of thing a hostile diff would try to redirect, and the blast radius
-  // of getting it wrong is a public comment on a stranger's pull request.
-  if (!isInsideDir(reviewsDir(), resolved)) {
-    throw new UserError(
-      `Refusing to post ${resolved}: it is not inside ${reviewsDir()}.`,
-      "Only reviews this plugin saved can be posted."
-    );
-  }
-
-  let document;
-  try {
-    document = fs.readFileSync(resolved, "utf8");
-  } catch (error) {
-    throw new UserError(`Could not read the review at ${resolved} (${error.message}).`);
-  }
-
-  if (!document.startsWith(REVIEW_MARKER)) {
-    throw new UserError(
-      `Refusing to post ${resolved}: it is not a review this plugin generated.`,
-      `A saved review begins with \`${REVIEW_MARKER} exit=<n> -->\`.`
-    );
-  }
-
-  // A review is only publishable if the run that produced it succeeded. The
-  // wrapper deliberately reports its own success separately — a saved review is
-  // a result even when codex failed, so `sweep` does not mark healthy PRs as
-  // broken — which means the prompt reaches step 7 either way. This is where
-  // that distinction is actually enforced.
-  const stamped = document.match(REVIEW_EXIT_PATTERN);
-  if (!stamped) {
-    throw new UserError(
-      `Refusing to post ${resolved}: it carries no record of how its run exited.`,
-      "It was saved by a version that did not record one. Re-run the review and post that result."
-    );
-  }
-  if (stamped[1] !== "0") {
-    throw new UserError(
-      `Refusing to post ${resolved}: codex exited ${stamped[1]} on the run that produced it.`,
-      "An interrupted or failed run can still emit text. Re-run the review and post the result of a run that succeeded."
-    );
-  }
-
-  // The guard the whole command exists for. A failed run still writes a
-  // document — header, footer, and a placeholder where the findings would be —
-  // so "the file exists" has never been evidence that a review happened.
-  if (document.includes(NO_REVIEW_BODY)) {
-    throw new UserError(
-      `Refusing to post ${resolved}: that review failed — codex produced no output.`,
-      "Re-run the review and post the result of a run that succeeded."
-    );
-  }
-
-  if (!reviewFileMatches(path.basename(resolved), target.slug, target.number)) {
-    throw new UserError(
-      `Refusing to post ${path.basename(resolved)} to ${target.slug}#${target.number}: it is a review of a different pull request.`,
-      `A review of this PR is named \`${slugToDir(target.slug)}-pr${target.number}-<timestamp>.md\`.`
-    );
-  }
-
-  return { path: resolved, document, digest: digestOf(document) };
-}
-
-/**
- * The approval covers a specific review, not "the latest review of this PR".
- * Re-running on the same PR is supported and expected, so several saved reviews
- * of one PR routinely exist and only one of them was ever shown to anyone.
- *
- * The digest is not a secret — anyone holding the file can compute it — so this
- * stops the wrong review being published by mistake, which is the way it would
- * actually happen. It is deliberately not quoted back in any failure here: a
- * caller that reaches for the digest of whatever file it happens to be holding
- * has lost the very link to an approval that the digest exists to carry.
- */
-function requireConfirmedDigest(review, confirm) {
-  const supplied = String(confirm ?? "").trim().toLowerCase();
-  if (!supplied) {
-    throw new UserError(
-      "Refusing to post without `--confirm <digest>`.",
-      "Pass the digest that `review` printed for the run being published."
-    );
-  }
-  if (supplied.length < 12) {
-    throw new UserError(
-      `The digest \`${supplied}\` is too short to identify a review.`,
-      "Pass at least the first 12 characters that `review` printed."
-    );
-  }
-  if (!review.digest.startsWith(supplied)) {
-    throw new UserError(
-      `The review at ${review.path} is not the one that digest ${supplied} approved.`,
-      "Show the review you actually mean, get approval for it, and post that one."
-    );
-  }
-}
-
-function commandPost(argv, cwd) {
-  const { options, positionals } = parseArgs(argv, POST_SCHEMA);
-  const target = resolveTarget(options, positionals, cwd);
-  const review = loadPostableReview(options.review, target);
-
-  const entry = readManifest().entries.find((item) => item.key === target.key);
-  const already = entry?.posted?.find((post) => post.digest === review.digest);
-  if (already && !options.again) {
-    throw new UserError(
-      `That exact review was already posted to ${target.slug}#${target.number} at ${already.postedAt}.`,
-      `It is at ${already.url}. Pass --again to post a duplicate.`
-    );
-  }
-
-  if (options["dry-run"]) {
-    // No digest here: --dry-run answers "what would this publish?", and handing
-    // back the token that authorizes publishing would make --confirm a formality.
-    const plan = {
-      repo: target.slug,
-      number: target.number,
-      reviewPath: review.path,
-      bytes: Buffer.byteLength(review.document),
-      command: ["gh", "pr", "comment", String(target.number), "--repo", target.slug, "--body-file", review.path]
-    };
-    if (options.json) {
-      process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`);
-    } else {
-      process.stdout.write(`${plan.command.map(shellQuote).join(" ")}\n`);
-    }
-    return 0;
-  }
-
-  requireConfirmedDigest(review, options.confirm);
-
-  log(`Posting ${path.basename(review.path)} to ${target.slug}#${target.number}…`);
-  const result = gh([
-    "pr", "comment", String(target.number),
-    "--repo", target.slug,
-    "--body-file", review.path
-  ]);
-  if (result.status !== 0) {
-    throw new UserError(
-      `Posting to ${target.slug}#${target.number} failed.`,
-      `${result.stderr || result.stdout}`.trim() || "gh reported no reason."
-    );
-  }
-
-  const url = `${result.stdout}`.trim().split("\n").filter(Boolean).pop() ?? "";
-  const record = {
-    digest: review.digest,
-    reviewPath: review.path,
-    url,
-    postedAt: new Date().toISOString()
-  };
-  // Best-effort duplicate detection, not an audit log: the record rides on the
-  // manifest entry, so a PR that was never prepared has nowhere to keep it and
-  // `clean` forgets it along with everything else it removes. Posting is
-  // idempotent within a PR's lifetime, which is where double-posting happens.
-  if (entry) upsertEntry({ ...entry, posted: [...(entry.posted ?? []), record] });
-
-  if (options.json) {
-    process.stdout.write(`${JSON.stringify({ ...record, repo: target.slug, number: target.number }, null, 2)}\n`);
-  } else {
-    process.stdout.write(`${url}\n`);
-  }
-  return 0;
 }
 
 function streamCodex(args, { echo = process.stdout } = {}) {
@@ -1751,9 +1541,8 @@ function purgeUnusedClones(processed, survivors) {
  * confirmation in between. Recomputing the list in the second process would
  * delete whatever is on disk by then — including a review a background run or a
  * sweep saved during the confirmation, which appeared in nothing anyone
- * approved. Like `post --confirm`, the digest is never quoted back in a
- * failure: a caller that can read it off an error has lost the link to an
- * approval that the digest exists to carry.
+ * approved. The digest is never quoted back in a failure: a caller that can
+ * read it off an error has lost the link to an approval it exists to carry.
  */
 /**
  * The same rule as `requireReviewSnapshot`, over the whole removal.
@@ -2059,11 +1848,10 @@ const USAGE = `pr-workspace.mjs — review GitHub PRs with Codex
   prepare <pr> [--repo owner/repo] [--clone] [--json]
   review  <pr> [--repo owner/repo] [--model M] [--effort E]
                [--profile P] [--no-prepare] [--json]
-  post    <pr> --review <path> --confirm <digest> [--repo owner/repo]
-               [--again] [--dry-run] [--json]
   list    [--repo owner/repo] [--json]
   clean   [--pr N | --repo owner/repo | --all | --older-than DAYS]
-          [--purge-clones] [--purge-reviews --confirm-reviews <digest>]
+          --confirm-plan <digest> [--purge-clones]
+          [--purge-reviews --confirm-reviews <digest>]
           [--include-running] [--dry-run] [--json]
 
 <pr> accepts 42, #42, owner/repo#42, or a github.com pull request URL.
@@ -2128,8 +1916,6 @@ async function main() {
       return commandPrepare(rest, cwd);
     case "review":
       return commandReview(rest, cwd);
-    case "post":
-      return commandPost(rest, cwd);
     case "list":
       return commandList(rest);
     case "clean":

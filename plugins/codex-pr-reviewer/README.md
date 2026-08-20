@@ -10,7 +10,7 @@ matches GitHub's "Files changed" exactly, and hands that checkout to `codex revi
 
 | Command | What it does |
 |---|---|
-| `/codex-pr-reviewer:review <pr> [--post]` | Fetch a PR and review it. `<pr>` is `42`, `owner/repo#42`, or a PR URL. |
+| `/codex-pr-reviewer:review <pr>` | Fetch a PR and review it. `<pr>` is `42`, `owner/repo#42`, or a PR URL. |
 | `/codex-pr-reviewer:list` | Show PRs awaiting your review. |
 | `/codex-pr-reviewer:sweep [--limit N]` | Review a batch (smallest first) and produce one digest. |
 | `/codex-pr-reviewer:clean` | Remove the worktrees, branches, and clones the plugin created. Saved reviews stay unless `--purge-reviews`. |
@@ -24,11 +24,12 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" doctor
 
 ## Safety
 
-Reviews print to your terminal. Posting to a PR requires an explicit `--post`
-flag plus a confirmation showing the exact body, and `/codex-pr-reviewer:sweep` cannot
-post at all. Every Codex run passes `-s read-only`, the plugin never executes a
-PR's build or tests, and local paths are stripped from review output before it
-is saved.
+Reviews print to your terminal and are saved to disk. Nothing is published: no
+command comments on a pull request, and the prompts tell Claude not to route
+around that with `gh` or a GitHub MCP tool. Raw review findings are advisory and
+some are wrong, so the useful step is reading them and writing your own comment.
+Every Codex run passes `-s read-only`, the plugin never executes a PR's build or
+tests, and local paths are stripped from review output before it is saved.
 
 A pull request is code written by a stranger, so two things it could otherwise
 reach are closed off. Codex runs with project documents disabled, so an
@@ -37,14 +38,14 @@ And every git this plugin runs has hooks and LFS filters neutralised, because
 checkout writes the PR's bytes to disk before Codex's sandbox exists — a repo
 that puts hooks in the tree, as Husky does, would otherwise run one.
 
-A review is only publishable if the run that produced it exited 0. Codex can
-fail and still print text, so its status is recorded in the saved document and
-checked at post time rather than inferred from the file existing.
+Codex can fail and still print text, so "the file exists" is not evidence a
+review happened. Each saved review records the exit status of its run in the
+first line, which is where to look when the output reads oddly.
 
-Publishing goes through the script, which independently refuses a file it did
-not write, a review of a different PR, a run that produced no output, and a body
-that is not the one approved. `/codex-pr-reviewer:review` is granted
-`Bash(node:*)` alone, so those checks are not optional.
+`/codex-pr-reviewer:review` pre-approves one Bash rule — this plugin's own script
+by its full path — so it reaches `git` and `gh` through code that checks what it
+is doing, and never holds a direct `gh` grant that would also carry `gh pr
+review` and `gh pr merge`.
 
 Deleting is guarded the same way round. `/codex-pr-reviewer:clean` never removes
 a review unless `--purge-reviews` asks, not even under `--all` — a review cannot
@@ -61,8 +62,7 @@ its own entry when it saves so at least the output stays reachable.
 
 Those rules live in the command prompts, which Claude Code caches at install
 time and loads at session start — so `doctor` reports when the running copy is
-older than its source, and `--post` is withdrawn until the plugin is updated and
-the session restarted.
+older than its source, and the commands say so before doing anything else.
 
 Full documentation, design notes, and the script reference live in the
 [repository README](https://github.com/dumplingsensei/codex-pr-reviewer#readme).
