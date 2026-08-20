@@ -382,7 +382,10 @@ rm -rf "$CACHE"
 # first argument in argv[1], where it would match the module's own path and
 # satisfy the direct-invocation guard — running main() instead of importing.
 for i in $(seq 1 8); do
-  CPR_MODULE="$SCRIPT" CPR_N="$i" node -e '
+  # --input-type=module: `node -e` is CommonJS by default, where top-level
+  # await is a syntax error. Node 22 tolerates it, Node 18 — the documented
+  # floor — does not, which is what the floor leg of the matrix is for.
+  CPR_MODULE="$SCRIPT" CPR_N="$i" node --input-type=module -e '
     const { mutateManifest } = await import(process.env.CPR_MODULE);
     const number = Number(process.env.CPR_N);
     mutateManifest((m) => ({
