@@ -1,7 +1,7 @@
 ---
 description: Remove PR worktrees, branches, and cached clones this plugin created
 argument-hint: '[--pr N] [--repo owner/repo] [--all] [--older-than DAYS] [--purge-clones] [--purge-reviews] [--include-running]'
-allowed-tools: Read, Grep, Glob, AskUserQuestion, Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs *), Bash(git worktree list:*), Bash(git branch --list:*)
+allowed-tools: Read, Grep, Glob, AskUserQuestion, Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs *), Bash(git -C:*)
 ---
 
 Remove the review scratch state this plugin created: worktrees, `codex-pr/*` branches, plugin-owned refs, and optionally cached clones.
@@ -53,6 +53,7 @@ Raw slash-command arguments:
 ## Notes
 
 - The script only removes what it recorded in its own manifest, so it will not touch unrelated worktrees or branches.
+- Step 5's two commands both begin `git -C`, which is what the pre-approved rule matches. The narrower `git worktree list` and `git branch --list` prefixes it replaced never matched a command that names a directory, so verification prompted every time. Only read-only inspection belongs here: removal is the script's job, and `git -C` is a prefix, not a promise.
 - `--pr` takes `42`, `owner/repo#42`, or a PR URL — but a **bare number is not scoped to the current repository** the way `/codex-pr-reviewer:review 42` is. It selects PR #42 in *every* repository the manifest knows about, which is usually what you want when clearing up and occasionally not. This is why step 2 names the repository each entry lives in: read those back before confirming, and say `owner/repo#42` or add `--repo` when only one is meant.
 - `--all` implies `--purge-clones`, which also deletes cached clones under the cache directory. Point this out before confirming, since re-cloning a large repo is slow.
 - Cached clones are shared between PRs of the same repository. They are purged only after every selected entry has been processed, and only when no remaining entry still needs them.

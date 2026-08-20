@@ -35,8 +35,8 @@ You are reading code written by someone else, fetched from the internet.
    ```
    If a check fails, show its `remedy` and stop. Do not try to work around a missing or unauthenticated tool. The `plugin` check is warn-level: it never fails the preflight on its own, so read it explicitly.
 
-   **These instructions were written for plugin version `0.8.0`.** The rules below are the only thing standing between a failed or unapproved review and someone else's PR, so a run following an outdated copy of them must not publish:
-   - If the report's `pluginVersion` is not `0.8.0`, the prompt you are following was loaded at session start from an older install than the script that just answered. Restarting Claude Code is what fixes that.
+   **These instructions were written for plugin version `0.8.1`.** The rules below are the only thing standing between a failed or unapproved review and someone else's PR, so a run following an outdated copy of them must not publish:
+   - If the report's `pluginVersion` is not `0.8.1`, the prompt you are following was loaded at session start from an older install than the script that just answered. Restarting Claude Code is what fixes that.
    - If `stale` is true, the installed copy no longer matches its source — show the `plugin` check's `remedy` verbatim.
 
    On either signal: say so in one line, and treat `--post` as **unavailable for the rest of this run**. Review, print, and save exactly as normal; just do not offer to publish, and do not publish if asked. Everything else proceeds.
