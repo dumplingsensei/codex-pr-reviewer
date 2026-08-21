@@ -75,8 +75,10 @@ worse *is* in scope.
 - **The in-flight cleanup race.** A `clean` that took its snapshot before a
   review recorded itself cannot hold back a marker that does not exist yet. The
   guard is not a lock, and a lock that outlives a crashed run is a worse failure.
-- **The manifest lock expires** after ten seconds, by design, for the same
-  reason.
+- **The manifest lock expires**, by design, for the same reason. A holder that
+  overruns that window can in principle be preempted between checking that the
+  lock is still its own and releasing it; closing that properly means a lock
+  manager, which is more machinery than this warrants.
 - **Codex's findings are advisory** and some are wrong. The plugin does not
   publish them anywhere, and deliberately has no way to.
 

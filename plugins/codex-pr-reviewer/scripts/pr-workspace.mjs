@@ -11,7 +11,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -363,30 +363,77 @@ const LOCK_WAIT_MS = 5_000;
  * seconds is far longer than any critical section here, which is a read, a
  * small edit, and a rename.
  */
+/**
+ * Takes a stale lock out of the way, so that exactly one waiter can.
+ *
+ * Deleting it directly is the obvious thing and it is wrong: two waiters both
+ * stat the same old file, both decide it is stale, the first removes it and
+ * acquires a fresh one — and the second then deletes *that*, on the strength of
+ * a measurement taken before it existed. Both proceed, and one manifest write
+ * silently loses the other, which is the failure this lock exists to prevent.
+ *
+ * `rename` is the primitive that settles it. Only one racer moves the inode;
+ * the rest get ENOENT and go back to waiting.
+ */
+function reclaimStaleLock(lockPath, token) {
+  let age;
+  try {
+    age = Date.now() - fs.statSync(lockPath).mtimeMs;
+  } catch {
+    return; // released between the failed open and this stat
+  }
+  if (age <= LOCK_STALE_MS) return;
+
+  const claimed = `${lockPath}.stale-${token.replace(/[^\w.-]/g, "_")}`;
+  try {
+    fs.renameSync(lockPath, claimed);
+  } catch {
+    return; // another waiter claimed it first
+  }
+  fs.rmSync(claimed, { force: true });
+}
+
+/**
+ * Releases the lock only if this process is still the one holding it.
+ *
+ * A lock reclaimed as stale belongs to whoever reclaimed it. Removing it on the
+ * way out of a critical section that overran would take somebody else's.
+ *
+ * The window this does not close: the holder is preempted between reading the
+ * token and unlinking. That requires the critical section to have exceeded
+ * LOCK_STALE_MS — a read, an edit and a rename against a small local file —
+ * and closing it properly means a lock manager, which is more machinery than
+ * this file should carry.
+ */
+function releaseManifestLock(lockPath, token) {
+  try {
+    if (fs.readFileSync(lockPath, "utf8") !== token) return;
+  } catch {
+    return; // already gone
+  }
+  fs.rmSync(lockPath, { force: true });
+}
+
 function withManifestLock(fn) {
   ensurePrivateDir(cacheRoot());
   const lockPath = `${manifestPath()}.lock`;
+  // Identifies this acquisition, not this process: a second run on the same pid
+  // after a crash must not be able to release a lock it never took.
+  const token = `${process.pid}@${os.hostname()}:${randomUUID()}`;
   const deadline = Date.now() + LOCK_WAIT_MS;
 
   for (;;) {
     try {
-      fs.closeSync(fs.openSync(lockPath, "wx", 0o600));
+      const fd = fs.openSync(lockPath, "wx", 0o600);
+      try {
+        fs.writeSync(fd, token);
+      } finally {
+        fs.closeSync(fd);
+      }
       break;
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
-
-      let age = Infinity;
-      try {
-        age = Date.now() - fs.statSync(lockPath).mtimeMs;
-      } catch {
-        continue; // released between the open and the stat; try again
-      }
-      if (age > LOCK_STALE_MS) {
-        // Whoever held this is gone. Reclaiming is safe precisely because the
-        // critical section is short: nothing legitimate holds it this long.
-        fs.rmSync(lockPath, { force: true });
-        continue;
-      }
+      reclaimStaleLock(lockPath, token);
       if (Date.now() > deadline) {
         throw new UserError(
           `Timed out waiting for the review manifest lock at ${lockPath}.`,
@@ -400,7 +447,7 @@ function withManifestLock(fn) {
   try {
     return fn();
   } finally {
-    fs.rmSync(lockPath, { force: true });
+    releaseManifestLock(lockPath, token);
   }
 }
 
@@ -1232,7 +1279,14 @@ function prepare(options, positionals, cwd) {
     additions: pr.additions,
     deletions: pr.deletions,
     changedFiles: pr.changedFiles ?? changed,
-    preparedAt: new Date().toISOString()
+    preparedAt: new Date().toISOString(),
+    // Distinguishes this preparation of a PR from the next one. `clean` removes
+    // a manifest entry after doing the work, and between those two moments the
+    // same PR can be prepared again — same key, entirely different worktree and
+    // branches. Removing by key alone deletes that new record and orphans what
+    // it describes. A timestamp is not enough: two prepares can share a
+    // millisecond.
+    generation: randomUUID()
   };
   upsertEntry(entry);
 
@@ -1365,6 +1419,7 @@ export function cleanPlanDigest(targets, options = {}) {
     .map((entry) =>
       [
         entry.key,
+        entry.generation ?? "",
         entry.worktree ?? "",
         entry.headBranch ?? "",
         entry.baseBranch ?? "",
@@ -2096,7 +2151,7 @@ function commandClean(argv) {
         outcome.failed.push(`review ${file}: ${error.message}`);
       }
     }
-    return { key: entry.key, ...outcome };
+    return { key: entry.key, generation: entry.generation, ...outcome };
   });
 
   // Then, once nothing else needs them, the shared clones.
@@ -2110,10 +2165,19 @@ function commandClean(argv) {
   // review that finished in the meantime has re-recorded its own entry, and a
   // `prepare` may have added one, both of which writing the stale list back
   // would erase — re-creating the very unreachable review this guard is for.
-  const cleared = new Set(results.filter((r) => r.failed.length === 0).map((r) => r.key));
+  // Keyed by generation as well as key. Re-reading the manifest already avoids
+  // writing back a stale list, but filtering on the key alone undoes that for
+  // the one case it most matters: a PR prepared again while this clean was
+  // running has the same key and a different worktree, and dropping it leaves
+  // that worktree and its branches recorded nowhere.
+  const cleared = new Set(
+    results.filter((r) => r.failed.length === 0).map((r) => `${r.key}\u0000${r.generation ?? ""}`)
+  );
   mutateManifest((latest) => ({
     ...latest,
-    entries: latest.entries.filter((entry) => !cleared.has(entry.key))
+    entries: latest.entries.filter(
+      (entry) => !cleared.has(`${entry.key}\u0000${entry.generation ?? ""}`)
+    )
   }));
 
   const failures = results.filter((result) => result.failed.length > 0);

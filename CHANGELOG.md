@@ -5,6 +5,24 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.5
+
+The two concurrency findings from the same Codex review.
+
+- The manifest lock reclaims a stale lock by `rename`, not by deleting it. Two
+  waiters could both stat the same old file, both judge it stale, and the second
+  then delete the fresh lock the first had just acquired — putting both inside
+  the critical section, which is exactly what the lock exists to prevent. Only
+  one racer's rename moves the inode. Release is now conditional on the lock
+  still carrying this acquisition's token, so a holder that overran does not
+  take somebody else's.
+- Manifest entries carry a `generation`, and `clean` removes the generation it
+  cleaned rather than the key. A PR prepared again while a clean was running has
+  the same key and a different worktree; removing by key deleted that new record
+  and left its worktree and branches recorded nowhere. The generation is part of
+  the plan digest too, so a re-prepare between the dry run and the confirmation
+  now invalidates the plan rather than being swept up by it.
+
 ## 0.9.4
 
 Validation fixes found by a Codex review of 0.9.3.

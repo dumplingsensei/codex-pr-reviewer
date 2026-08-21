@@ -513,6 +513,38 @@ check "the lock file is released" \
   "$(ls "$CACHE"/manifest.json.lock 2>/dev/null | wc -l | tr -d ' ')" "0"
 rm -rf "$CACHE"
 
+note "a clean removes the generation it cleaned, not the key"
+# Regression: `clean` did its work from a snapshot and then removed manifest
+# entries by key. A PR prepared again in between has the same key and an
+# entirely different worktree and branches, so the new record was deleted and
+# what it described was left recorded nowhere.
+rm -rf "$CACHE"; mkdir -p "$CACHE"
+cat >"$CACHE/manifest.json" <<JSON
+{"version":1,"entries":[
+ {"key":"o/r#41","repo":"o/r","number":41,"title":"t","url":"u","state":"OPEN","author":"a",
+  "worktree":"$CACHE/worktrees/o__r/pr-41","repoDir":"$SANDBOX/none","remote":"origin","mode":"clone",
+  "headBranch":"codex-pr/o__r/41","baseBranch":"codex-pr/o__r/41-base","refs":[],
+  "headSha":"0","mergeBase":"0","baseRefName":"main","additions":1,"deletions":0,"changedFiles":1,
+  "preparedAt":"2026-01-01T00:00:00.000Z","generation":"gen-one"}
+]}
+JSON
+PLAN="$(plan_digest --all)"
+# Stand in for a prepare that lands mid-clean: same key, a new generation.
+cat >"$CACHE/manifest.json" <<JSON
+{"version":1,"entries":[
+ {"key":"o/r#41","repo":"o/r","number":41,"title":"t","url":"u","state":"OPEN","author":"a",
+  "worktree":"$CACHE/worktrees/o__r/pr-41","repoDir":"$SANDBOX/none","remote":"origin","mode":"clone",
+  "headBranch":"codex-pr/o__r/41","baseBranch":"codex-pr/o__r/41-base","refs":[],
+  "headSha":"0","mergeBase":"0","baseRefName":"main","additions":1,"deletions":0,"changedFiles":1,
+  "preparedAt":"2026-02-02T00:00:00.000Z","generation":"gen-two"}
+]}
+JSON
+out="$(node "$SCRIPT" clean --all --confirm-plan "$PLAN" 2>&1)"
+contains "a re-prepared PR invalidates the confirmed plan" "$out" "no longer what that plan digest described"
+check "and its record survives" \
+  "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"generation": "gen-two"')" "1"
+rm -rf "$CACHE"
+
 note "saved reviews are identifiable on disk"
 # `post` was removed in 0.9.0 and with it every assertion about publishing.
 # What is still worth pinning down is that a saved review is recognisable as
