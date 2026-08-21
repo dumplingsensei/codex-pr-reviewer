@@ -41,7 +41,7 @@ The most recent release only. Versions are listed in
 [CHANGELOG.md](CHANGELOG.md) and tagged `v<version>`.
 
 Claude Code resolves an install by version and caches it, so a fix reaches you
-only after `claude plugin update codex-pr-reviewer@chase-plugins` **and** a
+only after `claude plugin update codex-pr-reviewer@dumplingsensei-plugins` **and** a
 restart of Claude Code. `doctor` reports when the copy a session is running is
 older than what is installed.
 

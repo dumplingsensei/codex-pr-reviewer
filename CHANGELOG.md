@@ -5,6 +5,17 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.7
+
+- The marketplace is named `dumplingsensei-plugins`, and the copyright holder in
+  both `LICENSE` files is the handle rather than a personal name. The repository
+  is public now, and the marketplace name is the one string a user has to type,
+  so it should not carry more than it needs to. The plugin's own name and its
+  commands are unchanged; the install line is
+  `/plugin install codex-pr-reviewer@dumplingsensei-plugins`.
+- The shipped `LICENSE` is plugin content, so this moves the version even though
+  no behaviour did.
+
 ## 0.9.6
 
 - The installed plugin's README links to the security policy and to the private

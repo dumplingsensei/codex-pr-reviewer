@@ -1,17 +1,17 @@
 {
-  "name": "chase-plugins",
+  "name": "dumplingsensei-plugins",
   "owner": {
     "name": "dumplingsensei"
   },
   "metadata": {
-    "description": "Chase's Claude Code plugins.",
-    "version": "0.9.6"
+    "description": "Claude Code plugins by dumplingsensei.",
+    "version": "0.9.7"
   },
   "plugins": [
     {
       "name": "codex-pr-reviewer",
       "description": "Fetch any GitHub PR into an isolated worktree and review it with Codex.",
-      "version": "0.9.6",
+      "version": "0.9.7",
       "author": {
         "name": "dumplingsensei"
       },

@@ -2,100 +2,43 @@
 
 A Claude Code plugin that reviews **other people's GitHub pull requests** with Codex.
 
-Codex's reviewer only sees local git state — `--uncommitted`, `--base <branch>`, or `--commit <sha>`, all relative to its own working directory. There is no built-in path from "PR #42 on GitHub" to "Codex reviewed it." This plugin builds that path: Claude drives `gh` and `git` to materialize any PR into an isolated worktree, then hands that worktree to Codex's native reviewer.
+Codex's reviewer only reads local git state — `--uncommitted`, `--base <branch>`, `--commit <sha>` — all relative to its own working directory. There is no built-in path from "PR #42 on GitHub" to "Codex reviewed it." This plugin builds it: Claude drives `gh` and `git` to materialize any PR into an isolated worktree, then hands that worktree to Codex's native reviewer.
 
-Reviewing in a real checkout — rather than from a raw diff — means Codex can read surrounding code, follow call sites, and pick up the repository's own review conventions. On a test run against [cli/cli#13899](https://github.com/cli/cli/pull/13899) it found a P1 exit-code regression *and* cited that repo's `.github/skills/cli-code-reviewer/SKILL.md` rules as the basis.
+Reviewing a real checkout rather than a raw diff lets Codex read surrounding code, follow call sites, and pick up the repository's own review conventions. Against [cli/cli#13899](https://github.com/cli/cli/pull/13899) it found a P1 exit-code regression and cited that repo's `.github/skills/cli-code-reviewer/SKILL.md` as the basis.
 
 ## Status
 
-I wrote this for my own use and published it in case it is useful to anyone
-else. It is tested and it works. It is not maintained on a schedule, and I am
-not promising that it will be.
+Written for my own use, published in case it is useful. It is tested and it works. It is not maintained on a schedule, and I am not promising that it will be.
 
-In practice:
-
-- **Bug reports are welcome and may not get fixed.** File one anyway if you
-  have a reproduction — it tells the next person what to expect, whether or not
-  I act on it.
-- **Pull requests are welcome and may not get merged.** If something matters to
-  you and I am slow, fork it; that is what the MIT license is for.
-- **Security reports are the exception.** Those get a reply — see
-  [SECURITY.md](SECURITY.md).
-- A quiet stretch means I have not had time, not that this is abandoned. If it
-  ever is, this section will say so.
+- **Bug reports are welcome and may not get fixed.** File one anyway with a reproduction — it tells the next person what to expect, whether or not I act on it.
+- **Pull requests are welcome and may not get merged.** If something matters to you and I am slow, fork it; that is what the MIT license is for.
+- **Security reports are the exception.** Those get a reply — see [SECURITY.md](SECURITY.md).
+- A quiet stretch means I have not had time, not that this is abandoned. If it ever is, this section will say so.
 
 ## Install
 
-From a local checkout, pass the path to the repository root. An absolute path
-always works; a relative one must start with `./` — a bare `.` is rejected as an
-invalid source format.
-
 ```
-/plugin marketplace add /absolute/path/to/codex-pr-reviewer
-/plugin install codex-pr-reviewer@chase-plugins
+/plugin marketplace add dumplingsensei/codex-pr-reviewer
+/plugin install codex-pr-reviewer@dumplingsensei-plugins
 ```
 
-The marketplace is named `chase-plugins` and the plugin inside it is
-`codex-pr-reviewer`, so the fully-qualified name is
-`codex-pr-reviewer@chase-plugins`. Commands are namespaced by the *plugin*
-name: `/codex-pr-reviewer:review`.
+Choose **user** scope when prompted, not project: the point is to review PRs from whichever repository you happen to be in, so scoping to one directory defeats it.
 
-Choose **user** scope when prompted, not project scope: the point is to review
-PRs from whichever repository you happen to be working in, so scoping the plugin
-to a single directory defeats it.
+To install from a local checkout instead, pass the repository root — an absolute path always works, a relative one must start with `./`, and a bare `.` is rejected. Commands are namespaced by the *plugin*, not the marketplace: `/codex-pr-reviewer:review`.
 
-Requires `codex` (logged in), `gh` (authenticated), `git` ≥ 2.19, and Node ≥ 18. Run `/codex-pr-reviewer:review` and it will tell you if anything is missing, or check directly:
+Requires `codex` (logged in), `gh` (authenticated), `git` ≥ 2.19, and Node ≥ 18. `/codex-pr-reviewer:review` reports anything missing, or ask directly:
 
 ```
 node plugins/codex-pr-reviewer/scripts/pr-workspace.mjs doctor
 ```
 
-## Updating
-
-Claude Code copies the plugin into its own cache at install time, and reads the
-command prompts once, at session start. An edit to a prompt is therefore
-invisible twice over — until the copy is refreshed, and then until the session
-restarts. That matters here because the prompts are where the rules deciding
-whether a review may be published actually live.
-
-```
-claude plugin marketplace update chase-plugins
-claude plugin update codex-pr-reviewer@chase-plugins
-```
-
-then restart Claude Code.
-
-Neither gap is silent. The preflight reports both:
-
-- `doctor` hashes the installed copy against the marketplace source and names
-  the files that differ — `stale: true` under `--json`. It is warn-level: a
-  stale copy still reviews correctly, so it never blocks a review.
-- Each command prompt carries the version it was written for and compares it
-  against the `pluginVersion` the script reports. A mismatch means this session
-  loaded its prompts from an older install than the script answering it — the
-  case that refreshing the copy alone does not fix.
-
-On either signal the command says so and carries on. A prompt and a script that
-disagree about the flags will fail in a way that reads like the pull request's
-fault rather than the install's, which is the confusion the check exists to
-prevent.
-
-While working on the plugin, skip the cache entirely —
-
-```
-claude --plugin-dir /path/to/codex-pr-reviewer/plugins/codex-pr-reviewer
-```
-
-— and every prompt edit is live in the next session. `doctor` then reports
-`running from source`.
-
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `/codex-pr-reviewer:review <pr>` | Fetch a PR and review it. `<pr>` is `42`, `owner/repo#42`, or a PR URL. |
+| `/codex-pr-reviewer:review <pr>` | Fetch a PR and review it. `<pr>` is `42`, `owner/repo#42`, or a URL. |
 | `/codex-pr-reviewer:list` | Show PRs awaiting your review, across GitHub or in one repo. |
-| `/codex-pr-reviewer:sweep [--limit N]` | Review a batch of PRs (smallest first) and produce one digest. |
+| `/codex-pr-reviewer:sweep [--limit N]` | Review a batch (smallest first) into one digest. |
 | `/codex-pr-reviewer:clean` | Remove the worktrees, branches, and clones the plugin created. |
 
 ## How it works
@@ -104,7 +47,7 @@ claude --plugin-dir /path/to/codex-pr-reviewer/plugins/codex-pr-reviewer
 /codex-pr-reviewer:review 42
    │
    ├─ gh pr view 42 --json …               resolve PR metadata
-   ├─ host repo = your repo if it matches, else a cached blobless clone
+   ├─ host repo = yours if it matches, else a cached blobless clone
    ├─ git fetch +refs/pull/42/head:refs/codex-pr-reviewer/pr/42
    │              +refs/heads/main:refs/codex-pr-reviewer/base/42
    ├─ git branch -f codex-pr/42-base $(git merge-base <base> <head>)
@@ -113,54 +56,53 @@ claude --plugin-dir /path/to/codex-pr-reviewer/plugins/codex-pr-reviewer
    └─ codex -C <worktree> -s read-only review --base codex-pr/42-base
 ```
 
-**Why pin `--base` to a branch at the merge-base?** Because then the review sees exactly what GitHub's "Files changed" tab shows, regardless of whether Codex interprets `--base` with two-dot or three-dot range semantics. Verified against `gh pr diff`: identical file lists and identical `+225/-18` totals.
+- **`--base` pinned to a branch at the merge-base** makes the review see exactly what GitHub's "Files changed" tab shows, whether Codex reads `--base` with two-dot or three-dot semantics. Verified against `gh pr diff`: identical file lists, identical `+225/-18` totals.
+- **`refs/codex-pr-reviewer/*` instead of branches:** refs outside `refs/heads/` are never checked out, so a forced update succeeds even when a stale worktree sits on the old commit. That is what makes re-running idempotent.
+- **A worktree** never touches the branch you are on, survives a dirty working tree, and holds several PRs at once — none of which `gh pr checkout` can do.
 
-**Why `refs/codex-pr-reviewer/*` instead of branches for the fetch?** Refs outside `refs/heads/` are never checked out, so a forced update always succeeds even when a stale worktree is sitting on the old commit. That is what makes re-running on the same PR idempotent.
-
-**Why a worktree?** It never touches the branch you are on, survives a dirty working tree, and lets you review several PRs at once — none of which `gh pr checkout` can do.
-
-Fork PRs work without adding remotes: GitHub serves `refs/pull/<N>/head` from the base repository.
+Fork PRs need no extra remotes: GitHub serves `refs/pull/<N>/head` from the base repository.
 
 ## Safety
 
-- **PR content is untrusted input.** Every Codex run passes `-s read-only` explicitly rather than relying on config defaults, and the plugin never runs the PR's build, tests, or hooks. The commands instruct Claude to treat text inside a diff as data to review, never as instructions to follow.
-- **The reviewer's instructions cannot come from the PR.** Codex reads project documents — `AGENTS.md` and its fallbacks — from its working directory before it starts, and that directory *is* the pull request. Reviews run with `project_doc_max_bytes=0`, so a PR cannot rewrite the instructions of the reviewer sent to inspect it. The anti-injection rules in the command prompts bind Claude; they are not inherited by the Codex process, which is why this is enforced on the command line instead.
-- **Checkout cannot execute the PR either.** Fetching a PR writes attacker-authored bytes into a working tree before Codex's sandbox exists, and git runs hooks and filters during that write. Every git this plugin causes to run — including the one `gh` spawns — is given `core.hooksPath` pointing at an empty directory and neutralised LFS filters, through `GIT_CONFIG_*`. Without it, a repository configuring hooks into the tree, which is exactly what Husky does, lets a PR touching `.husky/post-checkout` run a script the moment its worktree is created.
-- **Nothing is published, by any command.** Reviews print to your terminal and are saved to disk. There is no subcommand or flag that comments on a pull request, and the command prompts instruct Claude not to publish one through `gh`, a GitHub MCP tool, or anything else. See [Publishing is out of scope](#publishing-is-out-of-scope).
-- **Only the command that posts can reach posting.** `/codex-pr-reviewer:review` pre-approves one Bash rule: `pr-workspace.mjs` by its full path. It reaches `git` and `gh` through the script, which is where the checks are. Pre-approval is not a sandbox — `allowed-tools` grants permission rather than removing capability, so `node -e` remains callable and simply stops being silent, arriving as a permission prompt instead. The narrow rule is what makes that prompt the boundary. `/codex-pr-reviewer:sweep` holds three read-only `gh` subcommands, so it cannot comment on a PR at all, and `/codex-pr-reviewer:clean` holds two read-only `git` ones.
-- **Local paths are stripped** from review output before it is saved, so a posted comment never leaks your filesystem layout.
-- **Cleanup is precise.** The plugin records what it created in a manifest and `/codex-pr-reviewer:clean` removes only that — it will not touch unrelated worktrees or branches. Saved reviews are output rather than scratch state, so they survive every clean unless `--purge-reviews` asks for them by name. The whole removal is bound to the plan a dry run showed, through `--confirm-plan`: a clean is two processes, and between them a review can finish or a sweep can prepare more PRs that a selector like `--all` would then match. Branches are deleted only while they still point at the commit the manifest recorded, so a name that has been reused since is left alone.
-- **A review in flight is left alone.** A running review is reading a worktree and has not written its output yet, so cleanup holds its PR back — worktree, branches, and shared clone included — and says which, rather than deleting state out from under a paid run. This is a guard, not a lock: it does not close the window described under [Script reference](#script-reference), where a clean cannot see a review that had not started yet.
-- **What is fetched is what GitHub says it is.** The head commit written into the worktree is compared against the `headRefOid` the API reports, and a mismatch stops the run. Metadata and code otherwise arrive by different paths — `gh` for one, whichever remote matched the slug for the other — with nothing comparing them.
-- **A failed run is visible as one.** Codex can exit nonzero and still print a body; an interrupted run emits `Review was interrupted…` on stdout, so "the file exists" was never evidence a review happened. Its exit status is written into the saved document's first line as `exit=<n>`.
-- **A stale install says so.** The rules above hold only if the running copy is the one you edited, so the preflight checks and reports it. See [Updating](#updating).
+- **PR content is untrusted input.** Every Codex run passes `-s read-only` explicitly rather than trusting config defaults, the plugin never runs the PR's build, tests, or hooks, and the prompts tell Claude to treat diff text as data, never instructions.
+- **The reviewer's instructions cannot come from the PR.** Codex reads `AGENTS.md` and its fallbacks from its working directory — which *is* the pull request — so reviews run with `project_doc_max_bytes=0`. The prompts' anti-injection rules bind Claude and are not inherited by the Codex process, which is why this is enforced on the command line.
+- **Checkout cannot execute the PR either.** Fetching writes attacker-authored bytes into a tree before Codex's sandbox exists, and git runs hooks and filters during that write. Every git this plugin causes to run — including the one `gh` spawns — gets `core.hooksPath` aimed at an empty directory and neutralised LFS filters via `GIT_CONFIG_*`. Without it, a repository that configures hooks into the tree, which is what Husky does, lets a PR touching `.husky/post-checkout` run a script the moment its worktree appears.
+- **Nothing is published, by any command.** Reviews print to your terminal and save to disk. No subcommand or flag comments on a PR — see [Publishing is out of scope](#publishing-is-out-of-scope).
+- **Only the command that posts can reach posting.** `review` pre-approves one Bash rule — `pr-workspace.mjs` by full path — reaching `git` and `gh` through the script, where the checks are. Pre-approval is not a sandbox: `allowed-tools` grants permission rather than removing capability, so `node -e` stays callable and simply stops being silent, arriving as a permission prompt instead. The narrow rule is what makes that prompt the boundary. `sweep` holds three read-only `gh` subcommands; `clean` holds two read-only `git` ones.
+- **Local paths are stripped** from saved review output, so a comment you paste never leaks your filesystem layout.
+- **Cleanup is precise.** The plugin records what it created in a manifest and `clean` removes only that, deleting a branch only while it still points at the recorded commit. Saved reviews survive every clean unless `--purge-reviews` names them.
+- **A review in flight is left alone.** Cleanup holds a running review's PR back — worktree, branches, shared clone — and says which, rather than deleting state out from under a paid run. A guard, not a lock: see [Script reference](#script-reference).
+- **What is fetched is what GitHub says it is.** The head commit in the worktree is checked against the API's `headRefOid`, and a mismatch stops the run. Metadata and code otherwise arrive by different paths with nothing comparing them.
+- **A failed run is visible as one.** Codex can exit nonzero and still print a body, and an interrupted run emits `Review was interrupted…`, so "the file exists" was never evidence a review happened. The exit status is written into the saved document's first line as `exit=<n>`.
+- **A stale install says so** — see [Updating](#updating).
 
 ## Publishing is out of scope
 
-This plugin reviews pull requests. It does not comment on them, and no
-subcommand or flag does. That is a deliberate narrowing in 0.9.0; earlier
-versions shipped a `post` subcommand behind a digest-bound confirmation.
+This plugin reviews pull requests. It does not comment on them, and no subcommand or flag does — a deliberate narrowing in 0.9.0, which removed a `post` subcommand.
 
-Two reasons it went:
+**Raw review output is a poor comment.** Codex's findings are advisory and some are wrong — the footer on every review says so. Publishing them verbatim puts your name on claims nobody checked, on a stranger's pull request, and a maintainer reading twenty machine-generated findings cannot tell which two you actually stand behind.
 
-**Raw review output is a poor comment.** Codex's findings are advisory and some
-of them are wrong — the footer on every review says so. Publishing them verbatim
-puts your name on claims nobody checked, on a stranger's pull request, and a
-maintainer reading twenty machine-generated findings cannot tell which two you
-actually stand behind. Reading the review and writing your own comment is both a
-better contribution and the workflow the command is now built around.
+**Everything guarding it was guarding something optional.** A publish path needs its own checks — did this plugin write this review, does it belong to this PR, did the run succeed, are these the approved bytes — plus GitHub's 65,536-character cap and an answer for the head moving in between. That is a lot of surface defending a step you are better off doing by hand.
 
-**Everything guarding it was guarding something optional.** A publish path needs
-its own checks — is this a review this plugin wrote, does it belong to this PR,
-did the run succeed, are these the approved bytes — plus a size guard for
-GitHub's 65,536-character comment cap, plus answers for what happens when the
-PR's head moves between review and publish. That is a lot of surface defending a
-step you are better off doing by hand.
+The prompts tell Claude not to route around this with `gh pr comment`, a GitHub MCP tool, or anything else. An instruction, not a lock — nothing here can stop `gh` on your own PATH — so if a review gets published, you decided that, having read it.
 
-The command prompts instruct Claude not to route around this with `gh pr
-comment`, a GitHub MCP tool, or anything else. That is an instruction rather than
-a lock — nothing here can stop `gh` on your own PATH — so if you want a review
-published, you are the one who decides that, having read it.
+## Updating
+
+Claude Code copies the plugin into its own cache at install time and reads command prompts once, at session start. A prompt edit is invisible twice over — until the copy refreshes, then until the session restarts — which matters because the prompts hold the rules deciding whether a review may be published.
+
+```
+claude plugin marketplace update dumplingsensei-plugins
+claude plugin update codex-pr-reviewer@dumplingsensei-plugins
+```
+
+then restart Claude Code. Neither gap is silent:
+
+- `doctor` hashes the installed copy against the marketplace source and names the files that differ (`stale: true` under `--json`). Warn-level — a stale copy still reviews correctly, so it never blocks a review.
+- Each prompt carries the version it was written for and compares it against the script's `pluginVersion`. A mismatch means this session's prompts are older than the script answering them — the case refreshing alone does not fix.
+
+Either way the command says so and carries on, because a prompt and a script that disagree about flags fail in a way that reads like the pull request's fault rather than the install's.
+
+While working on the plugin, skip the cache — `claude --plugin-dir /path/to/codex-pr-reviewer/plugins/codex-pr-reviewer` — and every edit is live in the next session. `doctor` then reports `running from source`.
 
 ## Cache layout
 
@@ -189,8 +131,7 @@ pr-workspace.mjs doctor  [--json]
                          [--include-running] [--dry-run] [--json]
 ```
 
-`review --dry-run` prints the exact `codex` command it would run, without
-running it — useful for checking what a flag actually does:
+`review --dry-run` prints the exact `codex` command it would run, without running it:
 
 ```
 $ pr-workspace.mjs review cli/cli#14057 --dry-run
@@ -198,76 +139,16 @@ codex -C <cache>/worktrees/cli__cli/pr-14057 -s read-only \
   review --base codex-pr/14057-base --title 'PR #14057: docs: recommend nix-shell …'
 ```
 
-`/codex-pr-reviewer:sweep` gathers up to 50 candidates and reviews the
-**smallest first** (`additions + deletions` ascending, tie-broken on file
-count), because each PR in the batch is a separate paid Codex run. On a busy
-queue the difference is large: for `cli/cli` at the time of writing, `--limit 5`
-costs 27 lines of churn smallest-first versus 352 newest-first, and the queue's
-largest open PR is 4,111 lines across 66 files. Pass `--order newest` for queue
-order. The skipped large PRs are named before the run, so nothing is dropped
-silently, and a specific PR is always reachable via
-`/codex-pr-reviewer:review <pr>`.
+**`sweep` reviews smallest first** (`additions + deletions` ascending, tie-broken on file count), because each PR in a batch is a separate paid run. For `cli/cli` at the time of writing, `--limit 5` costs 27 lines of churn smallest-first against 352 newest-first. `--order newest` gives queue order; skipped PRs are named before the run.
 
-`clean` is the one destructive subcommand, and it will not act on a plan it was
-not shown: a dry run prints a `planDigest` covering every entry, worktree,
-branch, ref, and the clone and review flags, and the real run has to name it
-with `--confirm-plan`. A clean is two processes with a human confirmation in
-between, and a selector like `--all` re-evaluated in the second one would sweep
-up whatever was prepared during the pause. Deleting saved reviews needs its own
-`--confirm-reviews` on top, because a worktree can be rebuilt and a review
-cannot.
+**`clean` is the one destructive subcommand** and will not act on a plan it was not shown: a dry run prints a `planDigest` over every entry, worktree, branch, ref, and flag, and the real run must name it with `--confirm-plan`. A clean is two processes with a human confirmation in between, and a selector like `--all` re-evaluated in the second would sweep up whatever was prepared during the pause.
 
-`clean --pr` accepts the same references `review` does, with one difference
-worth knowing: a **bare number is not scoped to the current repository**.
-`review 42` resolves the repo from the directory you are in, while
-`clean --pr 42` selects PR #42 in every repository the manifest knows about.
-That is usually what is wanted when clearing up, and `/codex-pr-reviewer:clean`
-names the repository each entry lives in before it asks — but pass
-`owner/repo#42`, or add `--repo`, when only one is meant.
+- **A bare `--pr N` is not scoped to the current repository.** `review 42` resolves the repo from the directory you are in; `clean --pr 42` selects PR #42 in *every* repository the manifest knows about. The command names each entry's repository before asking — but pass `owner/repo#42`, or add `--repo`, when only one is meant.
+- **`--purge-reviews` is deliberately awkward,** and not implied by `--all` the way `--purge-clones` is: a clone can be re-fetched, a review is the output of a paid run. It takes `--confirm-reviews <digest>` over the exact list a dry run printed, so a review saved during the confirmation is not deleted having appeared in nothing anyone approved. Matching is on the whole filename rather than a `<slug>-pr<N>-` prefix, which would otherwise catch `o/r-pr7-archive#9` for `o/r#7`.
+- **A running review holds its PR back.** `review` records a marker under `runs/` — pid, host, start time, destination — before handing work to Codex, and `clean` skips those entries, worktree and branches included. A marker whose process is gone is swept; one older than six hours expires, so a recycled pid cannot block cleanup forever. `--include-running` overrides the guard for a crashed run.
+- **One window stays open deliberately.** A `clean` whose snapshot predates a review's marker cannot hold back what does not exist yet, so that review may still lose the worktree it is reading; `prepare` is likewise free to refresh a worktree mid-review. The cost is bounded rather than avoided — a review re-records its PR when it saves, so output that *was* produced stays reachable. Closing either means locking, and a lock that outlives a crashed run is the worse failure.
 
-`clean --purge-reviews` is the only way to delete saved reviews, and it is
-deliberately awkward. It is not implied by `--all` the way `--purge-clones` is:
-a clone can be re-fetched, a review is the output of a paid run and cannot be
-regenerated byte-for-byte. It takes `--confirm-reviews <digest>` over the exact
-list a dry run printed, because the plan is shown by one process and carried out
-by another — without that, a review saved during the confirmation, by a
-background run or a sweep finishing, would be deleted having appeared in nothing
-anyone approved. Reviews are matched on the whole filename rather than a
-`<slug>-pr<N>-` prefix, since a repository whose name continues where that prefix
-stops (`o/r-pr7-archive#9` against `o/r#7`) would otherwise be caught by it. A
-review that will not delete holds its PR in the manifest, because reviews of a PR
-absent from the manifest can never be selected again — which is also why every
-run reports how many it kept.
-
-A review that is *still running* is the other way that reachability is lost, and
-the digest cannot catch it: the run has not written its file yet, so it appears
-in no snapshot, and cleaning its PR meanwhile removes the manifest entry any
-later `--purge-reviews` would have selected it through. So `review` records a
-small marker under `runs/` before handing work to Codex — pid, host, start time,
-and where it will save — and `clean` holds those entries back instead, worktree
-and branches included, since the run is reading that checkout. A marker whose
-process is gone stands for nothing and is swept; one older than six hours
-expires, because a recycled pid must not be able to block cleanup forever.
-`--include-running` overrides the guard for a marker left by a crashed run, and
-then a finished review re-records its own PR so its output stays selectable —
-a backstop, not a substitute: an overridden run may already have lost the
-worktree it was reading.
-
-The guard is not synchronization, and one window is left open deliberately: a
-`clean` that took its snapshot before a review recorded itself cannot hold back
-a marker that does not exist yet, so that review may still lose the worktree it
-is reading and fail. The cost is bounded rather than avoided — the review
-re-records its own PR when it saves, so an output that *was* produced stays
-reachable. `prepare` is likewise free to refresh a worktree a review is reading,
-which is what re-running on a PR mid-review does. Closing either properly means
-locking, and a lock that outlives a crashed run is a worse failure than the one
-it prevents.
-
-`--context` and `--trust-worktree` were removed in 0.8.0, and passing either is an error rather than a silent no-op.
-
-`--context` appended the PR title and description to the command as a positional prompt. `codex review` refuses that alongside `--base` — *the argument '--base <BRANCH>' cannot be used with '[PROMPT]'* — so every run that used it failed at argument parsing. It was documented, advertised in the command prompt, and had never once worked; nothing in the test suite caught it because nothing there invokes a real Codex.
-
-`--trust-worktree` enabled project `.codex` configuration for the worktree, which is a repository fetched from the internet. That is a configuration file inside untrusted code being given effect, which is not something a flag should be able to ask for.
+`--context` and `--trust-worktree` were removed in 0.8.0, and passing either is an error rather than a silent no-op. `--context` appended the PR title and description as a positional prompt, which `codex review` refuses alongside `--base` — *the argument '--base <BRANCH>' cannot be used with '[PROMPT]'* — so every run that used it failed at argument parsing, documented and advertised and never once working. `--trust-worktree` gave effect to `.codex` configuration inside a repository fetched from the internet, which is not something a flag should be able to ask for.
 
 ## Tests
 
@@ -277,57 +158,18 @@ node tests/unit.mjs          # pure helpers, no network
 ./tests/integration.sh       # real git/gh plumbing, never calls Codex
 ```
 
-Both suites and the CI workflow share one Codex stub, `tests/stubs/codex`.
-`doctor` asks three separate things and every test past the preflight has to
-answer all of them, so the contract is stated once rather than in each place
-that needs it — `unit.mjs` fails the build if a copy reappears.
+Both suites and the CI workflow share one Codex stub, `tests/stubs/codex`; `unit.mjs` fails the build if a second copy appears.
 
-`regression.sh` pins the defects found in code review — the symlinked-entrypoint
-guard, `--dry-run` side effects, manifest corruption handling, shared-clone
-purging, review output hygiene, the retired flags, the
-`--purge-reviews` guards, and both halves of the in-flight race: a clean holding
-back a live run, and a review re-recording its PR when one is overridden. It
-drives that case with a stub `codex` that runs a real `clean` mid-review, so the
-concurrency is genuine rather than simulated. It runs entirely against synthetic
-repositories in an isolated `XDG_CACHE_HOME`, so it needs no network or GitHub
-account and never touches your real cache. Its failure cases are forced by
-mechanisms that do not depend on who runs it — a directory where a file is
-expected, not a read-only parent that root would ignore.
+`regression.sh` pins the defects found in code review — the symlinked-entrypoint guard, `--dry-run` side effects, manifest corruption, shared-clone purging, output hygiene, the retired flags, the `--purge-reviews` guards, and both halves of the in-flight race, that last driven by a stub `codex` that runs a real `clean` mid-review so the concurrency is genuine. It runs against synthetic repositories in an isolated `XDG_CACHE_HOME`, so it needs no network or GitHub account and never touches your real cache.
 
-The integration suite is the one that matters: it prepares a real fork PR and
-asserts that the worktree's diff against the pinned merge-base is byte-identical
-to `gh pr diff` — same file list, same `+A/-D`. That is the property the whole
-design rests on. It also checks idempotency and that `clean` removes exactly
-what was created and nothing else. It never invokes Codex, so it costs nothing.
-
-Point it at any public PR:
+`integration.sh` is the one that matters: it prepares a real fork PR and asserts the worktree's diff against the pinned merge-base is byte-identical to `gh pr diff` — same file list, same `+A/-D`. That is the property the whole design rests on. It also checks idempotency and that `clean` removes exactly what was created, and never invokes Codex, so it costs nothing. Point it at any public PR:
 
 ```
 ./tests/integration.sh cli/cli 13899
 ```
 
-CI runs the two offline suites on every pull request and on pushes to `main`,
-across Node 18 — the documented floor — and 22, on Linux and macOS. One leg also
-runs `tests/version-guard.sh`, which fails the build when shipped plugin content
-changed without the version moving: Claude Code resolves an install by version
-and caches it, so a fixed prompt that keeps the old number reaches nobody who
-already has the plugin. The integration suite runs
-weekly and on demand instead: it needs the network and an upstream PR that still
-exists, and neither of those should be able to block a commit. It stubs `codex`
-there for the same reason the suite never calls it — the binary is needed only
-to satisfy `doctor`'s preflight, which would otherwise turn every CI run into a
-silent skip.
+CI runs the offline suites on every pull request and push to `main`, across Node 18 — the documented floor — and 22, on Linux and macOS. One leg runs `tests/version-guard.sh`, which fails the build when shipped plugin content changed without the version moving: Claude Code resolves an install by version and caches it, so a fixed prompt keeping the old number reaches nobody who already has the plugin. The integration suite runs weekly and on demand, needing the network and an upstream PR that still exists.
 
-## Security
+## Security, changelog, license
 
-Reporting a vulnerability, what is in scope, and what is known and accepted:
-[SECURITY.md](SECURITY.md).
-
-## Changelog
-
-Release notes are in [CHANGELOG.md](CHANGELOG.md), and each release is tagged
-`v<version>`.
-
-## License
-
-[MIT](LICENSE)
+Reporting a vulnerability, scope, and known-and-accepted issues: [SECURITY.md](SECURITY.md). Release notes: [CHANGELOG.md](CHANGELOG.md), each release tagged `v<version>`. Licensed [MIT](LICENSE).
