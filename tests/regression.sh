@@ -433,8 +433,22 @@ note "doctor checks the codex interface, not just that codex exists"
 # nothing asked the binary whether it accepted what the plugin was building.
 # `--help` exits 0 for a subcommand that does not exist, so the flag text is the
 # only usable signal.
-mkdir -p "$SANDBOX/oldcodex"
-cat >"$SANDBOX/oldcodex/codex" <<'STUB'
+# Self-contained: this block runs before the doctorstub directory further down
+# exists, so without its own `gh` it falls through to whatever is on PATH — which
+# passed locally against an authenticated gh and failed in CI against one that
+# is installed but not logged in. A preflight test that depends on the ambient
+# toolchain is testing the machine, not the code.
+mkdir -p "$SANDBOX/preflight"
+cat >"$SANDBOX/preflight/gh" <<'STUB'
+#!/bin/sh
+case "$1" in
+  --version) echo "gh version 0.0.0 (stub)" ;;
+  auth) echo "  - Active account: true (account stub-user)" ;;
+esac
+exit 0
+STUB
+chmod +x "$SANDBOX/preflight/gh"
+cat >"$SANDBOX/preflight/codex" <<'STUB'
 #!/bin/sh
 case "$1" in
   --version) echo "codex-cli 0.0.1 (pre --base)" ; exit 0 ;;
@@ -443,17 +457,17 @@ case "$1" in
 esac
 exit 0
 STUB
-chmod +x "$SANDBOX/oldcodex/codex"
-out="$(PATH="$SANDBOX/oldcodex:$PATH" node "$SCRIPT" doctor 2>&1)"
+chmod +x "$SANDBOX/preflight/codex"
+out="$(PATH="$SANDBOX/preflight:$PATH" node "$SCRIPT" doctor 2>&1)"
 contains "a codex without --base is refused" "$out" "does not accept --base"
 contains "and the remedy names the upgrade" "$out" "npm install -g @openai/codex"
 check "and doctor fails rather than warning" \
-  "$(PATH="$SANDBOX/oldcodex:$PATH" node "$SCRIPT" doctor >/dev/null 2>&1; echo $?)" "1"
+  "$(PATH="$SANDBOX/preflight:$PATH" node "$SCRIPT" doctor >/dev/null 2>&1; echo $?)" "1"
 
 # A codex whose `review --help` never answers is a different problem from one
 # that answers without --base, and telling someone to reinstall the CLI cannot
 # fix a crash or a hang.
-cat >"$SANDBOX/oldcodex/codex" <<'STUB'
+cat >"$SANDBOX/preflight/codex" <<'STUB'
 #!/bin/sh
 case "$1" in
   --version) echo "codex-cli 0.0.1" ;;
@@ -462,7 +476,7 @@ case "$1" in
 esac
 exit 0
 STUB
-out="$(PATH="$SANDBOX/oldcodex:$PATH" node "$SCRIPT" doctor 2>&1)"
+out="$(PATH="$SANDBOX/preflight:$PATH" node "$SCRIPT" doctor 2>&1)"
 contains "a probe that fails is not reported as a missing flag" "$out" "exited 70"
 check "and does not send the user to reinstall" \
   "$(printf '%s' "$out" | grep -c 'npm install -g @openai/codex')" "0"
@@ -470,7 +484,7 @@ check "and does not send the user to reinstall" \
 # The same stub, answering with --base. Asserted on doctor's exit status, not on
 # the absence of one message: "no complaint about --base" is also satisfied by a
 # doctor that fell over for some entirely unrelated reason.
-cat >"$SANDBOX/oldcodex/codex" <<'STUB'
+cat >"$SANDBOX/preflight/codex" <<'STUB'
 #!/bin/sh
 case "$1" in
   --version) echo "codex-cli 0.0.1" ;;
@@ -480,7 +494,7 @@ esac
 exit 0
 STUB
 check "a codex that accepts --base passes the preflight" \
-  "$(PATH="$SANDBOX/oldcodex:$SANDBOX/doctorstub:$PATH" node "$SCRIPT" doctor >/dev/null 2>&1; echo $?)" "0"
+  "$(PATH="$SANDBOX/preflight:$PATH" node "$SCRIPT" doctor >/dev/null 2>&1; echo $?)" "0"
 
 note "concurrent manifest writers do not lose each other's entries"
 # Regression: writing was atomic — temp file, rename over — but mutating was
