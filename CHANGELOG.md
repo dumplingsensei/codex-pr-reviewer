@@ -5,6 +5,30 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.4
+
+Validation fixes found by a Codex review of 0.9.3.
+
+- `review --no-prepare` rejects a worktree with uncommitted changes. `codex
+  review --base` diffs the working tree, so an edit was reviewed as part of the
+  pull request while HEAD and the base still matched the manifest — producing a
+  review labelled with the real PR's head over content the PR does not contain.
+  The head and base probes also ignored git's exit status, so verification
+  passed exactly when it could not verify; `gitOutOrNull` makes that impossible
+  to write by accident.
+- `clean` validates an entry before anything is deleted, not immediately before
+  `rmSync`. The previous check ran after `git worktree remove --force`, `git
+  branch -D`, and `git update-ref -d` had already been handed the same
+  unvalidated fields — and branches and refs were never namespace-checked at
+  all, so a manifest naming `refs/heads/main` would have deleted it. The PR
+  number is validated as a value, since a traversal inside it moves the
+  recomputed path out of the cache and makes the containment check compare a
+  crafted path with itself.
+- `list` and `sweep` pass `--sort created --order desc` to `gh search prs`,
+  which defaults to best-match: a capped search returned an arbitrary `N`, and
+  sorting afterwards cannot recover rows the API never sent. `list` also sorts
+  the merged union before slicing, rather than after.
+
 ## 0.9.3
 
 Fixes two defects in 0.9.2, both found by review of that commit.

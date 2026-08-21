@@ -19,12 +19,14 @@ Raw slash-command arguments:
      ```
    - With no `--repo`, find what is assigned to the user across GitHub. Run both:
      ```bash
-     gh search prs --review-requested=@me --state=open --limit <N> --json number,title,author,repository,createdAt,isDraft,url
-     gh search prs --assignee=@me --state=open --limit <N> --json number,title,author,repository,createdAt,isDraft,url
+     gh search prs --review-requested=@me --state=open --limit <N> --sort created --order desc --json number,title,author,repository,createdAt,isDraft,url
+     gh search prs --assignee=@me --state=open --limit <N> --sort created --order desc --json number,title,author,repository,createdAt,isDraft,url
      ```
      These mean different things — review-requested is work waiting on you, assigned is work owned by you — so keep track of which query produced each row and label the reason rather than blurring them into one list.
 
-     **Merge, de-duplicate on `url`, and only then take `<N>`.** Each search is limited to `<N>` on its own, so the merge holds up to `2N` rows, and a PR that is both review-requested and assigned is in both — which would list it twice and push a real entry off the end. A row in both queues gets both labels, not two lines.
+     `--sort created --order desc` is not optional. `gh search prs` defaults to **best-match** ordering, so a capped search returns an arbitrary `<N>` rather than the newest `<N>`, and no amount of sorting afterwards can recover a row the API never sent.
+
+     **Merge, de-duplicate on `url`, sort the union by `createdAt` descending, and only then take `<N>`.** In that order. Each search is capped at `<N>` on its own, so the union holds up to `2N` rows; slicing before sorting can fill every place from the first query and drop newer PRs from the second. A PR that is both review-requested and assigned appears in both — it gets both labels, on one line, not two.
    - If neither returns anything, fall back to the current directory's repository, but only if it actually resolves to one:
      ```bash
      gh repo view --json nameWithOwner
@@ -33,7 +35,7 @@ Raw slash-command arguments:
 
    `--limit` defaults to 20.
 
-2. **Render a compact table**, newest first (sort by `createdAt` descending — do not rely on the API's ordering): index, `repo#number`, title (truncate to ~60 chars), author, size (`N files, +A/-D` when available), age, and CI/review state when available. Mark drafts, and mark why each row is listed when the source was the two searches.
+2. **Render a compact table**, newest first — the union was already sorted in step 1, so this is the same order, not a second one: index, `repo#number`, title (truncate to ~60 chars), author, size (`N files, +A/-D` when available), age, and CI/review state when available. Mark drafts, and mark why each row is listed when the source was the two searches.
 
    `gh search prs` does not return size fields. Do not issue a `gh pr view` per row just to fill them in — leave the size column blank for search results and note that `/codex-pr-reviewer:review` will report it.
 

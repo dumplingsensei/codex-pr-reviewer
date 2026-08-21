@@ -18,7 +18,7 @@ Core constraint:
 
 1. **Preflight** with `node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" doctor --json`. Stop on failure.
 
-   **These instructions were written for plugin version `0.9.3`.** If the report's `pluginVersion` differs, or `stale` is true, the prompts this session loaded are older than the installed plugin. Say so — with the `plugin` check's `remedy` — as part of step 4's confirmation, so the user decides whether to spend a paid batch on outdated instructions. It is a warning rather than a block: a batch that runs on slightly older instructions still produces reviews the user reads themselves.
+   **These instructions were written for plugin version `0.9.4`.** If the report's `pluginVersion` differs, or `stale` is true, the prompts this session loaded are older than the installed plugin. Say so — with the `plugin` check's `remedy` — as part of step 4's confirmation, so the user decides whether to spend a paid batch on outdated instructions. It is a warning rather than a block: a batch that runs on slightly older instructions still produces reviews the user reads themselves.
 
 2. **Gather candidates.** These must be the *same* sources `/codex-pr-reviewer:list` uses, or the batch is drawn from a different queue than the one the user was shown:
    - With `--repo owner/repo`:
@@ -28,12 +28,15 @@ Core constraint:
      ```
    - Otherwise **both** of these, exactly as `list` does — review requests and assignments are different queues and a PR can be in either:
      ```bash
-     gh search prs --review-requested=@me --state=open --limit 50 --json number,title,author,repository,createdAt,url
-     gh search prs --assignee=@me --state=open --limit 50 --json number,title,author,repository,createdAt,url
+     gh search prs --review-requested=@me --state=open --limit 50 --sort created --order desc --json number,title,author,repository,createdAt,url
+     gh search prs --assignee=@me --state=open --limit 50 --sort created --order desc --json number,title,author,repository,createdAt,url
      ```
+     `--sort created --order desc` is load-bearing: `gh search prs` defaults to **best-match**, so a queue longer than 50 otherwise yields an arbitrary 50, and step 3's `--order newest` would be sorting a subset that never contained the newest PRs. With it, the cap takes the newest 50, which is the set `--order newest` is meant to choose from.
      **Merge them, then de-duplicate on `url`, the same key `/codex-pr-reviewer:list` uses.** A PR you were asked to review *and* assigned appears in both, and two 50-item searches otherwise yield up to 100 rows with duplicates competing for places in the batch — which is a paid Codex run spent reviewing the same PR twice.
 
    `createdAt` is fetched because step 3's `--order newest` sorts on it. Without it that flag silently falls back to whatever order the API returned.
+
+   Sort the de-duplicated union, then take `--limit` from it — never the other way round.
 
    Fetch **more candidates than `--limit`** — the whole point of step 3 is to choose among them.
 

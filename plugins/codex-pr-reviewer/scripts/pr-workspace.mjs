@@ -102,6 +102,22 @@ const git = (dir, args) => run("git", ["-C", dir, ...args]);
 const gitChecked = (dir, args) => runChecked("git", ["-C", dir, ...args]);
 const gitOut = (dir, args) => gitChecked(dir, args).stdout.trim();
 
+/**
+ * Trimmed stdout of a git command that succeeded and said something, or null.
+ *
+ * `git(...).stdout.trim()` returns "" for a command that failed, and "" is
+ * falsy — so `recorded && actual && actual !== recorded` skips the comparison
+ * exactly when git could not answer. Every such check reads as a verification
+ * and behaves as a no-op. Returning null makes the caller decide what a
+ * non-answer means rather than defaulting it to "fine".
+ */
+function gitOutOrNull(dir, args) {
+  const result = git(dir, args);
+  if (result.status !== 0) return null;
+  const text = result.stdout.trim();
+  return text === "" ? null : text;
+}
+
 function gh(args, options = {}) {
   return run("gh", args, options);
 }
@@ -1403,19 +1419,45 @@ function verifyPreparedWorktree(entry) {
     stop(`${entry.worktree} is no longer a git worktree of its own.`);
   }
 
-  const head = git(entry.worktree, ["rev-parse", "HEAD"]).stdout.trim();
-  if (entry.headSha && head && head !== entry.headSha) {
+  const head = gitOutOrNull(entry.worktree, ["rev-parse", "HEAD"]);
+  if (!head) {
+    stop(`Could not resolve HEAD in the worktree for ${entry.key}.`);
+  }
+  if (entry.headSha && head !== entry.headSha) {
     stop(
       `The worktree for ${entry.key} is at ${head.slice(0, 12)}, not the ${String(entry.headSha).slice(0, 12)} that was prepared.`,
       "Re-run without --no-prepare to fetch the current head and review that."
     );
   }
 
-  const base = git(entry.worktree, ["rev-parse", entry.baseBranch]).stdout.trim();
-  if (entry.mergeBase && base && base !== entry.mergeBase) {
+  const base = gitOutOrNull(entry.worktree, ["rev-parse", entry.baseBranch]);
+  if (!base) {
+    stop(`Could not resolve \`${entry.baseBranch}\`, the base this review would diff against.`);
+  }
+  if (entry.mergeBase && base !== entry.mergeBase) {
     stop(
       `\`${entry.baseBranch}\` is at ${base.slice(0, 12)}, not the merge-base ${String(entry.mergeBase).slice(0, 12)} that was prepared.`,
       "The diff would not be GitHub's diff. Re-run without --no-prepare."
+    );
+  }
+
+  // The commits matching is not the same as the tree matching. `codex review
+  // --base` diffs the *working tree*, so an uncommitted edit is reviewed as
+  // part of the pull request while HEAD and the base both still agree with the
+  // manifest — and the saved review carries the real PR's title and head over
+  // findings about content the pull request does not contain. This is the one
+  // failure here that needs no attacker and no race: someone opening the
+  // checkout and saving a file is enough.
+  const dirty = git(entry.worktree, ["status", "--porcelain", "--untracked-files=all"]);
+  if (dirty.status !== 0) {
+    stop(`Could not read the state of the worktree for ${entry.key}.`);
+  }
+  const changes = dirty.stdout.trim();
+  if (changes) {
+    const count = changes.split("\n").length;
+    stop(
+      `The worktree for ${entry.key} has ${count} uncommitted change${count === 1 ? "" : "s"}, which a review would read as part of the pull request.`,
+      `Discard them, or re-run without --no-prepare — that refreshes the checkout. First: ${changes.split("\n")[0]}`
     );
   }
 }
@@ -1667,9 +1709,66 @@ function selectForClean(entries, options) {
  * then be skipped silently, and reported as success. `purgeUnusedClones` runs
  * once, after the whole batch.
  */
+/**
+ * Everything `removeEntry` is about to destroy, checked before anything is
+ * destroyed.
+ *
+ * The manifest is a JSON file in a cache directory. It is hand-edited when
+ * something goes wrong, and writable by anything running as this user, so every
+ * field below is untrusted input to a routine that runs `git worktree remove
+ * --force`, `git branch -D`, `git update-ref -d`, and `rmSync(recursive)`.
+ *
+ * Validating late is the same as not validating: the previous version checked
+ * the worktree path immediately before `rmSync`, by which point git had already
+ * been handed that path and both branches and every ref had already been
+ * deleted. So this runs first and returns a reason instead of throwing —
+ * a bad entry is reported and kept for inspection, never silently skipped.
+ *
+ * Recomputing the worktree path is not enough on its own either: `expected`
+ * derives from `entry.number`, and a number of `1/../../../..` normalizes out
+ * of the cache, so an entry naming that path on both sides compares equal to
+ * itself. The number and slug are therefore validated as values first.
+ */
+function entryRemovalProblem(entry) {
+  if (!Number.isSafeInteger(entry.number) || entry.number <= 0) {
+    return `pull request number ${JSON.stringify(entry.number)} is not a positive integer`;
+  }
+  if (typeof entry.repo !== "string" || !/^[^/\s]+\/[^/\s]+$/.test(entry.repo)) {
+    return `repository ${JSON.stringify(entry.repo)} is not an owner/name slug`;
+  }
+
+  // Branches and refs are deleted outright, in a repository that is usually the
+  // user's own. Nothing else in it belongs to this plugin.
+  for (const branch of [entry.headBranch, entry.baseBranch]) {
+    if (typeof branch !== "string" || !branch.startsWith(`${BRANCH_NS}/`)) {
+      return `branch ${JSON.stringify(branch)} is outside \`${BRANCH_NS}/\``;
+    }
+  }
+  for (const ref of entry.refs ?? []) {
+    if (typeof ref !== "string" || !ref.startsWith(`${REF_NS}/`)) {
+      return `ref ${JSON.stringify(ref)} is outside \`${REF_NS}/\``;
+    }
+  }
+
+  if (typeof entry.worktree !== "string" || !entry.worktree) {
+    return `worktree ${JSON.stringify(entry.worktree)} is not a path`;
+  }
+  const expected = path.join(worktreesDir(), slugToDir(entry.repo), `pr-${entry.number}`);
+  if (realPath(entry.worktree) !== realPath(expected)) {
+    return `worktree ${entry.worktree} is not where one for ${entry.key} belongs (${expected})`;
+  }
+  return null;
+}
+
 function removeEntry(entry) {
   const removed = [];
   const failed = [];
+
+  const problem = entryRemovalProblem(entry);
+  if (problem) {
+    failed.push(`${entry.key}: ${problem} — nothing was removed for this entry`);
+    return { removed, failed };
+  }
 
   if (repoRootOf(entry.repoDir)) {
     git(entry.repoDir, ["worktree", "remove", "--force", entry.worktree]);
@@ -1712,20 +1811,9 @@ function removeEntry(entry) {
     }
   }
 
-  // `rmSync(..., { recursive: true })` on a path read straight out of a JSON
-  // file is only safe while that file is exactly what this plugin wrote. The
-  // manifest lives in a cache directory, is edited by hand when something goes
-  // wrong, and is the sort of thing a stray script writes to; nothing so far
-  // has checked that the path being deleted is one this plugin could have
-  // created. Recompute where it must be and refuse anything else.
-  const expected = path.join(worktreesDir(), slugToDir(entry.repo), `pr-${entry.number}`);
-  if (realPath(entry.worktree) !== realPath(expected)) {
-    failed.push(
-      `worktree ${entry.worktree}: not where a worktree for ${entry.key} belongs (${expected}) — left alone`
-    );
-    return { removed, failed };
-  }
-
+  // Safe to delete recursively: `entryRemovalProblem` established at the top of
+  // this function, before git touched anything, that this path is the one a
+  // worktree for this entry would occupy.
   fs.rmSync(entry.worktree, { recursive: true, force: true });
   removed.push(`worktree ${entry.worktree}`);
   // Drop the now-empty per-repo parent; throws harmlessly if siblings remain.

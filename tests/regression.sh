@@ -300,6 +300,30 @@ contains "a moved worktree head is refused" "$out" "not the"
 contains "and says how to fix it" "$out" "--no-prepare"
 git -C "$WT" checkout --quiet -B codex-pr/o__r/7 "$WT_HEAD"
 
+# `codex review --base` diffs the working tree, not the commit. An uncommitted
+# edit is therefore reviewed as part of the pull request while HEAD and the base
+# both still match the manifest — and the saved review carries the real PR's
+# title and head over findings about content the PR does not contain. The one
+# failure here that needs no attacker and no race.
+echo "SECRET BACKDOOR" >>"$WT/f.txt"
+out="$(PATH="$SANDBOX/stub:$PATH" node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+contains "an uncommitted edit is refused" "$out" "uncommitted change"
+contains "and the first one is named" "$out" "f.txt"
+git -C "$WT" checkout --quiet -- f.txt
+
+# An untracked file counts too: it is in the tree codex is pointed at.
+printf 'x\n' >"$WT/dropped-in.txt"
+out="$(PATH="$SANDBOX/stub:$PATH" node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+contains "an untracked file is refused" "$out" "uncommitted change"
+rm -f "$WT/dropped-in.txt"
+
+# Regression: the head and base probes read `.stdout.trim()` and ignored git's
+# exit status, so a command that could not answer produced "" — falsy — and the
+# comparison guarding it was skipped. Verification passed precisely when it
+# could not verify.
+out="$(PATH="$SANDBOX/stub:$PATH" node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+check "a clean worktree still passes" "$(printf '%s' "$out" | grep -c 'uncommitted change')" "0"
+
 # The same check, one step earlier: the directory is not there at all.
 mv "$WT" "$WT.moved"
 out="$(PATH="$SANDBOX/stub:$PATH" node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
@@ -362,8 +386,42 @@ cat >"$CACHE/manifest.json" <<JSON
   "changedFiles":1,"preparedAt":"2026-01-01T00:00:00.000Z"}
 ]}
 JSON
+# Writes a one-entry manifest with the four attacker-controlled fields varied,
+# so each rejection branch is exercised rather than only the path one.
+bad_entry() {
+  cat >"$CACHE/manifest.json" <<JSON
+{"version":1,"entries":[
+ {"key":"o/r#31","repo":$1,"number":$2,"title":"t","url":"u","state":"OPEN","author":"a",
+  "worktree":"$SANDBOX/precious","repoDir":"$SANDBOX/none","remote":"origin","mode":"clone",
+  "headBranch":$3,"baseBranch":"codex-pr/o__r/31-base","refs":$4,
+  "headSha":"0","mergeBase":"0","baseRefName":"main","additions":1,"deletions":0,
+  "changedFiles":1,"preparedAt":"2026-01-01T00:00:00.000Z"}
+]}
+JSON
+}
+
+bad_entry '"o/r"' 31 '"codex-pr/o__r/31"' '[]'
 out="$(cclean --all 2>&1)"
-contains "a worktree outside the cache layout is refused" "$out" "not where a worktree for o/r#31 belongs"
+contains "a worktree outside the cache layout is refused" "$out" "is not where one for o/r#31 belongs"
+
+# Recomputing the path is not enough by itself: `pr-${number}` with a traversal
+# in it normalizes out of the cache, so an entry naming that path on both sides
+# compares equal to itself. The number is rejected as a value first.
+bad_entry '"o/r"' '"1/../../../tmp/x"' '"codex-pr/o__r/31"' '[]'
+out="$(cclean --all 2>&1)"
+contains "a traversal in the PR number is refused" "$out" "is not a positive integer"
+
+# Branches and refs are deleted outright, in the user's own repository, and
+# were never namespace-checked at all — `refs/heads/main` would have been fed
+# straight to `update-ref -d`.
+bad_entry '"o/r"' 31 '"main"' '[]'
+out="$(cclean --all 2>&1)"
+contains "a branch outside the plugin namespace is refused" "$out" "is outside \`codex-pr/\`"
+
+bad_entry '"o/r"' 31 '"codex-pr/o__r/31"' '["refs/heads/main"]'
+out="$(cclean --all 2>&1)"
+contains "a ref outside the plugin namespace is refused" "$out" "is outside \`refs/codex-pr-reviewer/\`"
+
 check "and the directory is still there" \
   "$([[ -f "$SANDBOX/precious/keep.txt" ]] && echo kept || echo deleted)" "kept"
 check "the entry stays for a retry" \

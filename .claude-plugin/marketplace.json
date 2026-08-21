@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Chase's Claude Code plugins.",
-    "version": "0.9.3"
+    "version": "0.9.4"
   },
   "plugins": [
     {
       "name": "codex-pr-reviewer",
       "description": "Fetch any GitHub PR into an isolated worktree and review it with Codex.",
-      "version": "0.9.3",
+      "version": "0.9.4",
       "author": {
         "name": "dumplingsensei"
       },
