@@ -6,6 +6,24 @@ Codex's reviewer only sees local git state — `--uncommitted`, `--base <branch>
 
 Reviewing in a real checkout — rather than from a raw diff — means Codex can read surrounding code, follow call sites, and pick up the repository's own review conventions. On a test run against [cli/cli#13899](https://github.com/cli/cli/pull/13899) it found a P1 exit-code regression *and* cited that repo's `.github/skills/cli-code-reviewer/SKILL.md` rules as the basis.
 
+## Status
+
+I wrote this for my own use and published it in case it is useful to anyone
+else. It is tested and it works. It is not maintained on a schedule, and I am
+not promising that it will be.
+
+In practice:
+
+- **Bug reports are welcome and may not get fixed.** File one anyway if you
+  have a reproduction — it tells the next person what to expect, whether or not
+  I act on it.
+- **Pull requests are welcome and may not get merged.** If something matters to
+  you and I am slow, fork it; that is what the MIT license is for.
+- **Security reports are the exception.** Those get a reply — see
+  [SECURITY.md](SECURITY.md).
+- A quiet stretch means I have not had time, not that this is abandoned. If it
+  ever is, this section will say so.
+
 ## Install
 
 From a local checkout, pass the path to the repository root. An absolute path
