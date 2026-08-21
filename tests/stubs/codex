@@ -1,0 +1,66 @@
+#!/bin/sh
+#
+# The one description of how a Codex CLI answers this plugin, for every test in
+# both languages that needs one.
+#
+# `doctor` asks three separate things — the version, the login state, and
+# whether `codex review` accepts --base — and a test that gets past the
+# preflight has to answer all three. That contract used to be written out
+# independently in tests/regression.sh (five times) and in
+# .github/workflows/tests.yml, so adding a probe meant finding every copy. The
+# YAML one is the dangerous one: the regression suite cannot see it, and missing
+# it fails the integration job with "toolchain unhealthy", which reads as broken
+# CI rather than a stale stub. That happened once already.
+#
+# Behaviour is set by environment, so a test varies one thing without restating
+# the rest. Every knob is optional.
+#
+#   CPR_STUB_VERSION       what `--version` prints; empty means print nothing
+#   CPR_STUB_VERSION_EXIT  its exit status                        (default 0)
+#   CPR_STUB_LOGIN         what `login status` prints on stderr
+#   CPR_STUB_LOGIN_EXIT    its exit status                        (default 0)
+#   CPR_STUB_PROBE_BASE    "no" to answer `review --help` without --base
+#   CPR_STUB_PROBE_ERR     stderr for a probe that fails instead of answering
+#   CPR_STUB_PROBE_EXIT    its exit status                        (default 0)
+#   CPR_STUB_RUN_HOOK      shell run before a review's output, for race tests
+#   CPR_STUB_RUN_BODY      what a review run prints on stdout
+#   CPR_STUB_RUN_EXIT      its exit status                        (default 0)
+#
+# `${VAR-default}` rather than `${VAR:-default}` throughout: a knob set to the
+# empty string means "say nothing", which is distinct from leaving it unset.
+
+set -u
+
+case "${1:-}" in
+  --version)
+    version="${CPR_STUB_VERSION-codex-cli 0.0.0 (stub)}"
+    [ -n "$version" ] && echo "$version"
+    exit "${CPR_STUB_VERSION_EXIT-0}"
+    ;;
+
+  login)
+    # The real CLI reports login state on stderr, not stdout.
+    login="${CPR_STUB_LOGIN-Logged in using a stub}"
+    [ -n "$login" ] && echo "$login" >&2
+    exit "${CPR_STUB_LOGIN_EXIT-0}"
+    ;;
+
+  review)
+    # Only doctor's capability probe invokes `codex review` first-positionally;
+    # a real review run starts with -C, and falls through to the case below.
+    if [ -n "${CPR_STUB_PROBE_ERR-}" ]; then
+      echo "$CPR_STUB_PROBE_ERR" >&2
+      exit "${CPR_STUB_PROBE_EXIT-1}"
+    fi
+    echo "Usage: codex review [OPTIONS] [PROMPT]"
+    echo "      --uncommitted"
+    [ "${CPR_STUB_PROBE_BASE-yes}" = "no" ] || echo "      --base <BRANCH>"
+    echo "      --title <TITLE>"
+    exit "${CPR_STUB_PROBE_EXIT-0}"
+    ;;
+esac
+
+# A review run.
+[ -n "${CPR_STUB_RUN_HOOK-}" ] && sh -c "$CPR_STUB_RUN_HOOK"
+[ -n "${CPR_STUB_RUN_BODY-}" ] && echo "$CPR_STUB_RUN_BODY"
+exit "${CPR_STUB_RUN_EXIT-0}"

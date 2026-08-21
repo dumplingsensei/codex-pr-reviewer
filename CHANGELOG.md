@@ -5,6 +5,18 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.6
+
+- The installed plugin's README links to the security policy and to the private
+  reporting path. `SECURITY.md` lives at the repository root and is not
+  packaged, so a link was the only route an installed copy could offer, and it
+  did not have one.
+- One Codex stub, `tests/stubs/codex`, shared by the regression suite and the CI
+  workflow. The preflight contract was written out six times across two
+  languages; the workflow's copy is invisible to the regression suite, so a new
+  probe could pass every local test and fail the integration job with "toolchain
+  unhealthy". `tests/unit.mjs` now fails if either consumer writes its own again.
+
 ## 0.9.5
 
 The two concurrency findings from the same Codex review.

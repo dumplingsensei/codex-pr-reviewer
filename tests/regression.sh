@@ -12,6 +12,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT="$ROOT/plugins/codex-pr-reviewer/scripts/pr-workspace.mjs"
+# One codex stub, shared with the CI workflow. See tests/stubs/codex.
+STUBS="$ROOT/tests/stubs"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/cpr-regression.XXXXXX")"
 trap 'rm -rf "$SANDBOX"' EXIT
 
@@ -241,14 +243,13 @@ check "entry retained for retry" \
 # ---------------------------------------------------------------------------
 
 note "review output hygiene (stub codex)"
-mkdir -p "$SANDBOX/stub"
-cat >"$SANDBOX/stub/codex" <<'STUB'
-#!/bin/sh
-case "$1" in --version) exit 3 ;; esac
-echo "P1 finding"
-exit 2
-STUB
-chmod +x "$SANDBOX/stub/codex"
+# A codex whose --version fails, so the footer's `|| "codex"` fallback is
+# exercised, and whose review run exits nonzero having still printed a body.
+hygiene_codex() {
+  env CPR_STUB_VERSION= CPR_STUB_VERSION_EXIT=3 \
+      CPR_STUB_RUN_BODY="P1 finding" CPR_STUB_RUN_EXIT=2 \
+      PATH="$STUBS:$PATH" "$@"
+}
 
 git -C "$HOST" checkout --quiet main
 # `review --no-prepare` now checks the worktree is still the one that was
@@ -272,7 +273,7 @@ cat >"$CACHE/manifest.json" <<JSON
 JSON
 
 # Regression: streamed review text shared stdout with the --json payload.
-out="$(PATH="$SANDBOX/stub:$PATH" node "$SCRIPT" review o/r#7 --repo o/r --no-prepare --json 2>/dev/null)"
+out="$(hygiene_codex node "$SCRIPT" review o/r#7 --repo o/r --no-prepare --json 2>/dev/null)"
 if printf '%s' "$out" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{JSON.parse(s);})' 2>/dev/null; then
   printf '  ok   review --json emits parseable JSON\n'; pass=$((pass + 1))
 else
@@ -281,7 +282,7 @@ fi
 
 # Regression: the wrapper returned codex's exit status, so a sweep marked
 # healthy PRs as failed whenever codex exited nonzero.
-PATH="$SANDBOX/stub:$PATH" node "$SCRIPT" review o/r#7 --repo o/r --no-prepare >/dev/null 2>&1
+hygiene_codex node "$SCRIPT" review o/r#7 --repo o/r --no-prepare >/dev/null 2>&1
 check "wrapper exits 0 when the review was saved" "$?" "0"
 
 # Regression: `?? "codex"` could not catch the "" from a failed version probe,
@@ -295,7 +296,7 @@ contains "footer names a model" "$(cat "$saved")" "Automated review by codex"
 # whatever is there now, labelled with the head the manifest remembers, is wrong
 # about which commits it read.
 git -C "$WT" checkout --quiet --detach HEAD~1 2>/dev/null || git -C "$WT" commit --quiet --allow-empty -m moved
-out="$(PATH="$SANDBOX/stub:$PATH" node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+out="$(hygiene_codex node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
 contains "a moved worktree head is refused" "$out" "not the"
 contains "and says how to fix it" "$out" "--no-prepare"
 git -C "$WT" checkout --quiet -B codex-pr/o__r/7 "$WT_HEAD"
@@ -306,14 +307,14 @@ git -C "$WT" checkout --quiet -B codex-pr/o__r/7 "$WT_HEAD"
 # title and head over findings about content the PR does not contain. The one
 # failure here that needs no attacker and no race.
 echo "SECRET BACKDOOR" >>"$WT/f.txt"
-out="$(PATH="$SANDBOX/stub:$PATH" node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+out="$(hygiene_codex node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
 contains "an uncommitted edit is refused" "$out" "uncommitted change"
 contains "and the first one is named" "$out" "f.txt"
 git -C "$WT" checkout --quiet -- f.txt
 
 # An untracked file counts too: it is in the tree codex is pointed at.
 printf 'x\n' >"$WT/dropped-in.txt"
-out="$(PATH="$SANDBOX/stub:$PATH" node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+out="$(hygiene_codex node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
 contains "an untracked file is refused" "$out" "uncommitted change"
 rm -f "$WT/dropped-in.txt"
 
@@ -321,12 +322,12 @@ rm -f "$WT/dropped-in.txt"
 # exit status, so a command that could not answer produced "" — falsy — and the
 # comparison guarding it was skipped. Verification passed precisely when it
 # could not verify.
-out="$(PATH="$SANDBOX/stub:$PATH" node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+out="$(hygiene_codex node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
 check "a clean worktree still passes" "$(printf '%s' "$out" | grep -c 'uncommitted change')" "0"
 
 # The same check, one step earlier: the directory is not there at all.
 mv "$WT" "$WT.moved"
-out="$(PATH="$SANDBOX/stub:$PATH" node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+out="$(hygiene_codex node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
 contains "a worktree that is gone is refused" "$out" "is gone"
 mv "$WT.moved" "$WT"
 
@@ -448,35 +449,21 @@ esac
 exit 0
 STUB
 chmod +x "$SANDBOX/preflight/gh"
-cat >"$SANDBOX/preflight/codex" <<'STUB'
-#!/bin/sh
-case "$1" in
-  --version) echo "codex-cli 0.0.1 (pre --base)" ; exit 0 ;;
-  login) echo "Logged in using a stub" >&2 ; exit 0 ;;
-  review) echo "Usage: codex review [OPTIONS]" ; echo "      --uncommitted" ; exit 0 ;;
-esac
-exit 0
-STUB
-chmod +x "$SANDBOX/preflight/codex"
-out="$(PATH="$SANDBOX/preflight:$PATH" node "$SCRIPT" doctor 2>&1)"
+# Named, so the two assertions below cannot end up describing different stubs.
+without_base() {
+  env CPR_STUB_PROBE_BASE=no PATH="$SANDBOX/preflight:$STUBS:$PATH" "$@"
+}
+out="$(without_base node "$SCRIPT" doctor 2>&1)"
 contains "a codex without --base is refused" "$out" "does not accept --base"
 contains "and the remedy names the upgrade" "$out" "npm install -g @openai/codex"
 check "and doctor fails rather than warning" \
-  "$(PATH="$SANDBOX/preflight:$PATH" node "$SCRIPT" doctor >/dev/null 2>&1; echo $?)" "1"
+  "$(without_base node "$SCRIPT" doctor >/dev/null 2>&1; echo $?)" "1"
 
 # A codex whose `review --help` never answers is a different problem from one
 # that answers without --base, and telling someone to reinstall the CLI cannot
 # fix a crash or a hang.
-cat >"$SANDBOX/preflight/codex" <<'STUB'
-#!/bin/sh
-case "$1" in
-  --version) echo "codex-cli 0.0.1" ;;
-  login) echo "Logged in using a stub" >&2 ; exit 0 ;;
-  review) echo "error: could not connect" >&2 ; exit 70 ;;
-esac
-exit 0
-STUB
-out="$(PATH="$SANDBOX/preflight:$PATH" node "$SCRIPT" doctor 2>&1)"
+out="$(CPR_STUB_PROBE_ERR="error: could not connect" CPR_STUB_PROBE_EXIT=70 \
+  PATH="$SANDBOX/preflight:$STUBS:$PATH" node "$SCRIPT" doctor 2>&1)"
 contains "a probe that fails is not reported as a missing flag" "$out" "exited 70"
 check "and does not send the user to reinstall" \
   "$(printf '%s' "$out" | grep -c 'npm install -g @openai/codex')" "0"
@@ -484,17 +471,8 @@ check "and does not send the user to reinstall" \
 # The same stub, answering with --base. Asserted on doctor's exit status, not on
 # the absence of one message: "no complaint about --base" is also satisfied by a
 # doctor that fell over for some entirely unrelated reason.
-cat >"$SANDBOX/preflight/codex" <<'STUB'
-#!/bin/sh
-case "$1" in
-  --version) echo "codex-cli 0.0.1" ;;
-  login) echo "Logged in using a stub" >&2 ; exit 0 ;;
-  review) echo "      --base <BRANCH>" ; exit 0 ;;
-esac
-exit 0
-STUB
 check "a codex that accepts --base passes the preflight" \
-  "$(PATH="$SANDBOX/preflight:$PATH" node "$SCRIPT" doctor >/dev/null 2>&1; echo $?)" "0"
+  "$(PATH="$SANDBOX/preflight:$STUBS:$PATH" node "$SCRIPT" doctor >/dev/null 2>&1; echo $?)" "0"
 
 note "concurrent manifest writers do not lose each other's entries"
 # Regression: writing was atomic — temp file, rename over — but mutating was
@@ -815,18 +793,21 @@ check "the entry is cleaned" "$(node "$SCRIPT" list --json 2>/dev/null | grep -c
 remake_run_worktree
 inflight_manifest
 rm -f "$REVIEWS"/*.md
-cat >"$SANDBOX/inflight-stub/codex" <<STUB
-#!/bin/sh
-case "\$1" in --version) echo "codex-cli stub" ; exit 0 ;; esac
-ls "$CACHE/runs" | sed 's/^/marker: /'
-node "$SCRIPT" clean --all --purge-reviews --dry-run >"$SANDBOX/held-mid-review.out" 2>&1
-"$SANDBOX/cclean.sh" --all --include-running >"$SANDBOX/override-mid-review.out" 2>&1
-echo "P1 finding from a review that outlived its manifest entry"
-exit 0
-STUB
-chmod +x "$SANDBOX/inflight-stub/codex"
+# The hook runs while codex is "reviewing", which is the whole point: it lists
+# the run marker that exists only during a run, then performs the clean whose
+# race with that run is what this section tests. Expanded here, so the paths are
+# literal by the time the stub reads it.
+INFLIGHT_HOOK="ls '$CACHE/runs' | sed 's/^/marker: /'
+node '$SCRIPT' clean --all --purge-reviews --dry-run >'$SANDBOX/held-mid-review.out' 2>&1
+'$SANDBOX/cclean.sh' --all --include-running >'$SANDBOX/override-mid-review.out' 2>&1"
+inflight_codex() {
+  env CPR_STUB_VERSION="codex-cli stub" \
+      CPR_STUB_RUN_HOOK="$INFLIGHT_HOOK" \
+      CPR_STUB_RUN_BODY="P1 finding from a review that outlived its manifest entry" \
+      PATH="$STUBS:$PATH" "$@"
+}
 
-out="$(PATH="$SANDBOX/inflight-stub:$PATH" node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+out="$(inflight_codex node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
 contains "the marker is visible while the review runs" "$out" "marker: o__r-pr7-"
 contains "a clean during the review holds the entry back" \
   "$(cat "$SANDBOX/held-mid-review.out")" "Held back 1 entry"
@@ -872,21 +853,10 @@ case "$1" in
 esac
 exit 0
 STUB
-cat >"$SANDBOX/doctorstub/codex" <<'STUB'
-#!/bin/sh
-case "$1" in
-  --version) echo "codex-cli 0.0.0" ;;
-  login) echo "Logged in using stub" >&2 ;;
-  # doctor asks whether this codex accepts `review --base`, since being
-  # installed is not the same as speaking the interface the plugin builds.
-  review) echo "      --base <BRANCH>" ;;
-esac
-exit 0
-STUB
-chmod +x "$SANDBOX/doctorstub/gh" "$SANDBOX/doctorstub/codex"
+chmod +x "$SANDBOX/doctorstub/gh"
 
 doctor_json() {
-  CLAUDE_CONFIG_DIR="$CONFIG" PATH="$SANDBOX/doctorstub:$PATH" \
+  CLAUDE_CONFIG_DIR="$CONFIG" PATH="$SANDBOX/doctorstub:$STUBS:$PATH" \
     node "$1/scripts/pr-workspace.mjs" doctor --json 2>/dev/null
 }
 field() {

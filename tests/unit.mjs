@@ -299,6 +299,36 @@ for (const command of ["review.md", "sweep.md"]) {
   eq(`${command} has one version literal throughout`, literals, [version]);
 }
 
+describe("test stubs");
+// `doctor` asks three things, and every test that gets past the preflight has
+// to answer all three. That contract was written out six times across two
+// languages, so adding a probe meant finding every copy — and the copy in the
+// workflow is invisible to the regression suite, which is how a stale stub
+// turns into an integration job failing with "toolchain unhealthy". These
+// assertions are what stops it drifting back.
+const stubPath = path.join(root, "tests", "stubs", "codex");
+eq("the shared codex stub exists", fs.existsSync(stubPath), true);
+eq(
+  "and is executable",
+  fs.existsSync(stubPath) && Boolean(fs.statSync(stubPath).mode & 0o111),
+  true
+);
+
+const workflow = fs.readFileSync(path.join(root, ".github", "workflows", "tests.yml"), "utf8");
+eq("CI puts the shared stub on PATH", workflow.includes("tests/stubs"), true);
+eq(
+  "and does not write a codex of its own",
+  /codex["']?\s*<<|--version\)\s*echo\s+"codex-cli/.test(workflow),
+  false
+);
+
+const regression = fs.readFileSync(path.join(root, "tests", "regression.sh"), "utf8");
+eq(
+  "the regression suite writes no codex of its own",
+  /codex["']?\s*<</.test(regression),
+  false
+);
+
 describe("packaging");
 // marketplace.json ships `./plugins/codex-pr-reviewer`, so anything left at the
 // repository root is not in what a user installs. The licence has to be inside
@@ -312,6 +342,21 @@ eq(
   fs.existsSync(pluginLicense) && fs.readFileSync(pluginLicense, "utf8"),
   fs.readFileSync(rootLicense, "utf8")
 );
+// SECURITY.md lives at the repository root and is not packaged, so the only
+// route an installed copy can offer is a link. Without one, a user who installs
+// the plugin gets the short Safety section and no way to report privately.
+const shippedReadme = fs.readFileSync(path.join(pluginDir, "README.md"), "utf8");
+eq(
+  "the shipped README routes to the security policy",
+  shippedReadme.includes("SECURITY.md"),
+  true
+);
+eq(
+  "and to the private reporting path",
+  shippedReadme.includes("security/advisories/new"),
+  true
+);
+
 eq(
   "plugin.json declares the licence it ships",
   readJson(path.join(pluginDir, ".claude-plugin", "plugin.json")).license,

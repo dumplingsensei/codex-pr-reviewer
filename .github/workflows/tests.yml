@@ -85,24 +85,19 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
-      - name: Stub the Codex CLI
+      - name: Put the shared Codex stub on PATH
         # This suite never invokes Codex — it asserts that what Codex would be
         # handed is byte-for-byte GitHub's diff. `codex` is needed only because
         # the suite gates on `doctor`, which refuses an unhealthy toolchain and
         # would otherwise turn every CI run into a silent SKIP.
-        run: |
-          mkdir -p "$RUNNER_TEMP/stub"
-          cat >"$RUNNER_TEMP/stub/codex" <<'STUB'
-          #!/bin/sh
-          case "$1" in
-            --version) echo "codex-cli 0.0.0 (ci stub)" ;;
-            login) echo "Logged in using a CI stub" >&2 ;;
-            review) echo "      --base <BRANCH>" ;;
-          esac
-          exit 0
-          STUB
-          chmod +x "$RUNNER_TEMP/stub/codex"
-          echo "$RUNNER_TEMP/stub" >>"$GITHUB_PATH"
+        #
+        # The stub is tests/stubs/codex, the same file the regression suite
+        # uses. It used to be written out here as well, in a second language the
+        # regression suite cannot see, so a new preflight probe could pass every
+        # local test and fail this job with "toolchain unhealthy" — which reads
+        # as broken CI rather than a stale stub. tests/unit.mjs now fails if
+        # this step stops referring to the shared copy.
+        run: echo "$GITHUB_WORKSPACE/tests/stubs" >>"$GITHUB_PATH"
       - name: Integration suite
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

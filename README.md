@@ -259,6 +259,11 @@ node tests/unit.mjs          # pure helpers, no network
 ./tests/integration.sh       # real git/gh plumbing, never calls Codex
 ```
 
+Both suites and the CI workflow share one Codex stub, `tests/stubs/codex`.
+`doctor` asks three separate things and every test past the preflight has to
+answer all of them, so the contract is stated once rather than in each place
+that needs it — `unit.mjs` fails the build if a copy reappears.
+
 `regression.sh` pins the defects found in code review — the symlinked-entrypoint
 guard, `--dry-run` side effects, manifest corruption handling, shared-clone
 purging, review output hygiene, the retired flags, the

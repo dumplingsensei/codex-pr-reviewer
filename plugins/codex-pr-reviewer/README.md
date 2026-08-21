@@ -64,5 +64,15 @@ Those rules live in the command prompts, which Claude Code caches at install
 time and loads at session start — so `doctor` reports when the running copy is
 older than its source, and the commands say so before doing anything else.
 
+## Reporting a security problem
+
+This plugin fetches pull requests written by strangers, writes them to disk, and
+runs a model over them, so it has a threat model worth reading:
+[SECURITY.md](https://github.com/dumplingsensei/codex-pr-reviewer/blob/main/SECURITY.md).
+It says what is in scope, what is known and deliberately accepted, and how to
+report privately — through
+[GitHub's private vulnerability reporting](https://github.com/dumplingsensei/codex-pr-reviewer/security/advisories/new),
+not a public issue.
+
 Full documentation, design notes, and the script reference live in the
 [repository README](https://github.com/dumplingsensei/codex-pr-reviewer#readme).
