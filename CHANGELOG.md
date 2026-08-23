@@ -52,6 +52,15 @@ its claims.
   `--no-prepare` checked `headSha` and `mergeBase` only where they were present,
   while the saved document quotes both unconditionally — so an entry missing one
   bought a full review and then threw while writing it.
+- **`doctor` no longer calls every install in use stale.** Claude Code writes
+  `.in_use/<pid>` into the installed copy to record which versions are live, so
+  it exists in the cache and never in the marketplace source — and comparing it
+  reported `stale: true` for any plugin that was actually being used. The remedy
+  that warning prints could not clear it either, since the file returns on the
+  next run. `review.md` and `sweep.md` both put that signal in front of the user,
+  so an always-on version of it is the same as having none. `.in_use` joins
+  `UNCOMPARED`; the exclusion is exactly that path, and a real difference sitting
+  beside the marker is still found.
 - A marker that cannot be written now says so: the review proceeds, but
   unprotected from a concurrent `clean`, and that is worth a line.
 - `keptReviews` counts review documents rather than directory entries, so a

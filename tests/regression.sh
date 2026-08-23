@@ -870,6 +870,30 @@ out="$(doctor_json "$INSTALLED")"
 check "an in-sync copy is not stale" "$(printf '%s' "$out" | field stale)" "false"
 contains "in-sync copy names its marketplace" "$(printf '%s' "$out" | field plugin.detail)" "matches test-mk"
 
+# Regression: Claude Code records which versions are live by writing
+# `.in_use/<pid>` into the *installed* copy, so that path exists in the cache and
+# never in the marketplace source. Comparing it reported every plugin that was
+# actually being used as stale — permanently, because the remedy the warning
+# prints cannot remove a file that reappears on the next run. review.md and
+# sweep.md both put that signal in front of the user, so an always-on version of
+# it is the same as having none.
+#
+# Left in place deliberately: every staleness assertion below now runs with the
+# marker present, which is the state a real install is always in.
+mkdir -p "$INSTALLED/.in_use"
+echo '{"pid":4242}' >"$INSTALLED/.in_use/4242"
+out="$(doctor_json "$INSTALLED")"
+check "a live-use marker does not make a copy stale" "$(printf '%s' "$out" | field stale)" "false"
+
+# The exclusion has to be exactly that one path. An edit sitting beside the
+# marker must still be found, or the fix has traded a false alarm for a blind spot.
+printf 'a command that only exists in the install\n' >"$INSTALLED/commands/leftover.md"
+out="$(doctor_json "$INSTALLED")"
+check "a real difference beside the marker is still found" \
+  "$(printf '%s' "$out" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>console.log(JSON.parse(s).checks.find(c=>c.name==="plugin").changed.join(",")))')" \
+  "commands/leftover.md"
+rm -f "$INSTALLED/commands/leftover.md"
+
 # The source tree itself is never stale: `claude --plugin-dir <source>` and a
 # symlinked install both run the very directory they would be compared against.
 out="$(doctor_json "$MK/plugins/codex-pr-reviewer")"

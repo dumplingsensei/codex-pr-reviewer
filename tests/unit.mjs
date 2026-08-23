@@ -201,6 +201,25 @@ eq("hashes the command prompts", shipped.has("commands/review.md"), true);
 eq("keys are relative to the root", shipped.has("scripts/pr-workspace.mjs"), true);
 eq("a tree matches itself", diffFileHashes(shipped, hashPluginDir(pluginDir)), []);
 
+// Claude Code writes `.in_use/<pid>` into the installed copy to record which
+// versions are live. Hashing it made every plugin in actual use report stale,
+// with a remedy that could not clear it — the file returns on the next run.
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "cpr-hash-"));
+fs.mkdirSync(path.join(scratch, "commands"), { recursive: true });
+fs.writeFileSync(path.join(scratch, "commands", "review.md"), "a prompt\n");
+fs.mkdirSync(path.join(scratch, ".in_use"), { recursive: true });
+fs.writeFileSync(path.join(scratch, ".in_use", "4242"), '{"pid":4242}\n');
+const walked = hashPluginDir(scratch);
+eq("the live-use marker is not hashed", [...walked.keys()], ["commands/review.md"]);
+// Narrow on purpose: everything that is not on the list still counts.
+fs.writeFileSync(path.join(scratch, "commands", "extra.md"), "another prompt\n");
+eq(
+  "a real file beside it still is",
+  [...hashPluginDir(scratch).keys()].sort(),
+  ["commands/extra.md", "commands/review.md"]
+);
+fs.rmSync(scratch, { recursive: true, force: true });
+
 describe("reviewStamp");
 // The matcher below anchors on the shape of this stamp. If the two ever drift,
 // every saved review stops being recognised as one, and `--purge-reviews` stops

@@ -900,9 +900,22 @@ const pluginRoot = () => path.dirname(path.dirname(realPath(fileURLToPath(import
 const pluginManifest = () =>
   readJsonFile(path.join(pluginRoot(), ".claude-plugin", "plugin.json"));
 
-// Never compared: `.git` is not shipped, and the rest is editor and tool debris
-// that says nothing about whether the installed prompts match their source.
-const UNCOMPARED = new Set([".git", "node_modules", ".DS_Store"]);
+/**
+ * Never compared. `.git` is not shipped, and `node_modules` and `.DS_Store` are
+ * tool and editor debris — none of the three says anything about whether the
+ * installed prompts match their source.
+ *
+ * `.in_use` is the one that was doing damage. Claude Code writes `.in_use/<pid>`
+ * into the *installed* copy to record which versions are live, so it is present
+ * in the cache and never in the marketplace source. Comparing it made every
+ * plugin that was actually being used report `stale: true` — and the remedy that
+ * warning prints could not clear it, because the file returns the moment the
+ * plugin runs again. A staleness signal that is always on is worse than no
+ * signal at all: `review.md` and `sweep.md` both put it in front of the user, so
+ * the case it exists to catch — prompts loaded at session start that are older
+ * than the script now answering them — becomes indistinguishable from the noise.
+ */
+const UNCOMPARED = new Set([".git", "node_modules", ".DS_Store", ".in_use"]);
 
 /**
  * Content hash of every shipped file, keyed by path relative to `root`.
