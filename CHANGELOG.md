@@ -59,22 +59,43 @@ exists for:
   from the mirror — the substitution the check was added to stop. Only the
   `(fetch)` URL is read now, and it is parsed rather than split, since a remote
   URL may contain spaces.
-- **Cached clones are namespaced by host**, `repos/<host>/<owner>__<repo>`.
-  `owner/repo` is unique only within one GitHub, so two Enterprise hosts sharing
-  a slug collided on one directory and `--clone` could not get past it. A
-  reused clone is also checked against its `origin` — but only a positive
-  mismatch disqualifies it, since an origin that cannot be parsed is absence of
-  evidence and rejecting on it would re-clone on every run.
+- **A cached clone is checked against its `origin`** before being refreshed into
+  service, so one that has been repointed is re-cloned rather than reused. Only
+  a positive mismatch disqualifies it: an origin that cannot be parsed is
+  absence of evidence, and rejecting on it would re-clone on every run for
+  anyone whose git rewrites URLs. Replacing a clone that manifest entries still
+  live in is refused outright and names them — the removal takes the git
+  directory every linked worktree there depends on, including one a paid review
+  may be reading.
+
+  This briefly namespaced the clone path by host as well. That was reverted: the
+  manifest key, worktree path and branch names all still came from the slug, so
+  storage moved and identity did not, and on every existing install the previous
+  clone became referenced by nothing and unreachable by any `clean` — a
+  guaranteed leak for everyone in exchange for a collision almost nobody hits.
+  Two hosts serving one slug still share prepared state, now recorded in
+  SECURITY.md as a known limitation; separating them properly needs the host in
+  every identity and a migration, which is its own change.
 - **A worktree from an older checkout is rebuilt rather than refreshed.**
   `core.symlinks=false` governs how a link is written, so it does nothing to one
   already on disk: an unchanged blob is not rewritten by `checkout --force`, and
   git under that setting reads the existing link as clean, so the upgrade path
   kept exactly the escape the setting removes.
 - **A registered worktree is recognised as one.** The check compared a resolved
-  path against git's, which reports real paths, so any symlink in the cache path
-  — a symlinked `~/.cache`, macOS's `/var` — made every re-run tear the worktree
-  down and check it out again. Re-running cheaply is a documented property and
-  quietly was not one.
+  path against git's, which reports physical paths, so any symlink in the cache
+  path — a symlinked `~/.cache`, macOS's `/var` — made every re-run tear the
+  worktree down and check it out again. Re-running cheaply is a documented
+  property and quietly was not one. Both comparisons go through one helper now,
+  which resolves via the nearest existing ancestor: the same question is asked
+  in `clean` after the directory is gone, where `realpath` returns the string it
+  was handed and the two sides stop agreeing.
+- **The live-symlink check covers the path reviews actually take.** It ran only
+  in `prepare`, while the documented flow is `review --no-prepare`, so a
+  worktree prepared before `core.symlinks=false` existed reached Codex with its
+  links intact. It is read as bytes rather than text, too: git allows any byte
+  but NUL and `/` in a filename, and decoding as UTF-8 turned a link whose name
+  is not valid UTF-8 into a path that does not exist — which the check read as
+  no link at all. Covered on Linux in CI; macOS rejects such a name outright.
 - **An unknown flag is an error.** It used to become a positional, on the
   grounds that `#42` had to survive — which it does anyway, having no leading
   dash. What actually arrived there were typos: `--modle gpt-5.6` was read as

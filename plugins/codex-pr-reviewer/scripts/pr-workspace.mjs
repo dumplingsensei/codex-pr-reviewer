@@ -269,16 +269,6 @@ export function slugToDir(repo) {
   return canonicalSlug(repo).replaceAll("/", "__");
 }
 
-/**
- * A hostname as one path segment. Hostnames are already safe here, but this is
- * a directory name derived from data the API supplied, so anything outside the
- * character set — a separator above all — becomes an underscore rather than a
- * second level of directory.
- */
-export function hostToDir(host) {
-  const text = String(host ?? "").toLowerCase().replace(/[^a-z0-9._-]/g, "_");
-  return text.replace(/^\.+/, "") || "unknown-host";
-}
 
 export const entryKey = (repo, number) => `${canonicalSlug(repo)}#${number}`;
 
@@ -816,6 +806,31 @@ const realPath = (target) => {
 };
 
 /**
+ * Where a path physically is, whether or not it still exists.
+ *
+ * `realPath` answers this only while the target is there; on a deleted path it
+ * falls back to the string it was handed. That is exactly the wrong answer when
+ * comparing against git, which reports a worktree by the physical path it
+ * recorded: after removal, one side is resolved and the other is still the
+ * symlink spelling — `~/.cache` symlinked elsewhere, or macOS's `/var` — so a
+ * registration that outlived its directory compares unequal and reads as gone.
+ *
+ * Resolving through the nearest ancestor that does exist gives the same answer
+ * before and after, which is what makes the comparison stable.
+ */
+function physicalPath(target) {
+  const trailing = [];
+  let current = path.resolve(target);
+  for (;;) {
+    if (fs.existsSync(current)) return path.join(realPath(current), ...trailing);
+    const parent = path.dirname(current);
+    if (parent === current) return path.resolve(target); // nothing on the way up exists
+    trailing.unshift(path.basename(current));
+    current = parent;
+  }
+}
+
+/**
  * True only when `dir` is itself a repository root. `repoRootOf` reports the
  * nearest *ancestor* repo, so a leftover non-git directory inside a tracked
  * tree would otherwise be mistaken for a healthy cached clone — and the plugin
@@ -872,13 +887,21 @@ function resolveHostRepo(slug, cwd, options = {}) {
     }
   }
 
-  // Namespaced by host, not just by slug. `owner/repo` is only unique within one
-  // GitHub; the same slug on two Enterprise hosts is two different repositories,
-  // and a cache keyed on the slug alone served whichever had been cloned first —
-  // to a run that had just been told, in the line above, that it was fetching
-  // from the host the metadata came from. Even `--clone` could not get past it,
-  // because it selected the same directory.
-  const repoDir = path.join(clonesDir(), hostToDir(options.host), slugToDir(slug));
+  // Keyed by slug, as every other piece of prepared state is.
+  //
+  // This briefly carried the host as well, so two Enterprise hosts sharing an
+  // `owner/repo` would not collide here. That was worse than the problem: the
+  // manifest key, the worktree path, and both branch names all still came from
+  // the slug alone, so storage moved and identity did not — and on every
+  // existing install the previous clone became unreferenced by anything,
+  // meaning no `clean` could ever select it. A guaranteed leak for everyone in
+  // exchange for a collision almost nobody hits.
+  //
+  // Two hosts serving the same slug therefore still share one manifest entry
+  // and one worktree, which is a documented limitation rather than something
+  // this path can fix. Doing it properly means the host in every identity plus
+  // a migration for entries written before it, which is its own change.
+  const repoDir = path.join(clonesDir(), slugToDir(slug));
   if (isRepoRoot(repoDir)) {
     // The path encodes what this clone should be; `origin` says what it is. They
     // part company if someone repoints it, and a clone that is some other
@@ -899,6 +922,29 @@ function resolveHostRepo(slug, cwd, options = {}) {
     log(
       `The cached clone at ${repoDir} points at ${actual.slug} on ${actual.host}, ` +
         `not ${slug} on ${options.host}; re-cloning.`
+    );
+  }
+
+  // Every linked worktree in a clone lives on that clone's git directory, so
+  // deleting it does not just discard a cache — it breaks each worktree still
+  // registered there, including one a paid review may be reading right now,
+  // while their manifest records stay behind describing state that no longer
+  // works. Reached from the mismatch branch above, which a repointed remote or
+  // an `insteadOf` rewrite is enough to trigger, so it is not hypothetical.
+  // Only when there is something to destroy. An entry can name a clone that is
+  // already gone — a failed cleanup leaves exactly that — and refusing then
+  // would block every future prepare on a directory whose absence harms nobody.
+  const dependents = fs.existsSync(repoDir)
+    ? readManifest().entries.filter(
+        (entry) => entry.repoDir && physicalPath(entry.repoDir) === physicalPath(repoDir)
+      )
+    : [];
+  if (dependents.length > 0) {
+    throw new UserError(
+      `Replacing the cached clone at ${repoDir} would break ${dependents.length} prepared pull request${
+        dependents.length === 1 ? "" : "s"
+      } that still live in it: ${dependents.map((entry) => entry.key).join(", ")}.`,
+      "Clean those first (`clean --pr <ref>`), or point that clone's `origin` back where it belongs. Nothing was removed."
     );
   }
 
@@ -1305,33 +1351,57 @@ function fetchPullRefs(repoDir, remote, number, baseRefName, baseRefOid) {
  * that cannot answer returns true: rebuilding is cheap, and being wrong the
  * other way leaves a live link in front of the reviewer.
  */
-function worktreeHasLiveSymlinks(worktree) {
-  const listed = git(worktree, ["ls-files", "-s", "-z"]);
-  if (listed.status !== 0) return true;
+const SYMLINK_MODE = Buffer.from("120000 ");
 
-  for (const record of listed.stdout.split("\0")) {
-    if (!record.startsWith("120000 ")) continue;
-    const at = record.indexOf("\t");
-    if (at === -1) continue;
+function worktreeHasLiveSymlinks(worktree) {
+  // Read as bytes, not text. Git allows any byte but NUL and `/` in a filename
+  // on Unix, and decoding as UTF-8 replaces what it cannot represent — so a
+  // tracked symlink whose name is not valid UTF-8 became a different path,
+  // `lstat` reported it missing, and the catch below read that as "no link
+  // here". The check would then pass while the link it was looking for was
+  // still sitting in the worktree.
+  const listed = spawnSync("git", ["-C", worktree, "ls-files", "-s", "-z"], {
+    encoding: "buffer",
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: DEFAULT_TIMEOUT_MS
+  });
+  if (listed.status !== 0 || !listed.stdout) return true;
+
+  const prefix = Buffer.from(worktree + path.sep);
+  let start = 0;
+  for (let index = 0; index <= listed.stdout.length; index += 1) {
+    if (index !== listed.stdout.length && listed.stdout[index] !== 0) continue;
+    const record = listed.stdout.subarray(start, index);
+    start = index + 1;
+    // `<mode> <sha> <stage>\t<path>` — the path keeps its original bytes.
+    if (!record.subarray(0, SYMLINK_MODE.length).equals(SYMLINK_MODE)) continue;
+    const tab = record.indexOf(0x09);
+    if (tab === -1) continue;
     try {
-      if (fs.lstatSync(path.join(worktree, record.slice(at + 1))).isSymbolicLink()) return true;
+      if (fs.lstatSync(Buffer.concat([prefix, record.subarray(tab + 1)])).isSymbolicLink()) {
+        return true;
+      }
     } catch {
-      /* absent is fine — the checkout below writes it as a file */
+      /* absent is fine — the checkout writes it as a file */
     }
   }
   return false;
 }
 
 function ensureWorktree(repoDir, worktree, headBranch, headRef) {
-  // `realPath` on both sides, not `path.resolve`: git reports a worktree by its
-  // real path, while this one is built from the cache root as configured. Any
-  // symlink along the way — a symlinked `~/.cache`, or macOS's `/var` — made the
-  // two never compare equal, so a worktree that was registered read as absent
-  // and every refresh became a teardown and a fresh checkout. Idempotent
-  // re-runs are a documented property; that quietly wasn't one.
+  // `physicalPath` on both sides, not `path.resolve`: git reports a worktree by
+  // its physical path, while this one is built from the cache root as
+  // configured. Any symlink along the way — a symlinked `~/.cache`, or macOS's
+  // `/var` — made the two never compare equal, so a worktree that was
+  // registered read as absent and every refresh became a teardown and a fresh
+  // checkout. Idempotent re-runs are a documented property; that quietly wasn't
+  // one. The same comparison is made in `remainingAfterRemoval`, where the
+  // directory is gone by then, which is why this resolves through an ancestor.
   const registered = git(repoDir, ["worktree", "list", "--porcelain"])
     .stdout.split("\n")
-    .some((line) => line.startsWith("worktree ") && realPath(line.slice(9)) === realPath(worktree));
+    .some(
+      (line) => line.startsWith("worktree ") && physicalPath(line.slice(9)) === physicalPath(worktree)
+    );
 
   const reusable =
     registered && fs.existsSync(path.join(worktree, ".git")) && !worktreeHasLiveSymlinks(worktree);
@@ -1701,6 +1771,20 @@ function verifyPreparedWorktree(entry) {
   const root = git(entry.worktree, ["rev-parse", "--show-toplevel"]);
   if (root.status !== 0 || realPath(root.stdout.trim()) !== realPath(entry.worktree)) {
     stop(`${entry.worktree} is no longer a git worktree of its own.`);
+  }
+
+  // The same check `ensureWorktree` makes, because this is the path that skips
+  // it. `--no-prepare` is what the review command actually runs, so a worktree
+  // prepared before `core.symlinks=false` existed reaches Codex through here
+  // with its real links intact — and the setting does not retroactively replace
+  // a link already on disk, nor does git report one as a modification. Rebuild
+  // is the remedy rather than a repair, since preparing is what materialises
+  // the tree correctly.
+  if (worktreeHasLiveSymlinks(entry.worktree)) {
+    stop(
+      `The worktree for ${entry.key} still holds real symlinks from a checkout made before this version.`,
+      "Re-run without --no-prepare to rebuild it: a link committed in a pull request is a path out of the worktree, and the read-only sandbox does not stop the reviewer following it."
+    );
   }
 
   const head = gitOutOrNull(entry.worktree, ["rev-parse", "HEAD"]);
@@ -2237,7 +2321,7 @@ function remainingAfterRemoval(entry) {
     .some(
       (line) =>
         line.startsWith("worktree ") &&
-        path.resolve(line.slice(9)) === path.resolve(entry.worktree)
+        physicalPath(line.slice(9)) === physicalPath(entry.worktree)
     );
   if (registered) left.push(`worktree registration for ${entry.worktree}`);
 

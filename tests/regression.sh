@@ -1097,8 +1097,8 @@ out="$(CPR_TEST_CWD="$MIRROR" prepare_sym)"
 contains "the fetch host is the one judged" "$out" "gitlab.example.com"
 contains "so the remote is still refused" "$out" "github.com served this pull request"
 
-check "the cache clone is namespaced by host" \
-  "$([[ -d "$CACHE/repos/github.com/o__r" ]] && echo yes || echo no)" "yes"
+check "the cache clone is keyed by slug, as all prepared state is" \
+  "$([[ -d "$CACHE/repos/o__r" ]] && echo yes || echo no)" "yes"
 
 note "a worktree from an older checkout is rebuilt, not reused"
 # Regression: core.symlinks=false governs how a link is written, so it only acts
@@ -1128,6 +1128,75 @@ out="$(prepare_sym)"
 after_inode="$(ls -id "$SYMWT" | awk '{print $1}')"
 check "a healthy worktree is reused, not rebuilt" "$after_inode" "$before_inode"
 check "and nothing claimed a rebuild" "$(printf '%s' "$out" | grep -c 'rebuilding it')" "0"
+
+note "a legacy symlink is caught on the path the review actually takes"
+# Regression: the live-link check lived only in `ensureWorktree`, so it ran
+# during `prepare`. The documented review flow is `review --no-prepare`, which
+# goes through `verifyPreparedWorktree` instead — so a worktree prepared before
+# core.symlinks=false existed reached codex with its real links intact, and git
+# under that setting does not report one as a modification either.
+rm -f "$SYMWT/escape.txt"
+ln -s /etc/passwd "$SYMWT/escape.txt"
+out="$(env PATH="$STUBS:$PATH" CPR_STUB_RUN_BODY="a finding nobody should have paid for" \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+contains "the review refuses to start" "$out" "still holds real symlinks"
+contains "and says how to fix it" "$out" "without --no-prepare"
+check "codex was never run" "$(printf '%s' "$out" | grep -c 'nobody should have paid')" "0"
+
+# A name git accepts and UTF-8 cannot represent. Decoding the `-z` listing as
+# text replaced these bytes, so `lstat` looked at a different path, missed, and
+# the catch read that as "no link here" — the check passing while the link it
+# was looking for sat in the worktree. Read as bytes, it is found.
+#
+# Only where the filesystem allows it. Linux lets a filename be any bytes but
+# NUL and `/`; APFS and HFS+ reject a name that is not valid UTF-8 outright, so
+# on macOS the case cannot be built at all and asserting on it would pass
+# vacuously. CI covers this on ubuntu.
+badname="$(printf 'bad-\xff-name')"
+if ( cd "$SANDBOX" && ln -s /dev/null "$badname" ) 2>/dev/null; then
+  rm -f "$SANDBOX/$badname"
+  ( cd "$SYMUP" && git checkout --quiet feature \
+    && ln -s /etc/passwd "$badname" \
+    && git add -A && git commit --quiet -m "a link with an undecodable name" \
+    && git update-ref refs/pull/7/head refs/heads/feature && git checkout --quiet main )
+  HEAD_OID="$(git -C "$SYMUP" rev-parse refs/pull/7/head)"
+  write_pr_json "$BASE_OID"
+  prepare_sym >/dev/null 2>&1
+  check "the odd name is checked out as a file" \
+    "$([[ -e "$SYMWT/$badname" && ! -L "$SYMWT/$badname" ]] && echo file || echo link-or-missing)" "file"
+  rm -f "$SYMWT/$badname"
+  ln -s /etc/passwd "$SYMWT/$badname"
+  out="$(env PATH="$STUBS:$PATH" CPR_STUB_RUN_BODY=x \
+    node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+  contains "a link whose name is not UTF-8 is still found" "$out" "still holds real symlinks"
+  prepare_sym >/dev/null 2>&1
+else
+  printf '  skip non-UTF-8 filename case: this filesystem rejects the name\n'
+fi
+
+note "a clone that other PRs live in is not replaced underneath them"
+# Regression: the mismatch branch fell through to `rmSync(recursive)`, which
+# removes the common git directory every linked worktree in that clone depends
+# on — including one a paid review may be reading — while their manifest records
+# stay behind describing state that no longer works.
+CLONE_DIR="$CACHE/repos/o__r"
+check "the fixture has a cache clone with an entry in it" \
+  "$([[ -d "$CLONE_DIR" ]] && echo yes || echo no)" "yes"
+git -C "$CLONE_DIR" remote set-url origin "https://github.com/someone/else"
+out="$(prepare_sym 2>&1)"
+contains "the replacement is refused" "$out" "would break"
+contains "and it names what would break" "$out" "o/r#7"
+check "nothing was removed" "$([[ -d "$CLONE_DIR" ]] && echo present || echo gone)" "present"
+check "and the worktree still stands" "$([[ -d "$SYMWT" ]] && echo present || echo gone)" "present"
+# Put it back so the rest of the section runs against a healthy clone.
+git -C "$CLONE_DIR" remote set-url origin "$SYMUP"
+
+# Both sections above deliberately leave the worktree unfit to review — one
+# plants a link, the other refuses the prepare that would clear it. Rebuild it
+# so what follows is testing what it says it is.
+prepare_sym >/dev/null 2>&1
+check "the worktree is healthy again before the timeout cases" \
+  "$([[ -e "$SYMWT/escape.txt" && ! -L "$SYMWT/escape.txt" ]] && echo ready || echo not-ready)" "ready"
 
 note "a timeout is a failed review, not an empty one"
 # Regression: the timeout note was appended to codex's own output, so a run that

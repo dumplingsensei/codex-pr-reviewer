@@ -83,6 +83,15 @@ worse *is* in scope.
   has no way to publish it: nothing leaves the machine unless you send it. Read
   a review before you paste it. Confining reads properly needs Codex's
   permission profiles, which are in beta as of Codex 0.138.
+- **Prepared state is keyed by `owner/repo`, not by host.** The manifest key,
+  the worktree path, both branch names and the cached clone all derive from the
+  slug, so the same `owner/repo#N` on two different GitHub hosts shares one
+  entry and one worktree, and preparing the second replaces the first. The
+  identity checks make sure the *code* matches the metadata — the remote must be
+  on the host the API answered on, and the head and base must be the commits it
+  named — so a review is never run against the wrong repository's code. What is
+  not separated is the local bookkeeping. Fixing that means the host in every
+  identity plus a migration for entries written without it.
 - **The in-flight cleanup race.** A `clean` that took its snapshot before a
   review recorded itself cannot hold back a marker that does not exist yet. The
   guard is not a lock, and a lock that outlives a crashed run is a worse failure.
