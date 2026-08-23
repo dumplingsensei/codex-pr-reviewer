@@ -196,8 +196,17 @@ function parseArgs(argv, config = {}) {
       continue;
     }
 
-    // Unknown flags become positionals so PR refs like `#42` still survive.
-    positionals.push(token);
+    // An unrecognized flag used to fall through to a positional, on the stated
+    // grounds that a reference like `#42` had to survive. It never needed to:
+    // `#42` does not begin with `-` and is taken by the branch at the top of
+    // this loop. What actually arrived here were typos, and they were read as
+    // the pull request to review — `--modle gpt-5.6` ran the whole review at
+    // the default model and said nothing. A flag this script does not know is a
+    // mistake, and it is cheaper to say so than to guess.
+    throw new UserError(
+      `Unknown option \`${token}\`.`,
+      "Run `pr-workspace.mjs help` to see what each command accepts."
+    );
   }
 
   return { options, positionals };
@@ -604,7 +613,14 @@ function beginRun(entry, reviewPath) {
     fs.writeFileSync(temporary, `${JSON.stringify(marker, null, 2)}\n`, { mode: 0o600 });
     fs.renameSync(temporary, file);
     return file;
-  } catch {
+  } catch (error) {
+    // Best effort, but never silent. Without a marker a concurrent `clean`
+    // cannot see this run, and the guard that keeps a paid review's worktree
+    // from being deleted underneath it is simply not there for this run.
+    log(
+      `Warning: could not record a run marker for ${entry.key} (${error.message}). ` +
+        "A `clean` running now will not know this review is in flight and may remove the worktree it is reading."
+    );
     return null;
   }
 }
@@ -690,27 +706,77 @@ export function parsePrRef(raw) {
 
 const stripGitSuffix = (value) => value.replace(/\.git$/i, "");
 
-/** Normalizes any GitHub remote URL form to `owner/repo`. */
-export function remoteUrlToSlug(url) {
+/**
+ * Strips userinfo and port from a URL authority, leaving the bare hostname.
+ * `git@github.com:22` and `github.com` are the same host and have to compare
+ * equal, or the identity check below rejects perfectly ordinary remotes.
+ */
+const authorityToHost = (authority) =>
+  String(authority).replace(/^.*@/, "").replace(/:\d+$/, "").toLowerCase();
+
+/**
+ * Splits any git remote URL into the host serving it and the `owner/repo` it
+ * names.
+ *
+ * The host is the half that used to be discarded. Every URL form here
+ * normalizes to the same slug whatever host it points at, so a remote for
+ * `owner/repo` on a mirror — or on an attacker's box — matched a pull request
+ * whose metadata came from GitHub, and the review then read one repository's
+ * code while reporting the other's title, author, and diffstat.
+ */
+export function remoteUrlParts(url) {
   const text = String(url ?? "").trim();
   if (!text) return null;
   const match =
-    text.match(/^git@[^:]+:([^/]+)\/(.+?)(?:\.git)?$/) ||
-    text.match(/^ssh:\/\/[^/]+\/([^/]+)\/(.+?)(?:\.git)?$/) ||
-    text.match(/^https?:\/\/[^/]+\/([^/]+)\/(.+?)(?:\.git)?$/);
-  return match ? `${match[1]}/${stripGitSuffix(match[2])}` : null;
+    text.match(/^git@([^:]+):([^/]+)\/(.+?)(?:\.git)?$/) ||
+    text.match(/^ssh:\/\/([^/]+)\/([^/]+)\/(.+?)(?:\.git)?$/) ||
+    text.match(/^https?:\/\/([^/]+)\/([^/]+)\/(.+?)(?:\.git)?$/);
+  if (!match) return null;
+  return {
+    host: authorityToHost(match[1]),
+    slug: `${match[2]}/${stripGitSuffix(match[3])}`
+  };
 }
 
-function findRemoteForSlug(repoDir, slug) {
+/** Normalizes any GitHub remote URL form to `owner/repo`. */
+export const remoteUrlToSlug = (url) => remoteUrlParts(url)?.slug ?? null;
+
+/**
+ * The host that actually served this pull request's metadata, read off the URL
+ * the API returned rather than guessed from the environment. `GH_HOST` is only
+ * the fallback: it describes `gh`'s default, which is not necessarily where
+ * this particular PR came from.
+ */
+export function apiHostOf(pr) {
+  const fromUrl = String(pr?.url ?? "").match(/^https?:\/\/([^/]+)\//);
+  if (fromUrl) return authorityToHost(fromUrl[1]);
+  return authorityToHost(process.env.GH_HOST || "github.com");
+}
+
+/**
+ * The remote in `repoDir` that serves `slug` **from `host`**, plus the host of
+ * any remote that named the right repository somewhere else — so the caller can
+ * say why it is cloning instead of silently doing it.
+ */
+function findRemoteForSlug(repoDir, slug, host) {
+  // Without a host every remote compares unequal and each prepare goes quietly
+  // down the clone path — the safe direction, but for a reason nobody could
+  // find. The one caller always passes one; this is so a later one that forgets
+  // fails where the mistake is.
+  if (!host) throw new Error("findRemoteForSlug needs the host that served the PR metadata");
   const result = git(repoDir, ["remote", "-v"]);
-  if (result.status !== 0) return null;
+  if (result.status !== 0) return { remote: null, otherHost: null };
   const wanted = slug.toLowerCase();
+  let otherHost = null;
   for (const line of result.stdout.split("\n")) {
     const [name, url] = line.trim().split(/\s+/);
     if (!name || !url) continue;
-    if (remoteUrlToSlug(url)?.toLowerCase() === wanted) return name;
+    const parts = remoteUrlParts(url);
+    if (!parts || parts.slug.toLowerCase() !== wanted) continue;
+    if (parts.host === host) return { remote: name, otherHost: null };
+    otherHost ??= parts.host;
   }
-  return null;
+  return { remote: null, otherHost };
 }
 
 function repoRootOf(dir) {
@@ -767,9 +833,18 @@ function resolveHostRepo(slug, cwd, options = {}) {
   if (!options.forceClone) {
     const root = repoRootOf(cwd);
     if (root) {
-      const remote = findRemoteForSlug(root, slug);
+      const { remote, otherHost } = findRemoteForSlug(root, slug, options.host);
       if (remote) {
         return { repoDir: root, remote, mode: "worktree" };
+      }
+      // A remote naming this repository on a different host is not this
+      // repository. Cloning from the host the API answered on is the whole
+      // point; saying so keeps a surprising clone from looking like a bug.
+      if (otherHost) {
+        log(
+          `\`${root}\` has a remote for ${slug} on ${otherHost}, but ${options.host} served this pull request. ` +
+            "Fetching from a cache clone of the host the metadata came from."
+        );
       }
     }
   }
@@ -1201,10 +1276,13 @@ function prepare(options, positionals, cwd) {
   log(`Resolving ${slug}#${number}…`);
   const pr = ghJson(["pr", "view", String(number), "--repo", slug, "--json", PR_FIELDS]);
 
-  const { repoDir, remote, mode } = resolveHostRepo(slug, cwd, { forceClone: options.clone });
+  const { repoDir, remote, mode } = resolveHostRepo(slug, cwd, {
+    forceClone: options.clone,
+    host: apiHostOf(pr)
+  });
 
   log(`Fetching pull ref and base branch (${pr.baseRefName})…`);
-  const { headRef, baseRef } = fetchPullRefs(
+  const { headRef, baseRef, baseSource } = fetchPullRefs(
     repoDir,
     remote,
     number,
@@ -1223,6 +1301,29 @@ function prepare(options, positionals, cwd) {
       `The fetched head of ${slug}#${number} is not the one GitHub advertises.`,
       `Fetched ${headSha.slice(0, 12)} from \`${remote}\`, expected ${String(pr.headRefOid).slice(0, 12)}. Pass --clone to fetch from the repository the API is describing.`
     );
+  }
+
+  // The same question on the base side, asked the way the base can honestly
+  // answer it. The head is a fixed commit, so it compares by equality; a base
+  // branch is a moving target that legitimately advances between `gh pr view`
+  // and this fetch, and demanding equality would abort on ordinary traffic in
+  // the repository. What must hold is that the base GitHub recorded is *in* the
+  // history that was fetched — anything else means the two are unrelated lines
+  // of development, which is the case this exists to catch.
+  //
+  // Only on the by-name path: the fallback fetches `baseRefOid` itself, so
+  // there the check compares that commit with itself.
+  if (pr.baseRefOid && baseSource === pr.baseRefName) {
+    const baseSha = gitOut(repoDir, ["rev-parse", baseRef]);
+    const contains =
+      baseSha === pr.baseRefOid ||
+      git(repoDir, ["merge-base", "--is-ancestor", pr.baseRefOid, baseRef]).status === 0;
+    if (!contains) {
+      throw new UserError(
+        `The fetched base of ${slug}#${number} does not contain the base commit GitHub advertises.`,
+        `\`${pr.baseRefName}\` fetched from \`${remote}\` is at ${baseSha.slice(0, 12)}, which does not descend from ${String(pr.baseRefOid).slice(0, 12)}. Pass --clone to fetch from the repository the API is describing.`
+      );
+    }
   }
 
   const mergeBase = gitOut(repoDir, ["merge-base", baseRef, headRef]);
@@ -1394,8 +1495,17 @@ function savedReviewsFor(entries) {
   return selectReviewFiles(fs.readdirSync(dir), entries).map((name) => path.join(dir, name));
 }
 
-/** How many saved reviews are on disk. */
-const savedReviewCount = () => (fs.existsSync(reviewsDir()) ? fs.readdirSync(reviewsDir()).length : 0);
+/**
+ * How many saved reviews are on disk.
+ *
+ * Counts documents this plugin wrote, not directory entries: the number is
+ * reported to the user as reviews that were kept, and a `.DS_Store` or an
+ * editor swapfile sitting alongside them was being counted as one.
+ */
+const savedReviewCount = () =>
+  fs.existsSync(reviewsDir())
+    ? fs.readdirSync(reviewsDir()).filter((name) => name.endsWith(".md")).length
+    : 0;
 
 /**
  * Identifies a set of reviews as one list, so an approval to delete them can be
@@ -1466,6 +1576,19 @@ function verifyPreparedWorktree(entry) {
     throw new UserError(message, remedy ?? "Re-run without --no-prepare to rebuild it.");
   };
 
+  // The saved document quotes both of these with `.slice()`, unconditionally,
+  // after codex has run. Checking them only where they happened to be present
+  // meant a manifest missing one bought the whole paid review and then threw
+  // while writing the file it had just earned. The manifest is a JSON file
+  // people edit; failing here costs nothing.
+  for (const field of ["headSha", "mergeBase"]) {
+    if (!/^[0-9a-f]{7,64}$/.test(String(entry[field] ?? ""))) {
+      stop(
+        `The manifest entry for ${entry.key} has no usable \`${field}\` (${JSON.stringify(entry[field])}).`
+      );
+    }
+  }
+
   if (!fs.existsSync(entry.worktree)) {
     stop(`The worktree for ${entry.key} is gone (${entry.worktree}).`);
   }
@@ -1521,6 +1644,18 @@ async function commandReview(argv, cwd) {
   const { options, positionals } = parseArgs(argv, REVIEW_SCHEMA);
   const dryRun = Boolean(options["dry-run"]);
   let entry;
+
+  // The one option whose value reaches codex inside a quoted string rather than
+  // as its own argv entry — `-c model_reasoning_effort="…"` — so it is the one
+  // that has to be a value and not a fragment. A bare word cannot end the quote
+  // it sits in; anything else is a typo that would otherwise be discovered
+  // minutes later, as a codex configuration error, having already been paid for.
+  if (options.effort !== undefined && !/^[a-z][a-z0-9_-]*$/.test(options.effort)) {
+    throw new UserError(
+      `\`--effort ${options.effort}\` is not a reasoning effort.`,
+      "Codex accepts low, medium, high, and xhigh."
+    );
+  }
 
   // --dry-run must not fetch, branch, or write a worktree: it exists to answer
   // "what would this run?", so it resolves the target and stops there.
@@ -1654,23 +1789,71 @@ async function commandReview(argv, cwd) {
   }
 }
 
-function streamCodex(args, { echo = process.stdout } = {}) {
+/**
+ * How long a review may run before it is stopped.
+ *
+ * Not a latency budget — a real review takes minutes and is allowed to. This is
+ * the ceiling that stops a wedged codex holding a worktree, a run marker and
+ * the terminal indefinitely. Comfortably past the slowest genuine review at
+ * xhigh effort, and comfortably inside the six-hour marker TTL, so a run cannot
+ * outlive the marker that protects its own worktree.
+ */
+const CODEX_TIMEOUT_MS = Number(process.env.CPR_CODEX_TIMEOUT_MS) || 45 * 60 * 1000;
+
+// The child's stdout was accumulated into one string with no ceiling, so a
+// codex that streamed without stopping grew the heap until Node died — losing
+// the review along with it. Everything still reaches the terminal as it
+// arrives; only what is retained for the saved document is capped.
+const CODEX_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+
+function streamCodex(args, { echo = process.stdout, timeoutMs = CODEX_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn("codex", args, { stdio: ["ignore", "pipe", "inherit"] });
     let stdout = "";
+    let truncated = false;
+    let timedOut = false;
+
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      // A codex ignoring SIGTERM still has to let go of the worktree, so the
+      // second signal is not optional. Unreferenced: if the child exits on the
+      // first one, this timer must not keep the process alive waiting to fire.
+      setTimeout(() => child.kill("SIGKILL"), 10_000).unref();
+    }, timeoutMs);
+
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
-      stdout += chunk;
       echo.write(chunk);
+      if (stdout.length >= CODEX_MAX_OUTPUT_BYTES) {
+        truncated = true;
+        return;
+      }
+      stdout += chunk;
     });
     child.on("error", (error) => {
+      clearTimeout(deadline);
       reject(
         error.code === "ENOENT"
           ? new UserError("`codex` is not installed or not on PATH.", "Run `/codex-pr-reviewer:review` after installing the Codex CLI.")
           : error
       );
     });
-    child.on("close", (status) => resolve({ status, stdout }));
+    child.on("close", (status) => {
+      clearTimeout(deadline);
+      // Both notes go into the body rather than only to the log: the saved
+      // document is what gets read later, and a review that was cut off must
+      // not read as one that simply had little to say.
+      if (truncated) {
+        stdout += `\n\n_Output stopped being recorded after ${CODEX_MAX_OUTPUT_BYTES} bytes._\n`;
+      }
+      if (timedOut) {
+        stdout += `\n\n_Codex was stopped after ${Math.round(timeoutMs / 60_000)} minutes and did not finish._\n`;
+      }
+      // 124 is the convention `run()` already uses for a timeout, so callers
+      // reading a status do not need a second rule for this one.
+      resolve({ status: timedOut ? 124 : status, stdout });
+    });
   });
 }
 
@@ -1879,6 +2062,47 @@ function removeEntry(entry) {
   }
 
   return { removed, failed };
+}
+
+/**
+ * What is still there after an entry was removed, read back from the repository
+ * rather than inferred from the removal's own return value.
+ *
+ * The two are not the same claim. `removeEntry` reports what each git command
+ * said as it ran; this asks the repository afterwards, which is the question
+ * someone actually wants answered — and it is the question the `clean` prompt
+ * used to answer by running `git -C` itself. Doing it here means the command
+ * needs no git of its own: a grant beginning `git -C` is a prefix, not a
+ * promise, and it carried `reset`, `branch -D` and `config` into a command
+ * whose only use for it was to look.
+ */
+function remainingAfterRemoval(entry) {
+  const left = [];
+  if (fs.existsSync(entry.worktree)) left.push(`worktree ${entry.worktree}`);
+  if (!repoRootOf(entry.repoDir)) return left;
+
+  const registered = git(entry.repoDir, ["worktree", "list", "--porcelain"])
+    .stdout.split("\n")
+    .some(
+      (line) =>
+        line.startsWith("worktree ") &&
+        path.resolve(line.slice(9)) === path.resolve(entry.worktree)
+    );
+  if (registered) left.push(`worktree registration for ${entry.worktree}`);
+
+  for (const branch of [entry.headBranch, entry.baseBranch]) {
+    if (typeof branch !== "string") continue;
+    if (git(entry.repoDir, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]).status === 0) {
+      left.push(`branch ${branch}`);
+    }
+  }
+  for (const ref of entry.refs ?? []) {
+    if (typeof ref !== "string") continue;
+    if (git(entry.repoDir, ["show-ref", "--verify", "--quiet", ref]).status === 0) {
+      left.push(`ref ${ref}`);
+    }
+  }
+  return left;
 }
 
 /**
@@ -2151,7 +2375,15 @@ function commandClean(argv) {
         outcome.failed.push(`review ${file}: ${error.message}`);
       }
     }
-    return { key: entry.key, generation: entry.generation, ...outcome };
+    // Verified against the repository, not against what the removal reported:
+    // this is the postcondition the command used to check with a `git -C` of
+    // its own, and it belongs where the removal happened.
+    return {
+      key: entry.key,
+      generation: entry.generation,
+      ...outcome,
+      remaining: remainingAfterRemoval(entry)
+    };
   });
 
   // Then, once nothing else needs them, the shared clones.
@@ -2171,7 +2403,7 @@ function commandClean(argv) {
   // running has the same key and a different worktree, and dropping it leaves
   // that worktree and its branches recorded nowhere.
   const cleared = new Set(
-    results.filter((r) => r.failed.length === 0).map((r) => `${r.key}\u0000${r.generation ?? ""}`)
+    results.filter((r) => r.failed.length === 0 && r.remaining.length === 0).map((r) => `${r.key}\u0000${r.generation ?? ""}`)
   );
   mutateManifest((latest) => ({
     ...latest,
@@ -2180,7 +2412,12 @@ function commandClean(argv) {
     )
   }));
 
-  const failures = results.filter((result) => result.failed.length > 0);
+  // An entry whose state is still in the repository is an incomplete removal
+  // however quietly its git commands exited, so it counts here and keeps its
+  // manifest record for a retry.
+  const failures = results.filter(
+    (result) => result.failed.length > 0 || result.remaining.length > 0
+  );
   const kept = savedReviewCount();
 
   if (options.json) {
@@ -2209,6 +2446,14 @@ function commandClean(argv) {
     process.stdout.write(`${result.key}\n${result.removed.map((item) => `  - ${item}`).join("\n")}\n`);
     for (const failure of result.failed) {
       process.stdout.write(`  ! could not remove ${failure}\n`);
+    }
+    // Read back from the repository after the fact, which is what the prompt
+    // used to check by running `git -C` itself.
+    for (const item of result.remaining) {
+      process.stdout.write(`  ! still present after removal: ${item}\n`);
+    }
+    if (result.failed.length === 0 && result.remaining.length === 0) {
+      process.stdout.write("  verified gone from the repository\n");
     }
   }
   if (clonesRemoved.length > 0) {
@@ -2261,6 +2506,16 @@ const USAGE = `pr-workspace.mjs — review GitHub PRs with Codex
  *     have to define, so long as the user has one configured. Reviews read
  *     pointer files instead of fetched objects, which is the right trade when
  *     the alternative is running a filter on a stranger's say-so.
+ *   - `core.symlinks=false` is what keeps a pull request from pointing the
+ *     reviewer outside its own worktree. Codex runs `-s read-only`, and that
+ *     sandbox forbids writes rather than confining reads — on every platform it
+ *     grants the whole filesystem. So a PR containing `notes -> ~/.ssh` is a
+ *     link the reviewer may follow and quote back into its output. With this
+ *     set, git materialises every symlink as a small regular file holding the
+ *     link text, so there is nothing to follow: the target becomes a string to
+ *     review rather than a path to read. The index still records mode 120000,
+ *     so the diff is unchanged and `status` stays clean — which matters,
+ *     because `verifyPreparedWorktree` refuses a dirty worktree.
  *
  * Set through GIT_CONFIG_* rather than `-c` because it has to reach the git
  * that `gh repo clone` runs, where there is no command line to add flags to.
@@ -2278,6 +2533,7 @@ function hardenGitEnvironment() {
   const hooks = path.join(cacheRoot(), "empty-hooks");
   const forced = [
     ["core.hooksPath", hooks],
+    ["core.symlinks", "false"],
     ["filter.lfs.smudge", "cat"],
     ["filter.lfs.clean", "cat"],
     ["filter.lfs.process", ""],

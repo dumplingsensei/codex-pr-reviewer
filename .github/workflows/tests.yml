@@ -68,8 +68,43 @@ jobs:
       # package install.
       - name: Plugin manifests validate
         if: matrix.os == 'ubuntu-latest' && matrix.node == '22'
+        # Pinned, for the same reason the actions above are. `latest` published
+        # twelve times in the ten days before this pin went in, so an unpinned
+        # install meant every run validated against a different tool — and
+        # `--strict` fails on "unrecognized fields, missing metadata, and other
+        # issues that the runtime tolerates", which is exactly the kind of rule
+        # that moves between releases. A gate that can turn red for reasons
+        # absent from the diff is the failure this repository already refuses
+        # everywhere else: it reads as the pull request's fault rather than the
+        # toolchain's. The scheduled job below is what watches `latest`.
+        env:
+          CLAUDE_CODE_VERSION: 2.1.241
+        run: |
+          npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" >/dev/null
+          claude plugin validate --strict .
+          claude plugin validate --strict plugins/codex-pr-reviewer
+
+  packaging-drift:
+    # The other half of pinning the validator: something still has to notice
+    # when a newer Claude Code stops accepting these manifests. Pinning alone
+    # would mean validating for ever against rules the ecosystem has moved on
+    # from — which fails in the direction that reaches users, rather than CI.
+    #
+    # Dependabot cannot carry this one: it is configured for github-actions
+    # only, and a version inside a `run:` block is not a dependency it tracks.
+    # So this job is the mechanism that says the pin has gone stale.
+    name: packaging · latest claude code
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - name: Validate against the current release
         run: |
           npm install -g @anthropic-ai/claude-code >/dev/null
+          echo "validating with $(claude --version)"
           claude plugin validate --strict .
           claude plugin validate --strict plugins/codex-pr-reviewer
 

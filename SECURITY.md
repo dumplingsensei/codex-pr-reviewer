@@ -72,6 +72,17 @@ worse *is* in scope.
   neutralised for every git this plugin runs. A driver you have configured under
   some other name that a pull request can guess is not covered; closing that
   completely needs a plugin-owned clone with its own configuration.
+- **`-s read-only` bounds writes, not reads.** Codex's read-only sandbox forbids
+  writing anywhere; it does not confine reading to the worktree, and on every
+  platform it can read any file your account can. The plugin closes the route a
+  pull request controls — `core.symlinks=false` means a link committed in the
+  diff is checked out as text naming its target rather than as a path anything
+  can follow — but a reviewer that has been argued into looking somewhere else
+  can still read your files and quote them into its output. What limits the
+  damage is that the review goes to a `0600` file in your cache and the plugin
+  has no way to publish it: nothing leaves the machine unless you send it. Read
+  a review before you paste it. Confining reads properly needs Codex's
+  permission profiles, which are in beta as of Codex 0.138.
 - **The in-flight cleanup race.** A `clean` that took its snapshot before a
   review recorded itself cannot hold back a marker that does not exist yet. The
   guard is not a lock, and a lock that outlives a crashed run is a worse failure.

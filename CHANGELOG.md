@@ -5,6 +5,67 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.8
+
+Findings from an external review of 0.9.7, plus one defect found while checking
+its claims.
+
+- **Command grants were never being applied.** Every command pre-approved
+  `pr-workspace.mjs` with an unquoted rule, while the prompts invoke the script
+  quoted — and Bash rules match the command text, quotes included. The rule
+  therefore matched nothing the prompts ever wrote, so every helper call fell
+  through to a permission prompt and the narrowing the README described was not
+  in effect. The rules now carry the quotes the prompts use, verified against
+  the real matcher rather than assumed.
+- **Grants are scoped by subcommand.** `review` and `sweep` may run `doctor`,
+  `prepare`, and `review`; `list` may run `list`; `clean` may run `clean`. The
+  wildcard they replaced pre-approved every subcommand from every command, so a
+  review session could run `clean` — worktrees, branches, and refs — without
+  crossing a permission boundary. `tests/unit.mjs` now pins the whole matrix,
+  including that each prompt only invokes what it grants.
+- **`clean` no longer takes a `git` grant.** It verifies its own removals and
+  reports what is still in the repository afterwards, so the `git -C` rule that
+  existed for two read-only checks — and that also matched `reset`, `branch -D`,
+  and `config` — is gone. An entry with anything remaining is an incomplete
+  removal: non-zero exit, record kept, retryable.
+- **A pull request cannot point the reviewer out of its worktree.** Every git
+  this plugin runs sets `core.symlinks=false`, so a symlink in the diff is
+  checked out as a small regular file holding the link text. `-s read-only`
+  bounds writes, not reads, on every platform, so a link was a path into
+  anything the account could read. The index still records mode 120000, so the
+  diff and `status` are unchanged.
+- **Host and base identity are checked with the head.** The remote must be on
+  the host that served the PR's metadata, read off the API's own URL rather than
+  guessed; and the fetched base must contain GitHub's `baseRefOid`. Ancestry,
+  not equality — a base branch legitimately advances between the API call and
+  the fetch, and demanding equality would abort on ordinary traffic.
+- **Codex runs are bounded.** A 45-minute timeout with SIGTERM then SIGKILL
+  (`CPR_CODEX_TIMEOUT_MS`), and a cap on the output retained for the saved
+  document, which was an unbounded string. Both say so in the review rather than
+  leaving a truncated run looking like a short one.
+- **An unknown flag is an error.** It used to become a positional, on the
+  grounds that `#42` had to survive — which it does anyway, having no leading
+  dash. What actually arrived there were typos: `--modle gpt-5.6` was read as
+  the pull request and the review ran at the default model. `--effort` is
+  validated too, being the one value interpolated into a quoted `-c` string.
+- **A degraded manifest entry fails before the paid run, not after.**
+  `--no-prepare` checked `headSha` and `mergeBase` only where they were present,
+  while the saved document quotes both unconditionally — so an entry missing one
+  bought a full review and then threw while writing it.
+- A marker that cannot be written now says so: the review proceeds, but
+  unprotected from a concurrent `clean`, and that is worth a line.
+- `keptReviews` counts review documents rather than directory entries, so a
+  `.DS_Store` is no longer reported as a saved review.
+- CI pins `@anthropic-ai/claude-code` for the pull request gate — it published
+  twelve times in ten days, and `--strict` fails on rules that move between
+  releases — with a scheduled job validating against `latest`, since Dependabot
+  cannot carry a version inside a `run:` block.
+- README: the safety section claimed a command could reach posting, which none
+  has since 0.9.0, and described `clean`'s grant as two read-only `git` rules
+  when it was one that could mutate. The `clean` usage omitted the required
+  `--confirm-plan`. `list` gained the untrusted-input rules the other commands
+  carry — it renders pull request titles from a GitHub-wide search.
+
 ## 0.9.7
 
 - The marketplace is named `dumplingsensei-plugins`, and the copyright holder in

@@ -1,7 +1,7 @@
 ---
 description: Remove PR worktrees, branches, and cached clones this plugin created
 argument-hint: '[--pr N] [--repo owner/repo] [--all] [--older-than DAYS] [--purge-clones] [--purge-reviews] [--include-running]'
-allowed-tools: Read, Grep, Glob, AskUserQuestion, Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs *), Bash(git -C:*)
+allowed-tools: Read, Grep, Glob, AskUserQuestion, Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" clean *)
 ---
 
 Remove the review scratch state this plugin created: worktrees, `codex-pr/*` branches, plugin-owned refs, and optionally cached clones.
@@ -43,17 +43,16 @@ Raw slash-command arguments:
 
    Every result carries `keptReviews` — the reviews still on disk afterwards, and where they are. Pass that count on. It is not a leftover statistic: reviews of a PR that is no longer in the manifest cannot be selected by any later `--purge-reviews`, so this is the user's one notice that removing them is now a manual job.
 
-5. **Verify** in one of the affected repositories, if it still exists — under `--all` a cached clone is deleted outright, in which case there is nothing left to inspect:
-   ```bash
-   git -C <repoDir> worktree list
-   git -C <repoDir> branch --list 'codex-pr/*'
-   ```
-   Expect the entries this run removed to be gone — not all of them. A selective clean leaves every other prepared PR exactly where it was, and branches are named `codex-pr/<owner>__<repo>/<number>`, so read the listing against the plan from step 2 rather than expecting it to be empty.
+5. **Read the verification the run already did.** Every entry in the result carries `remaining` — what was still in the repository when the removal was re-checked afterwards, rather than what the git commands claimed as they ran. In prose the same thing appears as `verified gone from the repository`, or as `! still present after removal: …` per item.
+
+   An entry with a non-empty `remaining` is an **incomplete removal**: it exits non-zero, keeps its manifest record, and can be retried. Report those items; never describe such a run as clean.
+
+   This is why the command has no `git` grant of its own. The check used to be two `git -C` commands run here, and `git -C` is a prefix rather than a promise — it carried `reset`, `branch -D`, and `config` into a command whose only use for it was to look. The script now answers the question where the removal happened, which is also the only place that can answer it without a gap in between.
 
 ## Notes
 
 - The script only removes what it recorded in its own manifest, so it will not touch unrelated worktrees or branches.
-- Step 5's two commands both begin `git -C`, which is what the pre-approved rule matches. The narrower `git worktree list` and `git branch --list` prefixes it replaced never matched a command that names a directory, so verification prompted every time. Only read-only inspection belongs here: removal is the script's job, and `git -C` is a prefix, not a promise.
+- The only Bash rule pre-approved here is this script's `clean` subcommand. Verification is part of what that run reports (step 5), so no separate `git` grant is needed — and none is given, because the one that used to be here could mutate the repositories it was meant only to inspect.
 - `--pr` takes `42`, `owner/repo#42`, or a PR URL — but a **bare number is not scoped to the current repository** the way `/codex-pr-reviewer:review 42` is. It selects PR #42 in *every* repository the manifest knows about, which is usually what you want when clearing up and occasionally not. This is why step 2 names the repository each entry lives in: read those back before confirming, and say `owner/repo#42` or add `--repo` when only one is meant.
 - `--all` implies `--purge-clones`, which also deletes cached clones under the cache directory. Point this out before confirming, since re-cloning a large repo is slow.
 - Cached clones are shared between PRs of the same repository. They are purged only after every selected entry has been processed, and only when no remaining entry still needs them.
