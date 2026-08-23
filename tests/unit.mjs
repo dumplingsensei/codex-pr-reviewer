@@ -139,7 +139,16 @@ eq(
   apiHostOf({ url: "https://ghe.corp.example/team/proj/pull/9" }),
   "ghe.corp.example"
 );
-eq("falls back when there is no url", apiHostOf({}), "github.com");
+// GH_HOST is the fallback this reads, so the suite has to say which value it is
+// asserting about. Left to the ambient environment, an Enterprise user running
+// the tests got a failure from a code path behaving exactly as intended.
+const savedGhHost = process.env.GH_HOST;
+delete process.env.GH_HOST;
+eq("falls back to github.com when there is no url", apiHostOf({}), "github.com");
+process.env.GH_HOST = "ghe.corp.example";
+eq("and to GH_HOST where one is configured", apiHostOf({}), "ghe.corp.example");
+if (savedGhHost === undefined) delete process.env.GH_HOST;
+else process.env.GH_HOST = savedGhHost;
 
 describe("stripWorktreePaths");
 eq(

@@ -1195,42 +1195,8 @@ git -C "$CLONE_DIR" remote set-url origin "$SYMUP"
 # plants a link, the other refuses the prepare that would clear it. Rebuild it
 # so what follows is testing what it says it is.
 prepare_sym >/dev/null 2>&1
-check "the worktree is healthy again before the timeout cases" \
+check "the worktree is healthy again" \
   "$([[ -e "$SYMWT/escape.txt" && ! -L "$SYMWT/escape.txt" ]] && echo ready || echo not-ready)" "ready"
-
-note "a timeout is a failed review, not an empty one"
-# Regression: the timeout note was appended to codex's own output, so a run that
-# reached the deadline having produced nothing came back with that note as its
-# whole body. The wrapper's `body ? 0 : …` saw something non-empty and reported
-# success for a review that does not exist.
-cat >"$SANDBOX/hang.sh" <<HOOK
-#!/bin/sh
-sleep 30 &
-echo \$! >"$SANDBOX/grandchild.pid"
-sleep 25
-HOOK
-chmod +x "$SANDBOX/hang.sh"
-
-rm -f "$SANDBOX/grandchild.pid"
-out="$(env PATH="$STUBS:$PATH" CPR_CODEX_TIMEOUT_MS=1500 \
-  CPR_STUB_RUN_HOOK="$SANDBOX/hang.sh" CPR_STUB_RUN_BODY= \
-  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
-timeout_status=$?
-check "an output-less timeout does not report success" "$timeout_status" "124"
-saved="$(ls -t "$CACHE/reviews"/o__r-pr7-*.md 2>/dev/null | head -1)"
-contains "the document says there was no review" "$(cat "$saved")" "_Codex produced no review output._"
-contains "and says why" "$(cat "$saved")" "did not finish"
-contains "codex's own status is recorded" "$(head -1 "$saved")" "exit=124"
-
-# Regression: the deadline signalled only the direct codex pid, so a hung
-# grandchild outlived both signals and went on reading the worktree after the
-# marker protecting it was gone. Codex is spawned as its own process group
-# leader now, and the signals address the group.
-sleep 1
-gpid="$(cat "$SANDBOX/grandchild.pid" 2>/dev/null || echo 0)"
-check "the fixture recorded a grandchild" "$([[ "$gpid" -gt 0 ]] && echo yes || echo no)" "yes"
-check "the whole process tree was ended" \
-  "$(kill -0 "$gpid" 2>/dev/null && echo alive || echo gone)" "gone"
 
 note "a degraded manifest entry fails before the paid run"
 # Regression: --no-prepare checked headSha and mergeBase only where they were

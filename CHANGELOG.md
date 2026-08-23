@@ -39,16 +39,25 @@ its claims.
   guessed; and the fetched base must contain GitHub's `baseRefOid`. Ancestry,
   not equality — a base branch legitimately advances between the API call and
   the fetch, and demanding equality would abort on ordinary traffic.
-- **Codex runs are bounded.** A 45-minute timeout signalling the whole process
-  group with SIGTERM then SIGKILL (`CPR_CODEX_TIMEOUT_MS`), and a cap on the
-  output retained for the saved document, which was an unbounded string. Both
-  say so in the review rather than leaving a cut-off run looking like a short
-  one. Signalling only the direct pid was not a bound: a hung grandchild
-  outlived both signals and went on reading the worktree after the marker
-  protecting it was gone, or held the inherited pipe open so the run never ended.
-  The diagnostic notes stay out of the value that decides whether a review
-  happened — folded in, they made an output-less timeout look like a review with
-  content and exit 0.
+- **Bounding a Codex run is deferred.** There is still no timeout and no cap on
+  retained output. That work was written here and taken out again: three rounds
+  of Codex review found six defects in it, the last of them caused by the fix
+  before — spawning Codex in its own process group let the timeout reach its
+  descendants, and stopped Ctrl-C reaching them, so an interrupted review left
+  Codex running behind a marker naming a dead pid that `clean` would read as
+  finished. It is a reliability improvement sitting in a release of security
+  fixes, and it was the only part still generating findings, so it moved to its
+  own branch rather than holding the rest up. Outstanding there: forward
+  termination signals to the group, clamp the configured timeout below the run
+  marker's TTL, count the output cap in bytes and enforce it on the chunk that
+  crosses it, and either support Windows process trees or keep the platform
+  unsupported.
+- **`doctor`'s host fallback is asserted against a stated `GH_HOST`.** The test
+  read whatever the environment had, so running the suite in an Enterprise
+  shell failed on a code path behaving exactly as designed.
+- **macOS and Linux are the supported platforms**, stated in the README rather
+  than implied by the CI matrix. Windows is untested: the read-only sandbox
+  reads the whole filesystem there, and the process handling assumes POSIX.
 
 Found by a Codex review of this branch, which is the workflow this plugin
 exists for:

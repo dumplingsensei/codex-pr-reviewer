@@ -26,6 +26,8 @@ Choose **user** scope when prompted, not project: the point is to review PRs fro
 
 To install from a local checkout instead, pass the repository root — an absolute path always works, a relative one must start with `./`, and a bare `.` is rejected. Commands are namespaced by the *plugin*, not the marketplace: `/codex-pr-reviewer:review`.
 
+**macOS and Linux.** Those are what CI runs and what this is used on. Windows is not tested and not supported: the read-only sandbox reads the whole filesystem there, and the process handling here assumes POSIX signals.
+
 Requires `codex` (logged in), `gh` (authenticated), `git` ≥ 2.19, and Node ≥ 18. `/codex-pr-reviewer:review` reports anything missing, or ask directly:
 
 ```
@@ -74,7 +76,7 @@ Fork PRs need no extra remotes: GitHub serves `refs/pull/<N>/head` from the base
 - **A review in flight is left alone.** Cleanup holds a running review's PR back — worktree, branches, shared clone — and says which, rather than deleting state out from under a paid run. A guard, not a lock: see [Script reference](#script-reference).
 - **What is fetched is what GitHub says it is.** Metadata and code arrive by different paths, so all three ends are tied together: the remote must be on the same host that served the PR's metadata, the fetched head must equal the API's `headRefOid`, and the fetched base must contain its `baseRefOid`. The base is checked by ancestry rather than equality, because a base branch legitimately moves between the API call and the fetch. Any of the three failing stops the run and points at `--clone`.
 - **A pull request cannot point the reviewer out of its own worktree.** `-s read-only` bounds what Codex may write, not what it may read, so a symlink committed in a diff would be a path into the rest of your filesystem. Every git this plugin runs sets `core.symlinks=false`, which checks such a link out as a small regular file holding the link text — the target becomes a string to review instead of a path to follow. The diff is unaffected: the index still records the entry as a symlink, so the review sees exactly GitHub's diff and the worktree is not dirty. The setting is forced per-process rather than written into anyone's repository, so a plain `git status` you run yourself inside a worktree will report symlink entries as modified; the plugin's own git, which is the one that checks, does not.
-- **A review cannot run forever.** Codex is stopped after 45 minutes (`CPR_CODEX_TIMEOUT_MS` to change it), and the output kept for the saved document is capped, so a wedged or runaway run cannot hold a worktree indefinitely or exhaust memory. Both cases say so in the saved review rather than looking like a short one.
+- **A review is not yet bounded.** There is no timeout on the Codex process and no cap on the output kept for the saved document, so a wedged run holds its worktree until you stop it. That work is on a separate branch — three rounds of review found six defects in it, including one where making the timeout reach Codex's descendants stopped Ctrl-C reaching them — and it is not worth delaying the security fixes here.
 - **A failed run is visible as one.** Codex can exit nonzero and still print a body, and an interrupted run emits `Review was interrupted…`, so "the file exists" was never evidence a review happened. The exit status is written into the saved document's first line as `exit=<n>`.
 - **A stale install says so** — see [Updating](#updating).
 
