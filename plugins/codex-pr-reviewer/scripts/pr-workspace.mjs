@@ -269,6 +269,17 @@ export function slugToDir(repo) {
   return canonicalSlug(repo).replaceAll("/", "__");
 }
 
+/**
+ * A hostname as one path segment. Hostnames are already safe here, but this is
+ * a directory name derived from data the API supplied, so anything outside the
+ * character set — a separator above all — becomes an underscore rather than a
+ * second level of directory.
+ */
+export function hostToDir(host) {
+  const text = String(host ?? "").toLowerCase().replace(/[^a-z0-9._-]/g, "_");
+  return text.replace(/^\.+/, "") || "unknown-host";
+}
+
 export const entryKey = (repo, number) => `${canonicalSlug(repo)}#${number}`;
 
 function emptyManifest() {
@@ -769,8 +780,20 @@ function findRemoteForSlug(repoDir, slug, host) {
   const wanted = slug.toLowerCase();
   let otherHost = null;
   for (const line of result.stdout.split("\n")) {
-    const [name, url] = line.trim().split(/\s+/);
-    if (!name || !url) continue;
+    // `git remote -v` prints two lines per remote, `<name>\t<url> (fetch)` and
+    // the same with `(push)`. Splitting on whitespace and keeping the first two
+    // fields accepted either of them, so a remote that fetches from a mirror and
+    // pushes to GitHub matched on its *push* URL — and then the fetch below went
+    // to the mirror, which is exactly the substitution the host check exists to
+    // stop. Only the fetch URL says where code comes from.
+    //
+    // Parsed rather than split, because a URL may contain spaces: a remote can
+    // be a local path, and the trailing `(fetch)` is what makes the end of the
+    // URL unambiguous.
+    const parsed = /^(\S+)\s+(.*)\s+\((fetch|push)\)$/.exec(line.trim());
+    if (!parsed) continue;
+    const [, name, url, kind] = parsed;
+    if (kind !== "fetch") continue;
     const parts = remoteUrlParts(url);
     if (!parts || parts.slug.toLowerCase() !== wanted) continue;
     if (parts.host === host) return { remote: name, otherHost: null };
@@ -849,10 +872,34 @@ function resolveHostRepo(slug, cwd, options = {}) {
     }
   }
 
-  const repoDir = path.join(clonesDir(), slugToDir(slug));
+  // Namespaced by host, not just by slug. `owner/repo` is only unique within one
+  // GitHub; the same slug on two Enterprise hosts is two different repositories,
+  // and a cache keyed on the slug alone served whichever had been cloned first —
+  // to a run that had just been told, in the line above, that it was fetching
+  // from the host the metadata came from. Even `--clone` could not get past it,
+  // because it selected the same directory.
+  const repoDir = path.join(clonesDir(), hostToDir(options.host), slugToDir(slug));
   if (isRepoRoot(repoDir)) {
-    log(`Refreshing cached clone of ${slug}…`);
-    return { repoDir, remote: "origin", mode: "clone" };
+    // The path encodes what this clone should be; `origin` says what it is. They
+    // part company if someone repoints it, and a clone that is some other
+    // repository must not be refreshed into service as though it were.
+    //
+    // Only a *positive* mismatch disqualifies it. An origin this cannot parse —
+    // a local path, a URL that `insteadOf` has rewritten — is absence of
+    // evidence rather than evidence of the wrong repository, and rejecting on it
+    // would re-clone on every single run for anyone whose git is configured that
+    // way. The path is this plugin's own bookkeeping and stays authoritative.
+    const actual = remoteUrlParts(gitOutOrNull(repoDir, ["remote", "get-url", "origin"]) ?? "");
+    const mismatched =
+      actual && (actual.host !== options.host || actual.slug.toLowerCase() !== slug.toLowerCase());
+    if (!mismatched) {
+      log(`Refreshing cached clone of ${slug}…`);
+      return { repoDir, remote: "origin", mode: "clone" };
+    }
+    log(
+      `The cached clone at ${repoDir} points at ${actual.slug} on ${actual.host}, ` +
+        `not ${slug} on ${options.host}; re-cloning.`
+    );
   }
 
   log(`Cloning ${slug} into the review cache (blobless)…`);
@@ -1241,16 +1288,62 @@ function fetchPullRefs(repoDir, remote, number, baseRefName, baseRefOid) {
   );
 }
 
+/**
+ * True when tracked symlinks are still real links on disk.
+ *
+ * `core.symlinks=false` decides how a link is *written*, so it only takes
+ * effect where something is written. A worktree prepared before this plugin set
+ * it holds genuine symlinks, and refreshing it does not replace them: an entry
+ * whose blob has not changed is not rewritten by `checkout --force`, and git
+ * under this setting reads the existing link as clean, so `clean -fdx` leaves it
+ * too. The upgrade path therefore kept exactly the escape the setting exists to
+ * remove — verified: after a forced checkout the link is still `lrwxr-xr-x` and
+ * still reads its target.
+ *
+ * Asks the index which paths are links before touching the filesystem, so the
+ * common case — no symlinks at all — costs one git command and no walk. A git
+ * that cannot answer returns true: rebuilding is cheap, and being wrong the
+ * other way leaves a live link in front of the reviewer.
+ */
+function worktreeHasLiveSymlinks(worktree) {
+  const listed = git(worktree, ["ls-files", "-s", "-z"]);
+  if (listed.status !== 0) return true;
+
+  for (const record of listed.stdout.split("\0")) {
+    if (!record.startsWith("120000 ")) continue;
+    const at = record.indexOf("\t");
+    if (at === -1) continue;
+    try {
+      if (fs.lstatSync(path.join(worktree, record.slice(at + 1))).isSymbolicLink()) return true;
+    } catch {
+      /* absent is fine — the checkout below writes it as a file */
+    }
+  }
+  return false;
+}
+
 function ensureWorktree(repoDir, worktree, headBranch, headRef) {
+  // `realPath` on both sides, not `path.resolve`: git reports a worktree by its
+  // real path, while this one is built from the cache root as configured. Any
+  // symlink along the way — a symlinked `~/.cache`, or macOS's `/var` — made the
+  // two never compare equal, so a worktree that was registered read as absent
+  // and every refresh became a teardown and a fresh checkout. Idempotent
+  // re-runs are a documented property; that quietly wasn't one.
   const registered = git(repoDir, ["worktree", "list", "--porcelain"])
     .stdout.split("\n")
-    .some((line) => line.startsWith("worktree ") && path.resolve(line.slice(9)) === worktree);
+    .some((line) => line.startsWith("worktree ") && realPath(line.slice(9)) === realPath(worktree));
 
-  if (registered && fs.existsSync(path.join(worktree, ".git"))) {
+  const reusable =
+    registered && fs.existsSync(path.join(worktree, ".git")) && !worktreeHasLiveSymlinks(worktree);
+
+  if (reusable) {
     // Idempotent refresh: `checkout -B` already resets the branch to headRef.
     gitChecked(worktree, ["checkout", "--force", "-B", headBranch, headRef]);
     gitChecked(worktree, ["clean", "-fdx", "--quiet"]);
     return;
+  }
+  if (registered && fs.existsSync(path.join(worktree, ".git"))) {
+    log("This worktree still holds real symlinks from an older checkout; rebuilding it.");
   }
 
   // Stale registration or leftover directory — clear both, then recreate.
@@ -1742,11 +1835,22 @@ async function commandReview(argv, cwd) {
   try {
     log(`Running: codex ${codexArgs.slice(0, 4).join(" ")} … review --base ${entry.baseBranch}`);
     // With --json the review text must not share stdout with the JSON payload.
-    const { status, stdout } = await streamCodex(codexArgs, {
+    const { status, stdout, timedOut, truncated } = await streamCodex(codexArgs, {
       echo: options.json ? process.stderr : process.stdout
     });
 
+    // `body` is codex's output and nothing else, because it is what decides
+    // below whether a review happened at all. The notes go in the document
+    // beside it, where a reader needs them, and never into the thing being
+    // tested for emptiness.
     const body = stripWorktreePaths(stdout, entry.worktree).trim();
+    const notes = [];
+    if (truncated) {
+      notes.push(`_Only the first ${CODEX_MAX_OUTPUT_BYTES} bytes of output were kept; this review is cut short._`);
+    }
+    if (timedOut) {
+      notes.push(`_Codex was stopped after ${Math.round(CODEX_TIMEOUT_MS / 60_000)} minutes and did not finish._`);
+    }
     // `||` not `??`: a failed `codex --version` yields "", which is not nullish.
     const model = options.model || run("codex", ["--version"]).stdout.trim() || "codex";
     const document = [
@@ -1761,6 +1865,7 @@ async function commandReview(argv, cwd) {
       "---",
       "",
       body || NO_REVIEW_BODY,
+      ...(notes.length > 0 ? ["", ...notes] : []),
       "",
       "---",
       "",
@@ -1819,20 +1924,55 @@ const CODEX_TIMEOUT_MS = Number(process.env.CPR_CODEX_TIMEOUT_MS) || 45 * 60 * 1
 // arrives; only what is retained for the saved document is capped.
 const CODEX_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 
+/**
+ * Signals codex and everything it started.
+ *
+ * `child.kill()` reaches the codex process and nothing below it, which is not a
+ * bound: a hung grandchild survives both signals and goes on reading the
+ * worktree after the run marker protecting it is gone — or holds the inherited
+ * stdout pipe open, so `close` never fires and the timeout that was supposed to
+ * end things waits for ever. Spawning codex as its own process group leader
+ * makes the negative pid address the group.
+ *
+ * Windows has no process groups in this sense, and `detached` there means a new
+ * console rather than a new group, so it falls back to the direct signal.
+ */
+const CODEX_DETACHED = process.platform !== "win32";
+
+function signalCodexTree(child, signal) {
+  try {
+    if (CODEX_DETACHED && Number.isInteger(child.pid)) process.kill(-child.pid, signal);
+    else child.kill(signal);
+  } catch {
+    // The group is already gone, or was never created. Falling back to the
+    // direct signal costs nothing and covers the second case.
+    try {
+      child.kill(signal);
+    } catch {
+      /* already exited */
+    }
+  }
+}
+
 function streamCodex(args, { echo = process.stdout, timeoutMs = CODEX_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn("codex", args, { stdio: ["ignore", "pipe", "inherit"] });
+    const child = spawn("codex", args, {
+      stdio: ["ignore", "pipe", "inherit"],
+      // Its own process group, so the timeout below can end the whole tree.
+      // Deliberately not `unref`ed: this process still waits for the review.
+      detached: CODEX_DETACHED
+    });
     let stdout = "";
     let truncated = false;
     let timedOut = false;
 
     const deadline = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      signalCodexTree(child, "SIGTERM");
       // A codex ignoring SIGTERM still has to let go of the worktree, so the
       // second signal is not optional. Unreferenced: if the child exits on the
       // first one, this timer must not keep the process alive waiting to fire.
-      setTimeout(() => child.kill("SIGKILL"), 10_000).unref();
+      setTimeout(() => signalCodexTree(child, "SIGKILL"), 10_000).unref();
     }, timeoutMs);
 
     child.stdout.setEncoding("utf8");
@@ -1854,18 +1994,16 @@ function streamCodex(args, { echo = process.stdout, timeoutMs = CODEX_TIMEOUT_MS
     });
     child.on("close", (status) => {
       clearTimeout(deadline);
-      // Both notes go into the body rather than only to the log: the saved
-      // document is what gets read later, and a review that was cut off must
-      // not read as one that simply had little to say.
-      if (truncated) {
-        stdout += `\n\n_Output stopped being recorded after ${CODEX_MAX_OUTPUT_BYTES} bytes._\n`;
-      }
-      if (timedOut) {
-        stdout += `\n\n_Codex was stopped after ${Math.round(timeoutMs / 60_000)} minutes and did not finish._\n`;
-      }
+      // `stdout` stays exactly what codex wrote, and the notes travel beside it.
+      // Folding them in was worse than untidy: a run that timed out having
+      // produced nothing came back with the note as its entire output, so the
+      // caller's `body ? 0 : …` saw a non-empty body and reported success for a
+      // review that does not exist. What decides whether there is a review has
+      // to be what codex said, never what this function said about it.
+      //
       // 124 is the convention `run()` already uses for a timeout, so callers
       // reading a status do not need a second rule for this one.
-      resolve({ status: timedOut ? 124 : status, stdout });
+      resolve({ status: timedOut ? 124 : status, stdout, timedOut, truncated });
     });
   });
 }

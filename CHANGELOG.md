@@ -39,10 +39,42 @@ its claims.
   guessed; and the fetched base must contain GitHub's `baseRefOid`. Ancestry,
   not equality — a base branch legitimately advances between the API call and
   the fetch, and demanding equality would abort on ordinary traffic.
-- **Codex runs are bounded.** A 45-minute timeout with SIGTERM then SIGKILL
-  (`CPR_CODEX_TIMEOUT_MS`), and a cap on the output retained for the saved
-  document, which was an unbounded string. Both say so in the review rather than
-  leaving a truncated run looking like a short one.
+- **Codex runs are bounded.** A 45-minute timeout signalling the whole process
+  group with SIGTERM then SIGKILL (`CPR_CODEX_TIMEOUT_MS`), and a cap on the
+  output retained for the saved document, which was an unbounded string. Both
+  say so in the review rather than leaving a cut-off run looking like a short
+  one. Signalling only the direct pid was not a bound: a hung grandchild
+  outlived both signals and went on reading the worktree after the marker
+  protecting it was gone, or held the inherited pipe open so the run never ended.
+  The diagnostic notes stay out of the value that decides whether a review
+  happened — folded in, they made an output-less timeout look like a review with
+  content and exit 0.
+
+Found by a Codex review of this branch, which is the workflow this plugin
+exists for:
+
+- **A push URL no longer vouches for a fetch remote.** `git remote -v` prints
+  both, and the parser kept whichever matched, so a remote fetching from a
+  mirror and pushing to GitHub satisfied the new host check and then fetched
+  from the mirror — the substitution the check was added to stop. Only the
+  `(fetch)` URL is read now, and it is parsed rather than split, since a remote
+  URL may contain spaces.
+- **Cached clones are namespaced by host**, `repos/<host>/<owner>__<repo>`.
+  `owner/repo` is unique only within one GitHub, so two Enterprise hosts sharing
+  a slug collided on one directory and `--clone` could not get past it. A
+  reused clone is also checked against its `origin` — but only a positive
+  mismatch disqualifies it, since an origin that cannot be parsed is absence of
+  evidence and rejecting on it would re-clone on every run.
+- **A worktree from an older checkout is rebuilt rather than refreshed.**
+  `core.symlinks=false` governs how a link is written, so it does nothing to one
+  already on disk: an unchanged blob is not rewritten by `checkout --force`, and
+  git under that setting reads the existing link as clean, so the upgrade path
+  kept exactly the escape the setting removes.
+- **A registered worktree is recognised as one.** The check compared a resolved
+  path against git's, which reports real paths, so any symlink in the cache path
+  — a symlinked `~/.cache`, macOS's `/var` — made every re-run tear the worktree
+  down and check it out again. Re-running cheaply is a documented property and
+  quietly was not one.
 - **An unknown flag is an error.** It used to become a positional, on the
   grounds that `#42` had to survive — which it does anyway, having no leading
   dash. What actually arrived there were typos: `--modle gpt-5.6` was read as

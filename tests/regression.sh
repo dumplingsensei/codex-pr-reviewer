@@ -1082,6 +1082,87 @@ contains "the mismatch is named" "$out" "gitlab.example.com"
 contains "and the host that did serve it is too" "$out" "github.com served this pull request"
 contains "the run continues against the cache clone" "$out" "Preparing worktree"
 
+note "a push URL does not vouch for the remote that fetches"
+# Regression: `git remote -v` prints two lines per remote, `(fetch)` and
+# `(push)`, and the parser kept the first two fields of either. A remote that
+# fetched from a mirror and pushed to GitHub therefore matched on its push URL,
+# and the fetch then went to the mirror — the exact substitution the host check
+# was added to stop. The fixture above had one URL for both, which is why the
+# check passed its own test while the hole was open.
+git -C "$MIRROR" remote set-url origin "https://gitlab.example.com/o/r"
+git -C "$MIRROR" remote set-url --push origin "https://github.com/o/r"
+check "the fixture really does push to github" \
+  "$(git -C "$MIRROR" remote -v | grep -c 'github.com/o/r (push)')" "1"
+out="$(CPR_TEST_CWD="$MIRROR" prepare_sym)"
+contains "the fetch host is the one judged" "$out" "gitlab.example.com"
+contains "so the remote is still refused" "$out" "github.com served this pull request"
+
+check "the cache clone is namespaced by host" \
+  "$([[ -d "$CACHE/repos/github.com/o__r" ]] && echo yes || echo no)" "yes"
+
+note "a worktree from an older checkout is rebuilt, not reused"
+# Regression: core.symlinks=false governs how a link is written, so it only acts
+# where something is written. A worktree prepared before it was set kept real
+# symlinks, and refreshing did not replace them — an unchanged blob is not
+# rewritten by `checkout --force`, and git under this setting reads the existing
+# link as clean, so `clean -fdx` left it too. Upgrading therefore kept exactly
+# the escape the setting exists to remove.
+rm -f "$SYMWT/escape.txt"
+ln -s /etc/passwd "$SYMWT/escape.txt"
+check "the fixture put a real link back" \
+  "$([[ -L "$SYMWT/escape.txt" ]] && echo link || echo file)" "link"
+out="$(prepare_sym)"
+contains "the stale worktree is rebuilt" "$out" "rebuilding it"
+check "and the link is a plain file again" \
+  "$([[ -L "$SYMWT/escape.txt" ]] && echo link || echo file)" "file"
+
+# The other half of the same check. A worktree with nothing wrong with it has to
+# be refreshed in place, and was not being: `git worktree list` reports a
+# worktree by its real path while this one is built from the cache root as
+# configured, so any symlink on the way — a symlinked `~/.cache`, or macOS's
+# `/var` — made a registered worktree read as absent, and every re-run became a
+# teardown and a fresh checkout. Re-running cheaply is a documented property.
+# The inode is what tells the two apart: a rebuild recreates the directory.
+before_inode="$(ls -id "$SYMWT" | awk '{print $1}')"
+out="$(prepare_sym)"
+after_inode="$(ls -id "$SYMWT" | awk '{print $1}')"
+check "a healthy worktree is reused, not rebuilt" "$after_inode" "$before_inode"
+check "and nothing claimed a rebuild" "$(printf '%s' "$out" | grep -c 'rebuilding it')" "0"
+
+note "a timeout is a failed review, not an empty one"
+# Regression: the timeout note was appended to codex's own output, so a run that
+# reached the deadline having produced nothing came back with that note as its
+# whole body. The wrapper's `body ? 0 : …` saw something non-empty and reported
+# success for a review that does not exist.
+cat >"$SANDBOX/hang.sh" <<HOOK
+#!/bin/sh
+sleep 30 &
+echo \$! >"$SANDBOX/grandchild.pid"
+sleep 25
+HOOK
+chmod +x "$SANDBOX/hang.sh"
+
+rm -f "$SANDBOX/grandchild.pid"
+out="$(env PATH="$STUBS:$PATH" CPR_CODEX_TIMEOUT_MS=1500 \
+  CPR_STUB_RUN_HOOK="$SANDBOX/hang.sh" CPR_STUB_RUN_BODY= \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+timeout_status=$?
+check "an output-less timeout does not report success" "$timeout_status" "124"
+saved="$(ls -t "$CACHE/reviews"/o__r-pr7-*.md 2>/dev/null | head -1)"
+contains "the document says there was no review" "$(cat "$saved")" "_Codex produced no review output._"
+contains "and says why" "$(cat "$saved")" "did not finish"
+contains "codex's own status is recorded" "$(head -1 "$saved")" "exit=124"
+
+# Regression: the deadline signalled only the direct codex pid, so a hung
+# grandchild outlived both signals and went on reading the worktree after the
+# marker protecting it was gone. Codex is spawned as its own process group
+# leader now, and the signals address the group.
+sleep 1
+gpid="$(cat "$SANDBOX/grandchild.pid" 2>/dev/null || echo 0)"
+check "the fixture recorded a grandchild" "$([[ "$gpid" -gt 0 ]] && echo yes || echo no)" "yes"
+check "the whole process tree was ended" \
+  "$(kill -0 "$gpid" 2>/dev/null && echo alive || echo gone)" "gone"
+
 note "a degraded manifest entry fails before the paid run"
 # Regression: --no-prepare checked headSha and mergeBase only where they were
 # present, while the saved document quotes both unconditionally — so an entry

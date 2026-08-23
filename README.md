@@ -112,7 +112,7 @@ Everything lives under `${XDG_CACHE_HOME:-~/.cache}/codex-pr-reviewer`:
 
 ```
 manifest.json                     what the plugin created, for precise cleanup
-repos/owner__repo/                cached clones (only for repos you lack locally)
+repos/github.com/owner__repo/     cached clones (only for repos you lack locally)
 worktrees/owner__repo/pr-42/      the isolated checkout Codex reads
 reviews/owner__repo-pr42-*.md     saved review documents
 runs/owner__repo-pr42-<pid>.json  a review in flight, so cleanup leaves it alone
