@@ -552,22 +552,34 @@ export function runIsLive(marker, now = Date.now(), hostname = os.hostname()) {
   // Another machine's pid says nothing here, so the TTL above is all there is.
   if (marker.host && marker.host !== hostname) return true;
   // Signal 0 sends nothing; it only asks whether the process is there. A
-  // non-positive pid addresses a process group, so it never identifies a run.
+  // recorded pid that is not positive names a group rather than a process, so
+  // it never identifies a run and is dropped before any of this.
   //
   // Either process still being there means the review is still happening. The
   // wrapper is the half that can be killed outright — SIGKILL runs no handler,
   // so nothing clears this marker — while codex, in its own process group,
   // carries on reading the worktree. A marker that knew only the wrapper called
   // that finished, and the next `clean` deleted the checkout from under it.
-  const pids = [marker.pid, marker.codexPid].filter((pid) => Number.isInteger(pid) && pid > 0);
-  return pids.some((pid) => {
+  const alive = (pid) => {
     try {
       process.kill(pid, 0);
       return true;
     } catch (error) {
       return error.code === "EPERM"; // running, just not ours to signal
     }
-  });
+  };
+  const pids = [marker.pid, marker.codexPid].filter((pid) => Number.isInteger(pid) && pid > 0);
+  if (pids.some(alive)) return true;
+
+  // A group outlives the process that led it. Codex exits, something it started
+  // stays behind reading the worktree, and the group lives on under a pgid that
+  // is still the dead leader's pid — so neither recorded process answers, and a
+  // marker that asked only after those two would report the run finished while
+  // a descendant of it is still reading. Here the negative pid is the point: it
+  // asks after the group rather than a process.
+  return (
+    CODEX_DETACHED && Number.isInteger(marker.codexPid) && marker.codexPid > 0 && alive(-marker.codexPid)
+  );
 }
 
 /**
@@ -2156,8 +2168,12 @@ const CODEX_DETACHED = process.platform !== "win32";
  * pid that is no longer there — which `clean` reads as a finished review.
  * Forwarding is what makes the group leadership pay for itself rather than
  * cost.
+ *
+ * SIGQUIT belongs here for the same reason SIGINT does, and for a while did
+ * not: Ctrl-\ goes to the foreground group too, so leaving it out left one key
+ * on the keyboard that still reproduced the whole defect above.
  */
-const FORWARDED_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
+const FORWARDED_SIGNALS = ["SIGINT", "SIGQUIT", "SIGTERM", "SIGHUP"];
 
 // How long codex has to end on the polite signal before it is killed outright.
 // The same grace whether the deadline asked or the user did: something is
@@ -2201,7 +2217,7 @@ function streamCodex(
     let truncated = false;
     let timedOut = false;
     let interruptedBy = null;
-    let settlingInterrupt = false;
+    let awaitingTree = false;
     let strandedTimer = null;
     let settled = false;
 
@@ -2238,6 +2254,27 @@ function streamCodex(
       } catch (error) {
         return error.code !== "EPERM"; // EPERM is something alive we may not signal
       }
+    };
+
+    // Settles once codex's process group is empty, or once the grace has run
+    // out.
+    //
+    // Releasing the marker is what frees a `clean` to take the worktree, so it
+    // must not happen while a descendant is still there to read it — and the
+    // child exiting is not the group exiting. Every ending needs this wait.
+    // They differ in what they settle with, not in what they settle after.
+    const settleWhenTreeIsGone = (settle) => {
+      awaitingTree = true;
+      const waitUntil = Date.now() + CODEX_KILL_GRACE_MS;
+      const attempt = () => {
+        if (settled) return;
+        if (treeIsGone() || Date.now() >= waitUntil) {
+          finish(settle);
+          return;
+        }
+        setTimeout(attempt, 50);
+      };
+      attempt();
     };
 
     const forwarders = new Map();
@@ -2341,16 +2378,7 @@ function streamCodex(
       // redirect its output — and then `close` arrives during this wait. Left
       // to resolve, it turned an interrupt into a finished review and saved a
       // document for a run somebody stopped.
-      settlingInterrupt = true;
-      const waitUntil = Date.now() + CODEX_KILL_GRACE_MS;
-      const settleWhenGone = () => {
-        if (treeIsGone() || Date.now() >= waitUntil) {
-          finish(() => reject(new Interrupted(interruptedBy)));
-          return;
-        }
-        setTimeout(settleWhenGone, 50);
-      };
-      settleWhenGone();
+      settleWhenTreeIsGone(() => reject(new Interrupted(interruptedBy)));
     });
     child.on("close", (status) => {
       // An interrupt that landed before codex exited settles from `exit`, once
@@ -2358,7 +2386,7 @@ function streamCodex(
       // arrive first. An interrupt that lands after `exit` is a different case
       // and is not this one: the output is already complete, so the review is
       // saved rather than thrown away.
-      if (settlingInterrupt) return;
+      if (awaitingTree) return;
       // `stdout` stays exactly what codex wrote, and the notes travel beside it.
       // Folding them in was worse than untidy: a run that timed out having
       // produced nothing came back with the note as its entire output, so the
@@ -2368,7 +2396,22 @@ function streamCodex(
       //
       // 124 is the convention `run()` already uses for a timeout, so callers
       // reading a status do not need a second rule for this one.
-      finish(() => resolve({ status: timedOut ? 124 : status, stdout, timedOut, truncated }));
+      const settle = () => resolve({ status: timedOut ? 124 : status, stdout, timedOut, truncated });
+
+      // Codex has gone and its output is complete — but the group it led has
+      // not gone, and `close` says nothing about that: a descendant that
+      // redirected its own stdout never held this pipe to begin with. Settling
+      // here would release the marker while that descendant is still reading
+      // the worktree. On the deadline path it would also walk away from the
+      // SIGKILL armed to end exactly this, since an unreferenced timer does not
+      // outlive the process that armed it.
+      if (treeIsGone()) {
+        finish(settle);
+        return;
+      }
+      log("Note: something codex started outlived it. Ending it before the worktree is released.");
+      endCodexTree("SIGTERM");
+      settleWhenTreeIsGone(settle);
     });
   });
 }

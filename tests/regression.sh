@@ -1313,6 +1313,110 @@ check "codex's descendants are gone" \
   "$(kill -0 "$hook_pid" 2>/dev/null && echo alive || echo gone)" "gone"
 check "and its marker with them" "$(markers_left)" "0"
 
+note "Ctrl-\\ is forwarded like the other stop signals"
+# Regression: SIGQUIT was missing from the forwarded list, so the one stop key
+# that is not Ctrl-C still killed the wrapper on its default disposition — no
+# `finally`, no marker cleared, codex left running in its own process group.
+# That is the parked P1 exactly, reached from a different key.
+ulimit -c 0  # re-raising SIGQUIT is a real quit; no core files in CI
+start_interruptible_review "$SANDBOX/hold-foreground.sh" "$SANDBOX/hook.pid"
+quit_hook="$(cat "$SANDBOX/hook.pid")"
+kill -QUIT "$review_pid"
+# Grouped with stderr closed: bash announces a background job that died of
+# SIGQUIT ("Quit: 3"), which reads as a failure next to the test names.
+{ wait "$review_pid"; quit_status=$?; } 2>/dev/null
+check "the wrapper dies of the quit signal" "$quit_status" "131"
+check "codex's descendants go with it" \
+  "$(kill -0 "$quit_hook" 2>/dev/null && echo alive || echo gone)" "gone"
+check "and the marker with them" "$(markers_left)" "0"
+
+note "a deadline does not return while the tree it signalled is alive"
+# Regression: the deadline armed a SIGKILL and then settled before it fired. A
+# descendant that ignores SIGTERM and redirected its own stdout never held the
+# pipe, so `close` arrived the moment codex exited: the run resolved, the marker
+# was cleared, and the process exited — taking the unreferenced SIGKILL timer
+# with it and leaving that descendant reading a worktree nothing protected any
+# more. The same race CI found on the interrupt path, on the deadline.
+cat >"$SANDBOX/outlive-deadline.sh" <<HOOK
+#!/bin/sh
+( trap '' TERM; sleep 3 ) >/dev/null 2>&1 &
+echo \$! >"$SANDBOX/deadline-holder.pid"
+echo "a partial finding"
+sleep 25
+HOOK
+chmod +x "$SANDBOX/outlive-deadline.sh"
+
+rm -f "$CACHE/runs"/*.json "$SANDBOX/deadline-holder.pid"
+env PATH="$STUBS:$PATH" CPR_CODEX_TIMEOUT_MS=1500 \
+  CPR_STUB_RUN_HOOK="$SANDBOX/outlive-deadline.sh" CPR_STUB_RUN_BODY= \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare >/dev/null 2>&1
+deadline_holder="$(cat "$SANDBOX/deadline-holder.pid" 2>/dev/null || echo 0)"
+check "the run does not return before its tree is gone" \
+  "$(kill -0 "$deadline_holder" 2>/dev/null && echo alive || echo gone)" "gone"
+check "and the marker is released only then" "$(markers_left)" "0"
+saved="$(ls -t "$CACHE/reviews"/o__r-pr7-*.md 2>/dev/null | head -1)"
+contains "a timeout still saves what codex managed to produce" "$(cat "$saved")" "a partial finding"
+
+note "a group that outlives its leader still holds a clean back"
+# Regression: `runIsLive` probed two positive pids, the wrapper's and codex's.
+# Kill the wrapper outright and let codex exit leaving a descendant in its
+# detached group, and neither answers — while the group, and its read of the
+# worktree, are still there. `clean` took that for a finished review.
+
+# Both read JSON through a function rather than inline: a multi-line `node -e`
+# nested inside a command substitution is what `plan_digest` above avoids too.
+marker_codex_pid() {
+  node -e 'const fs = require("node:fs");
+    const dir = process.argv[1];
+    const file = fs.readdirSync(dir).find((n) => n.endsWith(".json"));
+    process.stdout.write(String(JSON.parse(fs.readFileSync(dir + "/" + file, "utf8")).codexPid || 0));' \
+    "$CACHE/runs"
+}
+clean_verdict_for_pr7() {
+  node "$SCRIPT" clean --pr 7 --repo o/r --dry-run --json 2>/dev/null | node -e '
+    let raw = "";
+    process.stdin.on("data", (c) => (raw += c));
+    process.stdin.on("end", () => {
+      try {
+        const result = JSON.parse(raw);
+        process.stdout.write(result.running && result.running.length ? "held" : "would-remove");
+      } catch { process.stdout.write("unreadable"); }
+    });'
+}
+
+cat >"$SANDBOX/outlive-leader.sh" <<HOOK
+#!/bin/sh
+echo \$\$ >"$SANDBOX/orphan.pid"
+sleep 20
+HOOK
+chmod +x "$SANDBOX/outlive-leader.sh"
+
+rm -f "$CACHE/runs"/*.json "$SANDBOX/orphan.pid"
+env PATH="$STUBS:$PATH" CPR_STUB_RUN_HOOK="$SANDBOX/outlive-leader.sh" CPR_STUB_RUN_BODY= \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare >/dev/null 2>&1 &
+orphan_wrapper=$!
+for _ in $(seq 1 100); do
+  [[ -s "$SANDBOX/orphan.pid" && "$(markers_left)" != "0" ]] && break
+  sleep 0.1
+done
+orphan_codex="$(marker_codex_pid)"
+check "the marker recorded codex's own pid" \
+  "$([[ "$orphan_codex" -gt 0 ]] && echo yes || echo no)" "yes"
+
+# Both recorded processes go outright: a SIGKILLed wrapper runs no handler, and
+# codex exiting after it is what leaves the group without either of them.
+kill -9 "$orphan_wrapper" 2>/dev/null
+kill -9 "$orphan_codex" 2>/dev/null
+wait "$orphan_wrapper" 2>/dev/null
+orphan="$(cat "$SANDBOX/orphan.pid")"
+check "the descendant is still in the group" \
+  "$(kill -0 "$orphan" 2>/dev/null && echo alive || echo gone)" "alive"
+check "and neither recorded process is" \
+  "$(kill -0 "$orphan_codex" 2>/dev/null && echo alive || echo gone)" "gone"
+check "clean holds the worktree back rather than taking it" "$(clean_verdict_for_pr7)" "held"
+kill -9 "$orphan" 2>/dev/null
+rm -f "$CACHE/runs"/*.json
+
 note "a bound that would not bind is refused before the paid run"
 # Regression: `Number(env) || default` let a negative deadline through to
 # setTimeout, which treats a delay it cannot use as "now" — so a mistyped

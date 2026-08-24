@@ -48,9 +48,18 @@ reading the worktree.
 Deferred out of 0.9.8 rather than written after it. Three rounds of Codex review
 returned sixteen findings across the release; by the third every other area had
 gone quiet and this one held the only P1, so it was taken out so the security
-work could land. All four findings it was parked on are fixed above. What it has
-not had is a round against the fixes themselves, which is the bar this branch
-set for itself, so it stays a draft until it has one.
+work could land. All four findings it was parked on are fixed above.
+
+A fourth round, this one against the fixes themselves, returned three more — and
+every one of them is the same invariant at a site that had not been given it:
+Codex's process group has to be gone before the run marker is released. The
+deadline settled on `close` and walked away from the SIGKILL it had armed, since
+an unreferenced timer does not outlive the process that armed it. `runIsLive`
+asked after two processes and never after the group they led, so a descendant
+outliving both read as a finished review and freed `clean` to take the worktree
+it was reading. And SIGQUIT was missing from the forwarded signals, which left
+Ctrl-\ as one key on the keyboard that still reproduced the whole parked P1.
+Each is fixed with a regression case that fails without it.
 
 Windows is the one thing deliberately left. Ending a process tree there needs a
 Job Object or `taskkill /T /F`, and without one the direct kill leaves whatever
