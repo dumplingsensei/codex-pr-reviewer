@@ -38,16 +38,24 @@ stops on that chunk is still marked cut short; a cap landing inside a multi-byte
 character drops the partial sequence rather than rendering it as a replacement
 character. `CPR_CODEX_MAX_OUTPUT_BYTES` sets it.
 
+The wait for `close` is bounded as well. `close` waits on every holder of the
+inherited stdout pipe rather than on Codex alone, so a descendant that outlived
+Codex without letting go held a review that had already finished open
+indefinitely, terminal and all. Past a grace, whatever still holds the pipe is
+ended — which also means the run marker is not cleared while something is still
+reading the worktree.
+
 Deferred out of 0.9.8 rather than written after it. Three rounds of Codex review
 returned sixteen findings across the release; by the third every other area had
 gone quiet and this one held the only P1, so it was taken out so the security
-work could land. That P1 was the interrupt, and it and both bounds findings are
-fixed above. **This remains known and unfixed:**
+work could land. All four findings it was parked on are fixed above. What it has
+not had is a round against the fixes themselves, which is the bar this branch
+set for itself, so it stays a draft until it has one.
 
-- **Windows kills only the direct child.** A descendant holding the inherited
-  pipe keeps `close` from firing, so the review hangs despite both signals.
-  Needs a Job Object or `taskkill /T /F` — or Windows stays unsupported, which
-  is what the README currently says.
+Windows is the one thing deliberately left. Ending a process tree there needs a
+Job Object or `taskkill /T /F`, and without one the direct kill leaves whatever
+holds the pipe behind. The README says Windows is not tested and not supported,
+and this does not change that.
 
 ## 0.9.8
 

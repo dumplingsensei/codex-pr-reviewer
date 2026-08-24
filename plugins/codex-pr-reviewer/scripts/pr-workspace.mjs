@@ -2164,6 +2164,11 @@ const FORWARDED_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
 // waiting on the answer either way.
 const CODEX_KILL_GRACE_MS = 10_000;
 
+// How long `close` is given to arrive after codex has exited. Draining a pipe
+// its only writer has let go of takes no time at all, so anything past this is
+// not a slow drain — it is something else still holding the far end.
+const CODEX_PIPE_GRACE_MS = 5_000;
+
 function signalCodexTree(child, signal) {
   try {
     if (CODEX_DETACHED && Number.isInteger(child.pid)) process.kill(-child.pid, signal);
@@ -2196,6 +2201,7 @@ function streamCodex(
     let truncated = false;
     let timedOut = false;
     let interruptedBy = null;
+    let strandedTimer = null;
     let settled = false;
 
     // A failed spawn has no pid, and nothing to record. Told before anything
@@ -2242,6 +2248,7 @@ function streamCodex(
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
+      clearTimeout(strandedTimer);
       for (const [signal, forward] of forwarders) process.off(signal, forward);
       settle();
     };
@@ -2299,18 +2306,34 @@ function streamCodex(
       );
     });
     child.on("exit", () => {
-      // Only an interrupted run settles here. A finished one waits for `close`,
-      // which is what guarantees the last of codex's output is in `stdout`
-      // before it is saved — but `close` waits on every holder of the inherited
-      // pipe, and after a kill that can be a descendant that never lets go. An
-      // interrupted run saves nothing, so it has nothing left to wait for, and
-      // must not hang on a pipe to discover that.
-      //
-      // It does wait for the group to empty, though, up to the same grace the
-      // SIGKILL runs on: settling clears the run marker, and clearing it while
-      // a survivor still reads the worktree is the very thing this is here to
-      // stop. Normally the group is already empty and the first look settles.
-      if (!interruptedBy) return;
+      // Codex going ends neither path on its own. `close`, not `exit`, is what
+      // guarantees the last of its output has been read, and the process group
+      // can outlive the process that led it.
+      if (!interruptedBy) {
+        // A finished run has output worth waiting for, so it waits for `close`
+        // — but `close` waits on every holder of the inherited pipe, and a
+        // descendant that outlived codex without letting go would hold a review
+        // that has already finished open for ever, terminal and all. Past the
+        // grace the review is over either way, so whatever is still holding the
+        // pipe is ended: `close` then arrives with the output intact, and the
+        // run marker is not cleared while something still reads the worktree.
+        //
+        // Unreferenced, because in every ordinary run `close` has already come
+        // and this timer must not be a reason the process is still alive.
+        strandedTimer = setTimeout(() => {
+          log("Note: something codex started outlived it, still holding its output open. Ending it.");
+          endCodexTree("SIGTERM");
+        }, CODEX_PIPE_GRACE_MS);
+        strandedTimer.unref();
+        return;
+      }
+
+      // An interrupted run saves nothing, so it has no output left to wait for
+      // and must not hang on that same pipe to discover it. It does wait for
+      // the group to empty, up to the grace the SIGKILL runs on: settling
+      // clears the run marker, and clearing it while a survivor still reads the
+      // worktree is the very thing this is here to stop. Normally the group is
+      // already empty and the first look settles.
       const waitUntil = Date.now() + CODEX_KILL_GRACE_MS;
       const settleWhenGone = () => {
         if (treeIsGone() || Date.now() >= waitUntil) {

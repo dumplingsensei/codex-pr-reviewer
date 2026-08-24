@@ -1349,6 +1349,33 @@ check "and emits no replacement character" \
   "$(node -e 'const t = require("node:fs").readFileSync(process.argv[1], "utf8");
      process.stdout.write(t.includes("�") ? "mangled" : "clean");' "$saved")" "clean"
 
+note "a descendant still holding the pipe cannot hang a finished review"
+# Regression: `close` waits on every holder of the inherited stdout pipe, not
+# only on codex — so a grandchild that outlived codex without letting go held a
+# review that had already finished open indefinitely, terminal and all. On
+# Windows that is the whole of the remaining finding, and Windows is not
+# supported; on a platform that is, the wait for `close` is bounded now.
+cat >"$SANDBOX/stranded.sh" <<HOOK
+#!/bin/sh
+# Inherits stdout and outlives its parent, which is what holds \`close\` open.
+sleep 30 &
+echo \$! >"$SANDBOX/holder.pid"
+HOOK
+chmod +x "$SANDBOX/stranded.sh"
+
+rm -f "$SANDBOX/holder.pid"
+started=$SECONDS
+env PATH="$STUBS:$PATH" CPR_STUB_RUN_HOOK="$SANDBOX/stranded.sh" \
+  CPR_STUB_RUN_BODY="a finding that arrived before the hang" \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare >/dev/null 2>&1
+check "the review returns rather than hanging on the pipe" \
+  "$([[ $((SECONDS - started)) -lt 20 ]] && echo returned || echo hung)" "returned"
+saved="$(ls -t "$CACHE/reviews"/o__r-pr7-*.md 2>/dev/null | head -1)"
+contains "with codex's output intact" "$(cat "$saved")" "a finding that arrived before the hang"
+holder="$(cat "$SANDBOX/holder.pid" 2>/dev/null || echo 0)"
+check "and the holder ended rather than left running" \
+  "$(kill -0 "$holder" 2>/dev/null && echo alive || echo gone)" "gone"
+
 note "a degraded manifest entry fails before the paid run"
 # Regression: --no-prepare checked headSha and mergeBase only where they were
 # present, while the saved document quotes both unconditionally — so an entry
