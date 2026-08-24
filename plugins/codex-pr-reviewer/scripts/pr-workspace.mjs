@@ -2201,6 +2201,7 @@ function streamCodex(
     let truncated = false;
     let timedOut = false;
     let interruptedBy = null;
+    let settlingInterrupt = false;
     let strandedTimer = null;
     let settled = false;
 
@@ -2334,6 +2335,13 @@ function streamCodex(
       // clears the run marker, and clearing it while a survivor still reads the
       // worktree is the very thing this is here to stop. Normally the group is
       // already empty and the first look settles.
+      //
+      // From here this path owns the settling, and `close` defers to it. A
+      // descendant can hold the group without holding the pipe — it only has to
+      // redirect its output — and then `close` arrives during this wait. Left
+      // to resolve, it turned an interrupt into a finished review and saved a
+      // document for a run somebody stopped.
+      settlingInterrupt = true;
       const waitUntil = Date.now() + CODEX_KILL_GRACE_MS;
       const settleWhenGone = () => {
         if (treeIsGone() || Date.now() >= waitUntil) {
@@ -2345,6 +2353,12 @@ function streamCodex(
       settleWhenGone();
     });
     child.on("close", (status) => {
+      // An interrupt that landed before codex exited settles from `exit`, once
+      // the process group is gone; `close` waits only on the pipe, so it can
+      // arrive first. An interrupt that lands after `exit` is a different case
+      // and is not this one: the output is already complete, so the review is
+      // saved rather than thrown away.
+      if (settlingInterrupt) return;
       // `stdout` stays exactly what codex wrote, and the notes travel beside it.
       // Folding them in was worse than untidy: a run that timed out having
       // produced nothing came back with the note as its entire output, so the

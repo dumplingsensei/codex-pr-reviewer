@@ -1251,6 +1251,11 @@ cat >"$SANDBOX/hold-detached.sh" <<HOOK
 echo \$\$ >"$SANDBOX/hook.pid"
 sleep 40 &
 echo \$! >"$SANDBOX/detached.pid"
+# Holds codex's process group without holding its pipe, and outlives the
+# SIGTERM that empties the rest. \`close\` then arrives while the group is still
+# occupied, which is the ordering that used to resolve an interrupted run as a
+# finished one — saving a document for a review that was stopped.
+( trap '' TERM; sleep 1 ) >/dev/null 2>&1 &
 sleep 35
 HOOK
 cat >"$SANDBOX/hold-foreground.sh" <<HOOK
