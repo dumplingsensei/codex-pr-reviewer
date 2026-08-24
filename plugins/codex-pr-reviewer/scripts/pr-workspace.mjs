@@ -1919,11 +1919,22 @@ async function commandReview(argv, cwd) {
   try {
     log(`Running: codex ${codexArgs.slice(0, 4).join(" ")} … review --base ${entry.baseBranch}`);
     // With --json the review text must not share stdout with the JSON payload.
-    const { status, stdout } = await streamCodex(codexArgs, {
+    const { status, stdout, timedOut, truncated } = await streamCodex(codexArgs, {
       echo: options.json ? process.stderr : process.stdout
     });
 
+    // `body` is codex's output and nothing else, because it is what decides
+    // below whether a review happened at all. The notes go in the document
+    // beside it, where a reader needs them, and never into the thing being
+    // tested for emptiness.
     const body = stripWorktreePaths(stdout, entry.worktree).trim();
+    const notes = [];
+    if (truncated) {
+      notes.push(`_Only the first ${CODEX_MAX_OUTPUT_BYTES} bytes of output were kept; this review is cut short._`);
+    }
+    if (timedOut) {
+      notes.push(`_Codex was stopped after ${Math.round(CODEX_TIMEOUT_MS / 60_000)} minutes and did not finish._`);
+    }
     // `||` not `??`: a failed `codex --version` yields "", which is not nullish.
     const model = options.model || run("codex", ["--version"]).stdout.trim() || "codex";
     const document = [
@@ -1938,6 +1949,7 @@ async function commandReview(argv, cwd) {
       "---",
       "",
       body || NO_REVIEW_BODY,
+      ...(notes.length > 0 ? ["", ...notes] : []),
       "",
       "---",
       "",
@@ -1980,34 +1992,103 @@ async function commandReview(argv, cwd) {
 }
 
 /**
- * Runs codex, streaming its output to the terminal as it arrives and returning
- * the whole of it.
+ * How long a review may run before it is stopped.
  *
- * Deliberately unbounded, for now. A timeout, a cap on the retained output, and
- * killing the process group rather than the single child all belong here and
- * are not here: three rounds of review found six defects in that machinery,
- * including one where making the timeout reach codex's descendants stopped
- * Ctrl-C reaching them. It is a reliability improvement to a plugin whose other
- * changes are security fixes, and it was holding them up, so it went to its own
- * branch to settle. See CHANGELOG for what is outstanding.
+ * Not a latency budget — a real review takes minutes and is allowed to. This is
+ * the ceiling that stops a wedged codex holding a worktree, a run marker and
+ * the terminal indefinitely. Comfortably past the slowest genuine review at
+ * xhigh effort, and comfortably inside the six-hour marker TTL, so a run cannot
+ * outlive the marker that protects its own worktree.
  */
-function streamCodex(args, { echo = process.stdout } = {}) {
+const CODEX_TIMEOUT_MS = Number(process.env.CPR_CODEX_TIMEOUT_MS) || 45 * 60 * 1000;
+
+// The child's stdout was accumulated into one string with no ceiling, so a
+// codex that streamed without stopping grew the heap until Node died — losing
+// the review along with it. Everything still reaches the terminal as it
+// arrives; only what is retained for the saved document is capped.
+const CODEX_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Signals codex and everything it started.
+ *
+ * `child.kill()` reaches the codex process and nothing below it, which is not a
+ * bound: a hung grandchild survives both signals and goes on reading the
+ * worktree after the run marker protecting it is gone — or holds the inherited
+ * stdout pipe open, so `close` never fires and the timeout that was supposed to
+ * end things waits for ever. Spawning codex as its own process group leader
+ * makes the negative pid address the group.
+ *
+ * Windows has no process groups in this sense, and `detached` there means a new
+ * console rather than a new group, so it falls back to the direct signal.
+ */
+const CODEX_DETACHED = process.platform !== "win32";
+
+function signalCodexTree(child, signal) {
+  try {
+    if (CODEX_DETACHED && Number.isInteger(child.pid)) process.kill(-child.pid, signal);
+    else child.kill(signal);
+  } catch {
+    // The group is already gone, or was never created. Falling back to the
+    // direct signal costs nothing and covers the second case.
+    try {
+      child.kill(signal);
+    } catch {
+      /* already exited */
+    }
+  }
+}
+
+function streamCodex(args, { echo = process.stdout, timeoutMs = CODEX_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn("codex", args, { stdio: ["ignore", "pipe", "inherit"] });
+    const child = spawn("codex", args, {
+      stdio: ["ignore", "pipe", "inherit"],
+      // Its own process group, so the timeout below can end the whole tree.
+      // Deliberately not `unref`ed: this process still waits for the review.
+      detached: CODEX_DETACHED
+    });
     let stdout = "";
+    let truncated = false;
+    let timedOut = false;
+
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      signalCodexTree(child, "SIGTERM");
+      // A codex ignoring SIGTERM still has to let go of the worktree, so the
+      // second signal is not optional. Unreferenced: if the child exits on the
+      // first one, this timer must not keep the process alive waiting to fire.
+      setTimeout(() => signalCodexTree(child, "SIGKILL"), 10_000).unref();
+    }, timeoutMs);
+
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
-      stdout += chunk;
       echo.write(chunk);
+      if (stdout.length >= CODEX_MAX_OUTPUT_BYTES) {
+        truncated = true;
+        return;
+      }
+      stdout += chunk;
     });
     child.on("error", (error) => {
+      clearTimeout(deadline);
       reject(
         error.code === "ENOENT"
           ? new UserError("`codex` is not installed or not on PATH.", "Run `/codex-pr-reviewer:review` after installing the Codex CLI.")
           : error
       );
     });
-    child.on("close", (status) => resolve({ status, stdout }));
+    child.on("close", (status) => {
+      clearTimeout(deadline);
+      // `stdout` stays exactly what codex wrote, and the notes travel beside it.
+      // Folding them in was worse than untidy: a run that timed out having
+      // produced nothing came back with the note as its entire output, so the
+      // caller's `body ? 0 : …` saw a non-empty body and reported success for a
+      // review that does not exist. What decides whether there is a review has
+      // to be what codex said, never what this function said about it.
+      //
+      // 124 is the convention `run()` already uses for a timeout, so callers
+      // reading a status do not need a second rule for this one.
+      resolve({ status: timedOut ? 124 : status, stdout, timedOut, truncated });
+    });
   });
 }
 

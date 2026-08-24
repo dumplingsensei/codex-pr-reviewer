@@ -5,6 +5,38 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.9 — unreleased, not ready
+
+Bounds on a Codex run: a 45-minute timeout signalling the whole process group
+with SIGTERM then SIGKILL (`CPR_CODEX_TIMEOUT_MS`), and a cap on the output
+retained for the saved document, which was an unbounded string. Diagnostic
+notes stay out of the value that decides whether a review happened, so an
+output-less timeout is a failure rather than a review whose only content is the
+note saying there is none.
+
+Deferred out of 0.9.8 rather than written after it. Three rounds of Codex review
+returned sixteen findings across the release; by the third every other area had
+gone quiet and this one held the only P1, so it was taken out so the security
+work could land. **These are known and unfixed:**
+
+- **Termination signals are not forwarded to the group.** `detached: true` puts
+  Codex outside the terminal's foreground process group, so Ctrl-C or a SIGTERM
+  to the wrapper kills only Node. Codex and its descendants keep running, the
+  `finally` that clears the run marker never runs, and the marker left behind
+  names a dead pid — which `clean` reads as finished before deleting the
+  worktree still being read. Fixing the bound broke the interrupt.
+- **A configured timeout can outlive the run marker.** `CPR_CODEX_TIMEOUT_MS`
+  above six hours passes `RUN_MARKER_TTL_MS`, after which `runIsLive` rejects a
+  marker whose process is alive. Clamp it, or derive the TTL from it.
+- **The output cap is neither in bytes nor enforced on the crossing chunk.**
+  `String.length` counts UTF-16 code units, and the check runs before the
+  append, so the chunk that crosses the limit is kept whole and nothing marks it
+  truncated unless another event follows.
+- **Windows kills only the direct child.** A descendant holding the inherited
+  pipe keeps `close` from firing, so the review hangs despite both signals.
+  Needs a Job Object or `taskkill /T /F` — or Windows stays unsupported, which
+  is what the README currently says.
+
 ## 0.9.8
 
 Findings from an external review of 0.9.7, plus one defect found while checking
