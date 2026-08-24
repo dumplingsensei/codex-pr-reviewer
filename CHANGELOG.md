@@ -5,7 +5,7 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
-## 0.9.9 — unreleased
+## 0.9.9
 
 Bounds on a Codex run: a 45-minute timeout signalling the whole process group
 with SIGTERM then SIGKILL (`CPR_CODEX_TIMEOUT_MS`), and a cap on the output
