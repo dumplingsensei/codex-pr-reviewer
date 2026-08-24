@@ -61,10 +61,35 @@ it was reading. And SIGQUIT was missing from the forwarded signals, which left
 Ctrl-\ as one key on the keyboard that still reproduced the whole parked P1.
 Each is fixed with a regression case that fails without it.
 
-Windows is the one thing deliberately left. Ending a process tree there needs a
-Job Object or `taskkill /T /F`, and without one the direct kill leaves whatever
-holds the pipe behind. The README says Windows is not tested and not supported,
-and this does not change that.
+A fifth round returned three more, and this time two of them were the end of the
+line rather than another site. A cap of `0.5` passed "positive and finite" and
+then reached `Buffer.subarray`, which truncates a fractional endpoint to nothing
+while the counter advances by the fraction — so the cap retained no bytes at all
+and the run reported no review while Codex was producing one. Both settings take
+whole numbers now. And the bound on `close` was not a bound: a descendant that
+leaves the process group never receives the signal meant to end it, and the wait
+had no other end. It settles once the group is empty — which it already is when
+the holder is outside it — keeps what Codex produced, and says what happened.
+Releasing the read end is half of that: settling a promise does not end a process
+whose pipe handle is still keeping the loop alive, which is the same hang wearing
+a different hat.
+
+**Deliberately left. These are limits, not defects waiting on a fix here:**
+
+- **A descendant that leaves the process group cannot be contained.** `setsid`
+  puts one beyond every signal a parent can send and beyond the probe that asks
+  whether the group is empty. Containing it needs a cgroup or a Job Object;
+  POSIX offers a parent nothing stronger than the process group. The wrapper
+  bounds its own wait instead of pretending otherwise, and says so on the way
+  out.
+- **Ctrl-Z does not suspend Codex.** SIGTSTP goes to the wrapper's foreground
+  group and Codex is deliberately not in it, so Node stops while Codex runs on
+  with its watchdog frozen. Forwarding suspension and propagating SIGCONT is job
+  control — a different subject from bounding a run, and its own change.
+- **Windows.** Ending a process tree there needs a Job Object or `taskkill /T
+  /F`, and without one the direct kill leaves whatever holds the pipe behind.
+  The README says Windows is not tested and not supported, and this does not
+  change that.
 
 ## 0.9.8
 

@@ -2102,14 +2102,20 @@ const CODEX_MAX_OUTPUT_DEFAULT_BYTES = 32 * 1024 * 1024;
  * Refused rather than replaced: a deadline typed wrong is a configuration
  * error, and one that silently becomes 45 minutes is a configuration error
  * found out about in 45 minutes.
+ *
+ * Whole numbers, because both of these count things. A fraction survived
+ * "positive and finite" and then reached `Buffer.subarray`, which truncates a
+ * fractional endpoint to nothing while the byte counter advanced by the
+ * fraction — so a cap of `0.5` retained no bytes at all and the run reported
+ * no review while codex was producing one.
  */
 function positiveEnvNumber(name, fallback, env = process.env) {
   const raw = env[name];
   if (raw === undefined || raw === "") return fallback;
   const value = Number(raw);
-  if (!Number.isFinite(value) || value <= 0) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
     throw new UserError(
-      `${name} must be a positive number, not ${JSON.stringify(raw)}.`,
+      `${name} must be a positive whole number, not ${JSON.stringify(raw)}.`,
       `Unset it to use the default of ${fallback}.`
     );
   }
@@ -2219,6 +2225,7 @@ function streamCodex(
     let interruptedBy = null;
     let awaitingTree = false;
     let strandedTimer = null;
+    let exitStatus = null;
     let settled = false;
 
     // A failed spawn has no pid, and nothing to record. Told before anything
@@ -2246,6 +2253,12 @@ function streamCodex(
     // be cleared — which would leave a `clean` free to delete a worktree that
     // is still being read. The group answers this directly, since signal 0 to a
     // negative pid fails only once nothing is left to receive it.
+    //
+    // What it cannot see is a descendant that left the group — `setsid` puts
+    // one beyond this probe and beyond every signal sent above it, and a
+    // process group is the strongest containment POSIX offers a parent. Such a
+    // process cannot be ended from here, and pretending otherwise would mean
+    // waiting on it for ever; the bound below is the honest answer instead.
     const treeIsGone = () => {
       if (!CODEX_DETACHED || !Number.isInteger(child.pid)) return true;
       try {
@@ -2343,7 +2356,8 @@ function streamCodex(
         )
       );
     });
-    child.on("exit", () => {
+    child.on("exit", (code) => {
+      exitStatus = code;
       // Codex going ends neither path on its own. `close`, not `exit`, is what
       // guarantees the last of its output has been read, and the process group
       // can outlive the process that led it.
@@ -2358,9 +2372,31 @@ function streamCodex(
         //
         // Unreferenced, because in every ordinary run `close` has already come
         // and this timer must not be a reason the process is still alive.
+        //
+        // Settling from here rather than waiting on `close` afterwards, because
+        // `close` is not guaranteed to come at all: a descendant that left the
+        // process group never receives the signal above, holds the inherited
+        // pipe as long as it likes, and a wait with no end is not the bound
+        // this was supposed to be. Once the group is empty — which it already
+        // is when the holder is outside it — there is nothing further a parent
+        // can do but save what codex did produce and say what happened.
         strandedTimer = setTimeout(() => {
           log("Note: something codex started outlived it, still holding its output open. Ending it.");
           endCodexTree("SIGTERM");
+          settleWhenTreeIsGone(() => {
+            if (!treeIsGone()) {
+              log("Note: it did not go. Saving the review; check for a stray process under this worktree.");
+            } else {
+              log("Note: whatever held the pipe is outside codex\'s process group and cannot be signalled from here.");
+            }
+            // And letting go of the read end, which is the other half of not
+            // waiting. Settling the promise does not end this process while an
+            // open pipe handle keeps the loop alive — the review would be
+            // written and the command would still not return, which is the
+            // same hang wearing a different hat.
+            child.stdout.destroy();
+            resolve({ status: timedOut ? 124 : exitStatus, stdout, timedOut, truncated });
+          });
         }, CODEX_PIPE_GRACE_MS);
         strandedTimer.unref();
         return;

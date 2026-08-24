@@ -1426,7 +1426,7 @@ out="$(env PATH="$STUBS:$PATH" CPR_CODEX_TIMEOUT_MS=-1 \
   CPR_STUB_RUN_BODY="a finding nobody should have paid for" \
   node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
 check "the run fails instead of starting" "$?" "1"
-contains "and names the variable" "$out" "CPR_CODEX_TIMEOUT_MS must be a positive number"
+contains "and names the variable" "$out" "CPR_CODEX_TIMEOUT_MS must be a positive whole number"
 check "codex was never run" "$(printf '%s' "$out" | grep -c 'nobody should have paid')" "0"
 check "and nothing was left marked as running" "$(markers_left)" "0"
 
@@ -1484,6 +1484,52 @@ contains "with codex's output intact" "$(cat "$saved")" "a finding that arrived 
 holder="$(cat "$SANDBOX/holder.pid" 2>/dev/null || echo 0)"
 check "and the holder ended rather than left running" \
   "$(kill -0 "$holder" 2>/dev/null && echo alive || echo gone)" "gone"
+
+note "a holder outside the process group ends the wait instead of the review"
+# Regression: the bound on `close` was not one. `close` waits on every holder of
+# the inherited pipe, and a descendant that left the group — `setsid`, which is
+# what `detached` does — never receives the signal sent to end it. The wait had
+# no other end, so the review hung for as long as that process cared to live.
+# Nothing here can reach it; what this can do is stop waiting and save what
+# codex did produce.
+cat >"$SANDBOX/escape-group.sh" <<'HOOK'
+#!/bin/sh
+# A grandchild in a session of its own, holding the inherited stdout: outside
+# every signal the wrapper can send, and holding `close` open regardless.
+node -e 'const { spawn } = require("node:child_process");
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
+    detached: true,
+    stdio: ["ignore", 1, "ignore"]
+  });
+  require("node:fs").writeFileSync(process.env.CPR_TEST_ESCAPEE, String(child.pid));
+  child.unref();'
+echo "a finding that outlived its keeper"
+HOOK
+chmod +x "$SANDBOX/escape-group.sh"
+
+rm -f "$CACHE/runs"/*.json "$SANDBOX/escapee.pid"
+started=$SECONDS
+env PATH="$STUBS:$PATH" CPR_TEST_ESCAPEE="$SANDBOX/escapee.pid" \
+  CPR_STUB_RUN_HOOK="$SANDBOX/escape-group.sh" CPR_STUB_RUN_BODY= \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare >/dev/null 2>&1
+check "the review returns rather than waiting on a pipe nothing can close" \
+  "$([[ $((SECONDS - started)) -lt 20 ]] && echo returned || echo hung)" "returned"
+saved="$(ls -t "$CACHE/reviews"/o__r-pr7-*.md 2>/dev/null | head -1)"
+contains "keeping what codex produced before it" "$(cat "$saved")" "a finding that outlived its keeper"
+check "and the marker is released, not abandoned" "$(markers_left)" "0"
+kill -9 "$(cat "$SANDBOX/escapee.pid" 2>/dev/null || echo 0)" 2>/dev/null || true
+
+note "a cap that cannot be counted in whole bytes is refused"
+# Regression: 0.5 passed "positive and finite", then `Buffer.subarray(0, 0.5)`
+# truncated the endpoint to nothing while the counter advanced by the fraction.
+# The first chunk retained zero bytes, so the run reported no review at all
+# while codex was producing one.
+out="$(env PATH="$STUBS:$PATH" CPR_CODEX_MAX_OUTPUT_BYTES=0.5 \
+  CPR_STUB_RUN_BODY="a finding nobody should have paid for" \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+check "the run fails instead of keeping nothing" "$?" "1"
+contains "and says what it wants" "$out" "must be a positive whole number"
+check "codex was never run" "$(printf '%s' "$out" | grep -c 'nobody should have paid')" "0"
 
 note "a degraded manifest entry fails before the paid run"
 # Regression: --no-prepare checked headSha and mergeBase only where they were

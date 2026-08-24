@@ -361,6 +361,11 @@ describe("codexMaxOutputBytes");
 eq("the default when unset", codexMaxOutputBytes({}), 32 * 1024 * 1024);
 eq("a configured cap", codexMaxOutputBytes({ CPR_CODEX_MAX_OUTPUT_BYTES: "64" }), 64);
 throws("a cap of nothing", () => codexMaxOutputBytes({ CPR_CODEX_MAX_OUTPUT_BYTES: "0" }));
+// Both of these count things, and a fraction reached `Buffer.subarray`, which
+// truncates a fractional endpoint to nothing while the counter advances by the
+// fraction — a cap of 0.5 kept no bytes and reported no review.
+throws("a fractional cap", () => codexMaxOutputBytes({ CPR_CODEX_MAX_OUTPUT_BYTES: "0.5" }));
+throws("a fractional deadline", () => codexTimeoutMs({ CPR_CODEX_TIMEOUT_MS: "1500.5" }));
 
 describe("tool grants");
 // Posting is the one irreversible act here, so only the command that posts may
