@@ -5,6 +5,92 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.9 — unreleased
+
+Bounds on a Codex run: a 45-minute timeout signalling the whole process group
+with SIGTERM then SIGKILL (`CPR_CODEX_TIMEOUT_MS`), and a cap on the output
+retained for the saved document, which was an unbounded string. Diagnostic
+notes stay out of the value that decides whether a review happened, so an
+output-less timeout is a failure rather than a review whose only content is the
+note saying there is none.
+
+Ctrl-C, SIGTERM and SIGHUP now reach that group instead of killing the wrapper
+alone. The signal is forwarded, the run marker is cleared on the way out, and it
+is re-raised so the exit status is the signal's — 130 for an interrupt, which is
+what a `for pr in …; do` loop reads as the person stopping it rather than the
+review failing on its own. Nothing is saved for a review that did not finish.
+What it waits for before settling is the process group emptying, not just Codex
+exiting: clearing the marker while a descendant still reads the worktree is the
+same harm by a narrower path. A second Ctrl-C stops waiting and kills. The
+marker also records Codex's pid beside the wrapper's, which is the only thing
+that covers a wrapper killed outright, where no handler runs at all.
+
+Both bounds are also the size they claim to be now. `CPR_CODEX_TIMEOUT_MS` is
+validated and clamped to the run marker's TTL: `Number(env) || default` let a
+negative value — and anything past 2³¹−1 ms — reach `setTimeout`, which treats a
+delay it cannot use as "now", so a mistyped deadline killed every review the
+instant it began, and a deadline past the TTL outlived the marker keeping a
+`clean` off the worktree it was running longer in. A value that is not a
+positive number is refused before the run rather than quietly becoming 45
+minutes. The output cap counts bytes rather than UTF-16 code units, and is
+enforced on the chunk that crosses it rather than the one after, so a run that
+stops on that chunk is still marked cut short; a cap landing inside a multi-byte
+character drops the partial sequence rather than rendering it as a replacement
+character. `CPR_CODEX_MAX_OUTPUT_BYTES` sets it.
+
+The wait for `close` is bounded as well. `close` waits on every holder of the
+inherited stdout pipe rather than on Codex alone, so a descendant that outlived
+Codex without letting go held a review that had already finished open
+indefinitely, terminal and all. Past a grace, whatever still holds the pipe is
+ended — which also means the run marker is not cleared while something is still
+reading the worktree.
+
+Deferred out of 0.9.8 rather than written after it. Three rounds of Codex review
+returned sixteen findings across the release; by the third every other area had
+gone quiet and this one held the only P1, so it was taken out so the security
+work could land. All four findings it was parked on are fixed above.
+
+A fourth round, this one against the fixes themselves, returned three more — and
+every one of them is the same invariant at a site that had not been given it:
+Codex's process group has to be gone before the run marker is released. The
+deadline settled on `close` and walked away from the SIGKILL it had armed, since
+an unreferenced timer does not outlive the process that armed it. `runIsLive`
+asked after two processes and never after the group they led, so a descendant
+outliving both read as a finished review and freed `clean` to take the worktree
+it was reading. And SIGQUIT was missing from the forwarded signals, which left
+Ctrl-\ as one key on the keyboard that still reproduced the whole parked P1.
+Each is fixed with a regression case that fails without it.
+
+A fifth round returned three more, and this time two of them were the end of the
+line rather than another site. A cap of `0.5` passed "positive and finite" and
+then reached `Buffer.subarray`, which truncates a fractional endpoint to nothing
+while the counter advances by the fraction — so the cap retained no bytes at all
+and the run reported no review while Codex was producing one. Both settings take
+whole numbers now. And the bound on `close` was not a bound: a descendant that
+leaves the process group never receives the signal meant to end it, and the wait
+had no other end. It settles once the group is empty — which it already is when
+the holder is outside it — keeps what Codex produced, and says what happened.
+Releasing the read end is half of that: settling a promise does not end a process
+whose pipe handle is still keeping the loop alive, which is the same hang wearing
+a different hat.
+
+**Deliberately left. These are limits, not defects waiting on a fix here:**
+
+- **A descendant that leaves the process group cannot be contained.** `setsid`
+  puts one beyond every signal a parent can send and beyond the probe that asks
+  whether the group is empty. Containing it needs a cgroup or a Job Object;
+  POSIX offers a parent nothing stronger than the process group. The wrapper
+  bounds its own wait instead of pretending otherwise, and says so on the way
+  out.
+- **Ctrl-Z does not suspend Codex.** SIGTSTP goes to the wrapper's foreground
+  group and Codex is deliberately not in it, so Node stops while Codex runs on
+  with its watchdog frozen. Forwarding suspension and propagating SIGCONT is job
+  control — a different subject from bounding a run, and its own change.
+- **Windows.** Ending a process tree there needs a Job Object or `taskkill /T
+  /F`, and without one the direct kill leaves whatever holds the pipe behind.
+  The README says Windows is not tested and not supported, and this does not
+  change that.
+
 ## 0.9.8
 
 Findings from an external review of 0.9.7, plus one defect found while checking

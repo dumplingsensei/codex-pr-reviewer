@@ -1195,8 +1195,341 @@ git -C "$CLONE_DIR" remote set-url origin "$SYMUP"
 # plants a link, the other refuses the prepare that would clear it. Rebuild it
 # so what follows is testing what it says it is.
 prepare_sym >/dev/null 2>&1
-check "the worktree is healthy again" \
+check "the worktree is healthy again before the timeout cases" \
   "$([[ -e "$SYMWT/escape.txt" && ! -L "$SYMWT/escape.txt" ]] && echo ready || echo not-ready)" "ready"
+
+note "a timeout is a failed review, not an empty one"
+# Regression: the timeout note was appended to codex's own output, so a run that
+# reached the deadline having produced nothing came back with that note as its
+# whole body. The wrapper's `body ? 0 : …` saw something non-empty and reported
+# success for a review that does not exist.
+cat >"$SANDBOX/hang.sh" <<HOOK
+#!/bin/sh
+sleep 30 &
+echo \$! >"$SANDBOX/grandchild.pid"
+sleep 25
+HOOK
+chmod +x "$SANDBOX/hang.sh"
+
+rm -f "$SANDBOX/grandchild.pid"
+out="$(env PATH="$STUBS:$PATH" CPR_CODEX_TIMEOUT_MS=1500 \
+  CPR_STUB_RUN_HOOK="$SANDBOX/hang.sh" CPR_STUB_RUN_BODY= \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+timeout_status=$?
+check "an output-less timeout does not report success" "$timeout_status" "124"
+saved="$(ls -t "$CACHE/reviews"/o__r-pr7-*.md 2>/dev/null | head -1)"
+contains "the document says there was no review" "$(cat "$saved")" "_Codex produced no review output._"
+contains "and says why" "$(cat "$saved")" "did not finish"
+contains "codex's own status is recorded" "$(head -1 "$saved")" "exit=124"
+
+# Regression: the deadline signalled only the direct codex pid, so a hung
+# grandchild outlived both signals and went on reading the worktree after the
+# marker protecting it was gone. Codex is spawned as its own process group
+# leader now, and the signals address the group.
+sleep 1
+gpid="$(cat "$SANDBOX/grandchild.pid" 2>/dev/null || echo 0)"
+check "the fixture recorded a grandchild" "$([[ "$gpid" -gt 0 ]] && echo yes || echo no)" "yes"
+check "the whole process tree was ended" \
+  "$(kill -0 "$gpid" 2>/dev/null && echo alive || echo gone)" "gone"
+
+note "an interrupt reaches codex, not only the wrapper"
+# Regression: `detached: true` put codex in its own process group, which is what
+# took it out of the terminal's foreground group — so Ctrl-C, or a SIGTERM to
+# the wrapper, arrived at Node alone. Node died where it stood, the `finally`
+# clearing the run marker never ran, and codex went on reading the worktree
+# behind a marker naming a pid that was no longer there, which `clean` reads as
+# a finished review. The wrapper forwards the signal to the group now, and
+# unwinds through its own cleanup before re-raising it.
+markers_left() { ls "$CACHE/runs"/*.json 2>/dev/null | wc -l | tr -d ' '; }
+reviews_saved() { ls "$CACHE/reviews"/o__r-pr7-*.md 2>/dev/null | wc -l | tr -d ' '; }
+
+# One hook holds a job the stub put in the background, the other holds only
+# foreground descendants. Both are codex's children; they differ in what their
+# own shell does to SIGINT, which is why the cases below signal them differently.
+cat >"$SANDBOX/hold-detached.sh" <<HOOK
+#!/bin/sh
+echo \$\$ >"$SANDBOX/hook.pid"
+sleep 40 &
+echo \$! >"$SANDBOX/detached.pid"
+# Holds codex's process group without holding its pipe, and outlives the
+# SIGTERM that empties the rest. \`close\` then arrives while the group is still
+# occupied, which is the ordering that used to resolve an interrupted run as a
+# finished one — saving a document for a review that was stopped.
+( trap '' TERM; sleep 1 ) >/dev/null 2>&1 &
+sleep 35
+HOOK
+cat >"$SANDBOX/hold-foreground.sh" <<HOOK
+#!/bin/sh
+echo \$\$ >"$SANDBOX/hook.pid"
+sleep 35
+HOOK
+chmod +x "$SANDBOX/hold-detached.sh" "$SANDBOX/hold-foreground.sh"
+
+# A review is only interruptible once its marker exists: signalling before that
+# would prove nothing about clearing it.
+start_interruptible_review() {
+  local hook="$1" ready="$2"
+  rm -f "$CACHE/runs"/*.json "$SANDBOX/hook.pid" "$SANDBOX/detached.pid"
+  env PATH="$STUBS:$PATH" CPR_STUB_RUN_HOOK="$hook" CPR_STUB_RUN_BODY= \
+    node "$SCRIPT" review o/r#7 --repo o/r --no-prepare >"$SANDBOX/interrupt.out" 2>&1 &
+  review_pid=$!
+  for _ in $(seq 1 100); do
+    [[ -s "$ready" && "$(markers_left)" != "0" ]] && break
+    sleep 0.1
+  done
+}
+
+saved_before="$(reviews_saved)"
+start_interruptible_review "$SANDBOX/hold-detached.sh" "$SANDBOX/detached.pid"
+check "the run is marked before it can be interrupted" "$(markers_left)" "1"
+# The wrapper is the half that can be killed outright, and SIGKILL runs no
+# handler — so the marker has to name codex too, or a `clean` reads a review
+# that is still running as finished and deletes the worktree it is reading.
+contains "the marker names codex itself, not only the wrapper" \
+  "$(cat "$CACHE/runs"/*.json)" '"codexPid"'
+held="$(cat "$SANDBOX/detached.pid")"
+
+kill -TERM "$review_pid"
+wait "$review_pid"; term_status=$?
+check "the wrapper dies of the signal it was sent" "$term_status" "143"
+check "codex's own descendant goes with it" \
+  "$(kill -0 "$held" 2>/dev/null && echo alive || echo gone)" "gone"
+check "and the run marker is cleared on the way out" "$(markers_left)" "0"
+contains "the interruption is reported rather than silent" \
+  "$(cat "$SANDBOX/interrupt.out")" "no review was saved"
+check "an interrupted review saves no document" "$(reviews_saved)" "$saved_before"
+
+# Ctrl-C is the case this exists for, and 130 is what a `for pr in …; do` loop
+# reads as "the person stopped this" rather than "the review failed on its own".
+# Only foreground descendants here: a job the stub backgrounded has SIGINT
+# ignored by its own shell, which is what the SIGKILL escalation covers and not
+# what this case is about.
+start_interruptible_review "$SANDBOX/hold-foreground.sh" "$SANDBOX/hook.pid"
+hook_pid="$(cat "$SANDBOX/hook.pid")"
+kill -INT "$review_pid"
+wait "$review_pid"; int_status=$?
+check "an interrupt reports as an interrupt" "$int_status" "130"
+check "codex's descendants are gone" \
+  "$(kill -0 "$hook_pid" 2>/dev/null && echo alive || echo gone)" "gone"
+check "and its marker with them" "$(markers_left)" "0"
+
+note "Ctrl-\\ is forwarded like the other stop signals"
+# Regression: SIGQUIT was missing from the forwarded list, so the one stop key
+# that is not Ctrl-C still killed the wrapper on its default disposition — no
+# `finally`, no marker cleared, codex left running in its own process group.
+# That is the parked P1 exactly, reached from a different key.
+ulimit -c 0  # re-raising SIGQUIT is a real quit; no core files in CI
+start_interruptible_review "$SANDBOX/hold-foreground.sh" "$SANDBOX/hook.pid"
+quit_hook="$(cat "$SANDBOX/hook.pid")"
+kill -QUIT "$review_pid"
+# Grouped with stderr closed: bash announces a background job that died of
+# SIGQUIT ("Quit: 3"), which reads as a failure next to the test names.
+{ wait "$review_pid"; quit_status=$?; } 2>/dev/null
+check "the wrapper dies of the quit signal" "$quit_status" "131"
+check "codex's descendants go with it" \
+  "$(kill -0 "$quit_hook" 2>/dev/null && echo alive || echo gone)" "gone"
+check "and the marker with them" "$(markers_left)" "0"
+
+note "a deadline does not return while the tree it signalled is alive"
+# Regression: the deadline armed a SIGKILL and then settled before it fired. A
+# descendant that ignores SIGTERM and redirected its own stdout never held the
+# pipe, so `close` arrived the moment codex exited: the run resolved, the marker
+# was cleared, and the process exited — taking the unreferenced SIGKILL timer
+# with it and leaving that descendant reading a worktree nothing protected any
+# more. The same race CI found on the interrupt path, on the deadline.
+cat >"$SANDBOX/outlive-deadline.sh" <<HOOK
+#!/bin/sh
+( trap '' TERM; sleep 3 ) >/dev/null 2>&1 &
+echo \$! >"$SANDBOX/deadline-holder.pid"
+echo "a partial finding"
+sleep 25
+HOOK
+chmod +x "$SANDBOX/outlive-deadline.sh"
+
+rm -f "$CACHE/runs"/*.json "$SANDBOX/deadline-holder.pid"
+env PATH="$STUBS:$PATH" CPR_CODEX_TIMEOUT_MS=1500 \
+  CPR_STUB_RUN_HOOK="$SANDBOX/outlive-deadline.sh" CPR_STUB_RUN_BODY= \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare >/dev/null 2>&1
+deadline_holder="$(cat "$SANDBOX/deadline-holder.pid" 2>/dev/null || echo 0)"
+check "the run does not return before its tree is gone" \
+  "$(kill -0 "$deadline_holder" 2>/dev/null && echo alive || echo gone)" "gone"
+check "and the marker is released only then" "$(markers_left)" "0"
+saved="$(ls -t "$CACHE/reviews"/o__r-pr7-*.md 2>/dev/null | head -1)"
+contains "a timeout still saves what codex managed to produce" "$(cat "$saved")" "a partial finding"
+
+note "a group that outlives its leader still holds a clean back"
+# Regression: `runIsLive` probed two positive pids, the wrapper's and codex's.
+# Kill the wrapper outright and let codex exit leaving a descendant in its
+# detached group, and neither answers — while the group, and its read of the
+# worktree, are still there. `clean` took that for a finished review.
+
+# Both read JSON through a function rather than inline: a multi-line `node -e`
+# nested inside a command substitution is what `plan_digest` above avoids too.
+marker_codex_pid() {
+  node -e 'const fs = require("node:fs");
+    const dir = process.argv[1];
+    const file = fs.readdirSync(dir).find((n) => n.endsWith(".json"));
+    process.stdout.write(String(JSON.parse(fs.readFileSync(dir + "/" + file, "utf8")).codexPid || 0));' \
+    "$CACHE/runs"
+}
+clean_verdict_for_pr7() {
+  node "$SCRIPT" clean --pr 7 --repo o/r --dry-run --json 2>/dev/null | node -e '
+    let raw = "";
+    process.stdin.on("data", (c) => (raw += c));
+    process.stdin.on("end", () => {
+      try {
+        const result = JSON.parse(raw);
+        process.stdout.write(result.running && result.running.length ? "held" : "would-remove");
+      } catch { process.stdout.write("unreadable"); }
+    });'
+}
+
+cat >"$SANDBOX/outlive-leader.sh" <<HOOK
+#!/bin/sh
+echo \$\$ >"$SANDBOX/orphan.pid"
+sleep 20
+HOOK
+chmod +x "$SANDBOX/outlive-leader.sh"
+
+rm -f "$CACHE/runs"/*.json "$SANDBOX/orphan.pid"
+env PATH="$STUBS:$PATH" CPR_STUB_RUN_HOOK="$SANDBOX/outlive-leader.sh" CPR_STUB_RUN_BODY= \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare >/dev/null 2>&1 &
+orphan_wrapper=$!
+for _ in $(seq 1 100); do
+  [[ -s "$SANDBOX/orphan.pid" && "$(markers_left)" != "0" ]] && break
+  sleep 0.1
+done
+orphan_codex="$(marker_codex_pid)"
+check "the marker recorded codex's own pid" \
+  "$([[ "$orphan_codex" -gt 0 ]] && echo yes || echo no)" "yes"
+
+# Both recorded processes go outright: a SIGKILLed wrapper runs no handler, and
+# codex exiting after it is what leaves the group without either of them.
+kill -9 "$orphan_wrapper" 2>/dev/null
+kill -9 "$orphan_codex" 2>/dev/null
+wait "$orphan_wrapper" 2>/dev/null
+orphan="$(cat "$SANDBOX/orphan.pid")"
+check "the descendant is still in the group" \
+  "$(kill -0 "$orphan" 2>/dev/null && echo alive || echo gone)" "alive"
+check "and neither recorded process is" \
+  "$(kill -0 "$orphan_codex" 2>/dev/null && echo alive || echo gone)" "gone"
+check "clean holds the worktree back rather than taking it" "$(clean_verdict_for_pr7)" "held"
+kill -9 "$orphan" 2>/dev/null
+rm -f "$CACHE/runs"/*.json
+
+note "a bound that would not bind is refused before the paid run"
+# Regression: `Number(env) || default` let a negative deadline through to
+# setTimeout, which treats a delay it cannot use as "now" — so a mistyped
+# CPR_CODEX_TIMEOUT_MS killed every review the instant it started, and only
+# after the worktree was prepared and the run recorded.
+out="$(env PATH="$STUBS:$PATH" CPR_CODEX_TIMEOUT_MS=-1 \
+  CPR_STUB_RUN_BODY="a finding nobody should have paid for" \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+check "the run fails instead of starting" "$?" "1"
+contains "and names the variable" "$out" "CPR_CODEX_TIMEOUT_MS must be a positive whole number"
+check "codex was never run" "$(printf '%s' "$out" | grep -c 'nobody should have paid')" "0"
+check "and nothing was left marked as running" "$(markers_left)" "0"
+
+note "the output cap is counted in bytes, on the chunk that crosses it"
+# Regression: the cap compared `String.length` — UTF-16 code units — against a
+# number of bytes, so the ceiling moved with the alphabet. It also checked
+# before appending, so the chunk that crossed the limit was kept whole and
+# `truncated` was only set if another chunk followed: a run that stopped right
+# there saved an over-cap document with nothing on it saying so.
+accented="$(node -e 'process.stdout.write("é".repeat(200))')"
+count_accents() {
+  node -e 'const t = require("node:fs").readFileSync(process.argv[1], "utf8");
+    process.stdout.write(String((t.match(/é/g) || []).length));' "$1"
+}
+env PATH="$STUBS:$PATH" CPR_CODEX_MAX_OUTPUT_BYTES=64 CPR_STUB_RUN_BODY="$accented" \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare >/dev/null 2>&1
+saved="$(ls -t "$CACHE/reviews"/o__r-pr7-*.md 2>/dev/null | head -1)"
+contains "the document says it was cut short" "$(cat "$saved")" "bytes of output were kept"
+check "the cap is 64 bytes, not 64 characters" "$(count_accents "$saved")" "32"
+
+# A cap counted in bytes can land inside a character. The decoder holds an
+# incomplete sequence back rather than emitting a replacement character for it,
+# so the document ends on the last whole character instead of on a "?".
+env PATH="$STUBS:$PATH" CPR_CODEX_MAX_OUTPUT_BYTES=65 CPR_STUB_RUN_BODY="$accented" \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare >/dev/null 2>&1
+saved="$(ls -t "$CACHE/reviews"/o__r-pr7-*.md 2>/dev/null | head -1)"
+check "a cap inside a character keeps the whole ones before it" "$(count_accents "$saved")" "32"
+check "and emits no replacement character" \
+  "$(node -e 'const t = require("node:fs").readFileSync(process.argv[1], "utf8");
+     process.stdout.write(t.includes("�") ? "mangled" : "clean");' "$saved")" "clean"
+
+note "a descendant still holding the pipe cannot hang a finished review"
+# Regression: `close` waits on every holder of the inherited stdout pipe, not
+# only on codex — so a grandchild that outlived codex without letting go held a
+# review that had already finished open indefinitely, terminal and all. On
+# Windows that is the whole of the remaining finding, and Windows is not
+# supported; on a platform that is, the wait for `close` is bounded now.
+cat >"$SANDBOX/stranded.sh" <<HOOK
+#!/bin/sh
+# Inherits stdout and outlives its parent, which is what holds \`close\` open.
+sleep 30 &
+echo \$! >"$SANDBOX/holder.pid"
+HOOK
+chmod +x "$SANDBOX/stranded.sh"
+
+rm -f "$SANDBOX/holder.pid"
+started=$SECONDS
+env PATH="$STUBS:$PATH" CPR_STUB_RUN_HOOK="$SANDBOX/stranded.sh" \
+  CPR_STUB_RUN_BODY="a finding that arrived before the hang" \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare >/dev/null 2>&1
+check "the review returns rather than hanging on the pipe" \
+  "$([[ $((SECONDS - started)) -lt 20 ]] && echo returned || echo hung)" "returned"
+saved="$(ls -t "$CACHE/reviews"/o__r-pr7-*.md 2>/dev/null | head -1)"
+contains "with codex's output intact" "$(cat "$saved")" "a finding that arrived before the hang"
+holder="$(cat "$SANDBOX/holder.pid" 2>/dev/null || echo 0)"
+check "and the holder ended rather than left running" \
+  "$(kill -0 "$holder" 2>/dev/null && echo alive || echo gone)" "gone"
+
+note "a holder outside the process group ends the wait instead of the review"
+# Regression: the bound on `close` was not one. `close` waits on every holder of
+# the inherited pipe, and a descendant that left the group — `setsid`, which is
+# what `detached` does — never receives the signal sent to end it. The wait had
+# no other end, so the review hung for as long as that process cared to live.
+# Nothing here can reach it; what this can do is stop waiting and save what
+# codex did produce.
+cat >"$SANDBOX/escape-group.sh" <<'HOOK'
+#!/bin/sh
+# A grandchild in a session of its own, holding the inherited stdout: outside
+# every signal the wrapper can send, and holding `close` open regardless.
+node -e 'const { spawn } = require("node:child_process");
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
+    detached: true,
+    stdio: ["ignore", 1, "ignore"]
+  });
+  require("node:fs").writeFileSync(process.env.CPR_TEST_ESCAPEE, String(child.pid));
+  child.unref();'
+echo "a finding that outlived its keeper"
+HOOK
+chmod +x "$SANDBOX/escape-group.sh"
+
+rm -f "$CACHE/runs"/*.json "$SANDBOX/escapee.pid"
+started=$SECONDS
+env PATH="$STUBS:$PATH" CPR_TEST_ESCAPEE="$SANDBOX/escapee.pid" \
+  CPR_STUB_RUN_HOOK="$SANDBOX/escape-group.sh" CPR_STUB_RUN_BODY= \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare >/dev/null 2>&1
+check "the review returns rather than waiting on a pipe nothing can close" \
+  "$([[ $((SECONDS - started)) -lt 20 ]] && echo returned || echo hung)" "returned"
+saved="$(ls -t "$CACHE/reviews"/o__r-pr7-*.md 2>/dev/null | head -1)"
+contains "keeping what codex produced before it" "$(cat "$saved")" "a finding that outlived its keeper"
+check "and the marker is released, not abandoned" "$(markers_left)" "0"
+kill -9 "$(cat "$SANDBOX/escapee.pid" 2>/dev/null || echo 0)" 2>/dev/null || true
+
+note "a cap that cannot be counted in whole bytes is refused"
+# Regression: 0.5 passed "positive and finite", then `Buffer.subarray(0, 0.5)`
+# truncated the endpoint to nothing while the counter advanced by the fraction.
+# The first chunk retained zero bytes, so the run reported no review at all
+# while codex was producing one.
+out="$(env PATH="$STUBS:$PATH" CPR_CODEX_MAX_OUTPUT_BYTES=0.5 \
+  CPR_STUB_RUN_BODY="a finding nobody should have paid for" \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+check "the run fails instead of keeping nothing" "$?" "1"
+contains "and says what it wants" "$out" "must be a positive whole number"
+check "codex was never run" "$(printf '%s' "$out" | grep -c 'nobody should have paid')" "0"
 
 note "a degraded manifest entry fails before the paid run"
 # Regression: --no-prepare checked headSha and mergeBase only where they were

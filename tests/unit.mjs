@@ -33,7 +33,9 @@ const {
   reviewFileMatches,
   selectReviewFiles,
   reviewSnapshotDigest,
-  runIsLive
+  runIsLive,
+  codexTimeoutMs,
+  codexMaxOutputBytes
 } = await import(path.join(pluginDir, "scripts", "pr-workspace.mjs"));
 
 let failures = 0;
@@ -325,11 +327,45 @@ eq("pid 0", runIsLive(marker({ pid: 0 })), false);
 eq("a negative pid", runIsLive(marker({ pid: -1 })), false);
 eq("a pid that is a string", runIsLive(marker({ pid: String(process.pid) })), false);
 eq("no pid at all", runIsLive(marker({ pid: undefined })), false);
+// The wrapper can be killed outright — SIGKILL runs no handler, so nothing
+// clears the marker — while codex carries on in its own process group, reading
+// the worktree. A marker that knew only the wrapper reported that as finished.
+eq("a dead wrapper but a live codex", runIsLive(marker({ pid: 999_999, codexPid: process.pid })), true);
+eq("both processes gone", runIsLive(marker({ pid: 999_999, codexPid: 999_998 })), false);
+eq("a codex pid that identifies nothing", runIsLive(marker({ pid: 999_999, codexPid: 0 })), false);
 // Another machine's pid cannot be probed from here, so the age cap is all there
 // is: believed while fresh, gone once it is not.
 eq("a fresh run on another host", runIsLive(marker({ host: "elsewhere", pid: 999_999 }), Date.now(), "here"), true);
 eq("a stale run on another host", runIsLive(marker({ host: "elsewhere", startedAt: longAgo }), Date.now(), "here"), false);
 eq("the same host, injected", runIsLive(marker({ host: "here", pid: 0 }), Date.now(), "here"), false);
+
+describe("codexTimeoutMs");
+// `Number(env) || default` sent three different mistakes to one place. A
+// negative value is truthy and reaches setTimeout, which treats a delay it
+// cannot use as "now" — so a review died the instant it began rather than
+// running unbounded, which is the opposite of what a longer deadline was for.
+const minutes = (n) => n * 60 * 1000;
+eq("the default when unset", codexTimeoutMs({}), minutes(45));
+eq("the default when empty", codexTimeoutMs({ CPR_CODEX_TIMEOUT_MS: "" }), minutes(45));
+eq("a plain value", codexTimeoutMs({ CPR_CODEX_TIMEOUT_MS: "1500" }), 1500);
+throws("a negative deadline", () => codexTimeoutMs({ CPR_CODEX_TIMEOUT_MS: "-1" }));
+throws("a deadline of zero", () => codexTimeoutMs({ CPR_CODEX_TIMEOUT_MS: "0" }));
+throws("a deadline with a unit on it", () => codexTimeoutMs({ CPR_CODEX_TIMEOUT_MS: "45m" }));
+// Past the marker TTL a run outlives the only thing keeping `clean` off its
+// worktree; past 2**31-1 ms the timer fires immediately. The clamp answers
+// both, and says so on stderr — the warnings below the test names are it.
+eq("clamped to the run marker", codexTimeoutMs({ CPR_CODEX_TIMEOUT_MS: String(minutes(720)) }), minutes(355));
+eq("never past the timer ceiling", codexTimeoutMs({ CPR_CODEX_TIMEOUT_MS: "99999999999" }) <= 2 ** 31 - 1, true);
+
+describe("codexMaxOutputBytes");
+eq("the default when unset", codexMaxOutputBytes({}), 32 * 1024 * 1024);
+eq("a configured cap", codexMaxOutputBytes({ CPR_CODEX_MAX_OUTPUT_BYTES: "64" }), 64);
+throws("a cap of nothing", () => codexMaxOutputBytes({ CPR_CODEX_MAX_OUTPUT_BYTES: "0" }));
+// Both of these count things, and a fraction reached `Buffer.subarray`, which
+// truncates a fractional endpoint to nothing while the counter advances by the
+// fraction — a cap of 0.5 kept no bytes and reported no review.
+throws("a fractional cap", () => codexMaxOutputBytes({ CPR_CODEX_MAX_OUTPUT_BYTES: "0.5" }));
+throws("a fractional deadline", () => codexTimeoutMs({ CPR_CODEX_TIMEOUT_MS: "1500.5" }));
 
 describe("tool grants");
 // Posting is the one irreversible act here, so only the command that posts may
