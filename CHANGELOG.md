@@ -5,6 +5,138 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.8
+
+Findings from an external review of 0.9.7, plus one defect found while checking
+its claims.
+
+- **Command grants were never being applied.** Every command pre-approved
+  `pr-workspace.mjs` with an unquoted rule, while the prompts invoke the script
+  quoted — and Bash rules match the command text, quotes included. The rule
+  therefore matched nothing the prompts ever wrote, so every helper call fell
+  through to a permission prompt and the narrowing the README described was not
+  in effect. The rules now carry the quotes the prompts use, verified against
+  the real matcher rather than assumed.
+- **Grants are scoped by subcommand.** `review` and `sweep` may run `doctor`,
+  `prepare`, and `review`; `list` may run `list`; `clean` may run `clean`. The
+  wildcard they replaced pre-approved every subcommand from every command, so a
+  review session could run `clean` — worktrees, branches, and refs — without
+  crossing a permission boundary. `tests/unit.mjs` now pins the whole matrix,
+  including that each prompt only invokes what it grants.
+- **`clean` no longer takes a `git` grant.** It verifies its own removals and
+  reports what is still in the repository afterwards, so the `git -C` rule that
+  existed for two read-only checks — and that also matched `reset`, `branch -D`,
+  and `config` — is gone. An entry with anything remaining is an incomplete
+  removal: non-zero exit, record kept, retryable.
+- **A pull request cannot point the reviewer out of its worktree.** Every git
+  this plugin runs sets `core.symlinks=false`, so a symlink in the diff is
+  checked out as a small regular file holding the link text. `-s read-only`
+  bounds writes, not reads, on every platform, so a link was a path into
+  anything the account could read. The index still records mode 120000, so the
+  diff and `status` are unchanged.
+- **Host and base identity are checked with the head.** The remote must be on
+  the host that served the PR's metadata, read off the API's own URL rather than
+  guessed; and the fetched base must contain GitHub's `baseRefOid`. Ancestry,
+  not equality — a base branch legitimately advances between the API call and
+  the fetch, and demanding equality would abort on ordinary traffic.
+- **Bounding a Codex run is deferred.** There is still no timeout and no cap on
+  retained output. That work was written here and taken out again: three rounds
+  of Codex review found six defects in it, the last of them caused by the fix
+  before — spawning Codex in its own process group let the timeout reach its
+  descendants, and stopped Ctrl-C reaching them, so an interrupted review left
+  Codex running behind a marker naming a dead pid that `clean` would read as
+  finished. It is a reliability improvement sitting in a release of security
+  fixes, and it was the only part still generating findings, so it moved to its
+  own branch rather than holding the rest up. Outstanding there: forward
+  termination signals to the group, clamp the configured timeout below the run
+  marker's TTL, count the output cap in bytes and enforce it on the chunk that
+  crosses it, and either support Windows process trees or keep the platform
+  unsupported.
+- **`doctor`'s host fallback is asserted against a stated `GH_HOST`.** The test
+  read whatever the environment had, so running the suite in an Enterprise
+  shell failed on a code path behaving exactly as designed.
+- **macOS and Linux are the supported platforms**, stated in the README rather
+  than implied by the CI matrix. Windows is untested: the read-only sandbox
+  reads the whole filesystem there, and the process handling assumes POSIX.
+
+Found by a Codex review of this branch, which is the workflow this plugin
+exists for:
+
+- **A push URL no longer vouches for a fetch remote.** `git remote -v` prints
+  both, and the parser kept whichever matched, so a remote fetching from a
+  mirror and pushing to GitHub satisfied the new host check and then fetched
+  from the mirror — the substitution the check was added to stop. Only the
+  `(fetch)` URL is read now, and it is parsed rather than split, since a remote
+  URL may contain spaces.
+- **A cached clone is checked against its `origin`** before being refreshed into
+  service, so one that has been repointed is re-cloned rather than reused. Only
+  a positive mismatch disqualifies it: an origin that cannot be parsed is
+  absence of evidence, and rejecting on it would re-clone on every run for
+  anyone whose git rewrites URLs. Replacing a clone that manifest entries still
+  live in is refused outright and names them — the removal takes the git
+  directory every linked worktree there depends on, including one a paid review
+  may be reading.
+
+  This briefly namespaced the clone path by host as well. That was reverted: the
+  manifest key, worktree path and branch names all still came from the slug, so
+  storage moved and identity did not, and on every existing install the previous
+  clone became referenced by nothing and unreachable by any `clean` — a
+  guaranteed leak for everyone in exchange for a collision almost nobody hits.
+  Two hosts serving one slug still share prepared state, now recorded in
+  SECURITY.md as a known limitation; separating them properly needs the host in
+  every identity and a migration, which is its own change.
+- **A worktree from an older checkout is rebuilt rather than refreshed.**
+  `core.symlinks=false` governs how a link is written, so it does nothing to one
+  already on disk: an unchanged blob is not rewritten by `checkout --force`, and
+  git under that setting reads the existing link as clean, so the upgrade path
+  kept exactly the escape the setting removes.
+- **A registered worktree is recognised as one.** The check compared a resolved
+  path against git's, which reports physical paths, so any symlink in the cache
+  path — a symlinked `~/.cache`, macOS's `/var` — made every re-run tear the
+  worktree down and check it out again. Re-running cheaply is a documented
+  property and quietly was not one. Both comparisons go through one helper now,
+  which resolves via the nearest existing ancestor: the same question is asked
+  in `clean` after the directory is gone, where `realpath` returns the string it
+  was handed and the two sides stop agreeing.
+- **The live-symlink check covers the path reviews actually take.** It ran only
+  in `prepare`, while the documented flow is `review --no-prepare`, so a
+  worktree prepared before `core.symlinks=false` existed reached Codex with its
+  links intact. It is read as bytes rather than text, too: git allows any byte
+  but NUL and `/` in a filename, and decoding as UTF-8 turned a link whose name
+  is not valid UTF-8 into a path that does not exist — which the check read as
+  no link at all. Covered on Linux in CI; macOS rejects such a name outright.
+- **An unknown flag is an error.** It used to become a positional, on the
+  grounds that `#42` had to survive — which it does anyway, having no leading
+  dash. What actually arrived there were typos: `--modle gpt-5.6` was read as
+  the pull request and the review ran at the default model. `--effort` is
+  validated too, being the one value interpolated into a quoted `-c` string.
+- **A degraded manifest entry fails before the paid run, not after.**
+  `--no-prepare` checked `headSha` and `mergeBase` only where they were present,
+  while the saved document quotes both unconditionally — so an entry missing one
+  bought a full review and then threw while writing it.
+- **`doctor` no longer calls every install in use stale.** Claude Code writes
+  `.in_use/<pid>` into the installed copy to record which versions are live, so
+  it exists in the cache and never in the marketplace source — and comparing it
+  reported `stale: true` for any plugin that was actually being used. The remedy
+  that warning prints could not clear it either, since the file returns on the
+  next run. `review.md` and `sweep.md` both put that signal in front of the user,
+  so an always-on version of it is the same as having none. `.in_use` joins
+  `UNCOMPARED`; the exclusion is exactly that path, and a real difference sitting
+  beside the marker is still found.
+- A marker that cannot be written now says so: the review proceeds, but
+  unprotected from a concurrent `clean`, and that is worth a line.
+- `keptReviews` counts review documents rather than directory entries, so a
+  `.DS_Store` is no longer reported as a saved review.
+- CI pins `@anthropic-ai/claude-code` for the pull request gate — it published
+  twelve times in ten days, and `--strict` fails on rules that move between
+  releases — with a scheduled job validating against `latest`, since Dependabot
+  cannot carry a version inside a `run:` block.
+- README: the safety section claimed a command could reach posting, which none
+  has since 0.9.0, and described `clean`'s grant as two read-only `git` rules
+  when it was one that could mutate. The `clean` usage omitted the required
+  `--confirm-plan`. `list` gained the untrusted-input rules the other commands
+  carry — it renders pull request titles from a GitHub-wide search.
+
 ## 0.9.7
 
 - The marketplace is named `dumplingsensei-plugins`, and the copyright holder in

@@ -20,6 +20,8 @@ const pluginDir = path.join(root, "plugins", "codex-pr-reviewer");
 const {
   parsePrRef,
   remoteUrlToSlug,
+  remoteUrlParts,
+  apiHostOf,
   stripWorktreePaths,
   canonicalSlug,
   slugToDir,
@@ -93,6 +95,61 @@ eq("nested group path", remoteUrlToSlug("https://github.com/org/sub/repo.git"), 
 eq("not a URL", remoteUrlToSlug("not-a-url"), null);
 eq("empty", remoteUrlToSlug(""), null);
 
+describe("remoteUrlParts");
+// The host used to be discarded, so every URL form below normalized to the same
+// owner/repo whatever served it — and a remote for `o/r` on a mirror matched a
+// pull request whose metadata came from GitHub. Both halves are compared now.
+eq("scp-style carries its host", remoteUrlParts("git@github.com:cli/cli.git"), {
+  host: "github.com",
+  slug: "cli/cli"
+});
+eq("https carries its host", remoteUrlParts("https://github.com/cli/cli"), {
+  host: "github.com",
+  slug: "cli/cli"
+});
+eq("ssh:// with userinfo", remoteUrlParts("ssh://git@github.com/cli/cli.git"), {
+  host: "github.com",
+  slug: "cli/cli"
+});
+// A port is not part of the host's identity, and neither is the user.
+eq("a port does not change the host", remoteUrlParts("ssh://git@github.com:22/cli/cli"), {
+  host: "github.com",
+  slug: "cli/cli"
+});
+eq("host case is not significant", remoteUrlParts("https://GitHub.COM/cli/cli").host, "github.com");
+eq("an enterprise host is reported as itself", remoteUrlParts("https://ghe.corp.example/team/proj.git"), {
+  host: "ghe.corp.example",
+  slug: "team/proj"
+});
+// The case this exists for: same slug, different host.
+eq(
+  "the same repository on another host is another host",
+  remoteUrlParts("https://gitlab.example.com/cli/cli").host ===
+    remoteUrlParts("https://github.com/cli/cli").host,
+  false
+);
+eq("not a URL", remoteUrlParts("not-a-url"), null);
+
+describe("apiHostOf");
+// Read off the URL the API returned, not guessed from the environment: GH_HOST
+// describes `gh`'s default, which is not necessarily where this PR came from.
+eq("from the PR url", apiHostOf({ url: "https://github.com/cli/cli/pull/1" }), "github.com");
+eq(
+  "an enterprise PR url",
+  apiHostOf({ url: "https://ghe.corp.example/team/proj/pull/9" }),
+  "ghe.corp.example"
+);
+// GH_HOST is the fallback this reads, so the suite has to say which value it is
+// asserting about. Left to the ambient environment, an Enterprise user running
+// the tests got a failure from a code path behaving exactly as intended.
+const savedGhHost = process.env.GH_HOST;
+delete process.env.GH_HOST;
+eq("falls back to github.com when there is no url", apiHostOf({}), "github.com");
+process.env.GH_HOST = "ghe.corp.example";
+eq("and to GH_HOST where one is configured", apiHostOf({}), "ghe.corp.example");
+if (savedGhHost === undefined) delete process.env.GH_HOST;
+else process.env.GH_HOST = savedGhHost;
+
 describe("stripWorktreePaths");
 eq(
   "rewrites a cited file path",
@@ -152,6 +209,25 @@ const shipped = hashPluginDir(pluginDir);
 eq("hashes the command prompts", shipped.has("commands/review.md"), true);
 eq("keys are relative to the root", shipped.has("scripts/pr-workspace.mjs"), true);
 eq("a tree matches itself", diffFileHashes(shipped, hashPluginDir(pluginDir)), []);
+
+// Claude Code writes `.in_use/<pid>` into the installed copy to record which
+// versions are live. Hashing it made every plugin in actual use report stale,
+// with a remedy that could not clear it — the file returns on the next run.
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "cpr-hash-"));
+fs.mkdirSync(path.join(scratch, "commands"), { recursive: true });
+fs.writeFileSync(path.join(scratch, "commands", "review.md"), "a prompt\n");
+fs.mkdirSync(path.join(scratch, ".in_use"), { recursive: true });
+fs.writeFileSync(path.join(scratch, ".in_use", "4242"), '{"pid":4242}\n');
+const walked = hashPluginDir(scratch);
+eq("the live-use marker is not hashed", [...walked.keys()], ["commands/review.md"]);
+// Narrow on purpose: everything that is not on the list still counts.
+fs.writeFileSync(path.join(scratch, "commands", "extra.md"), "another prompt\n");
+eq(
+  "a real file beside it still is",
+  [...hashPluginDir(scratch).keys()].sort(),
+  ["commands/extra.md", "commands/review.md"]
+);
+fs.rmSync(scratch, { recursive: true, force: true });
 
 describe("reviewStamp");
 // The matcher below anchors on the shape of this stamp. If the two ever drift,
@@ -260,16 +336,60 @@ describe("tool grants");
 // hold a grant that can reach it — and it reaches it through the script, not
 // through `gh`. A blanket Bash(gh:*) would also carry `gh pr review`,
 // `gh pr merge`, and `gh api` into commands that must never use them.
-for (const command of ["review.md", "list.md", "sweep.md", "clean.md"]) {
-  const front = fs.readFileSync(path.join(pluginDir, "commands", command), "utf8").split("---")[1];
-  const grants = /allowed-tools:(.*)/.exec(front)[1];
+const grantsOf = (command) =>
+  /allowed-tools:(.*)/.exec(
+    fs.readFileSync(path.join(pluginDir, "commands", command), "utf8").split("---")[1]
+  )[1];
+
+// Which subcommands of the helper each command may run. `clean` is the one
+// destructive subcommand, so it appears in exactly one row — reviewing a pull
+// request and deleting worktrees are different jobs and get different grants.
+// A wildcard over the whole script made every command able to run every
+// subcommand, which is what these assertions exist to stop coming back.
+const HELPER_GRANTS = {
+  "review.md": ["doctor", "prepare", "review"],
+  "sweep.md": ["doctor", "prepare", "review"],
+  "list.md": ["list"],
+  "clean.md": ["clean"]
+};
+const SUBCOMMANDS = ["doctor", "prepare", "review", "list", "clean"];
+
+for (const [command, allowed] of Object.entries(HELPER_GRANTS)) {
+  const grants = grantsOf(command);
   eq(`${command} has no blanket gh grant`, grants.includes("Bash(gh:*)"), false);
   eq(`${command} has no blanket git grant`, grants.includes("Bash(git:*)"), false);
+  // `git -C` is a prefix, not a promise: it also matches reset, branch -D and
+  // config. `clean` verifies its own removals, so nothing needs it.
+  eq(`${command} has no git -C grant`, grants.includes("Bash(git -C"), false);
+  // The wildcard this replaced pre-approved every subcommand at once.
+  eq(
+    `${command} does not grant the whole script`,
+    /pr-workspace\.mjs"? \*\)/.test(grants),
+    false
+  );
+  for (const sub of SUBCOMMANDS) {
+    eq(
+      `${command} ${allowed.includes(sub) ? "grants" : "withholds"} ${sub}`,
+      grants.includes(`pr-workspace.mjs" ${sub} *)`),
+      allowed.includes(sub)
+    );
+  }
 }
-const reviewGrants = /allowed-tools:(.*)/.exec(
-  fs.readFileSync(path.join(pluginDir, "commands", "review.md"), "utf8")
-)[1];
+
+const reviewGrants = grantsOf("review.md");
 eq("review.md reaches gh only through the script", reviewGrants.includes("gh"), false);
+
+// The rule has to match the command the prompt actually writes, quotes and all.
+// A rule without them never matched the quoted invocation these prompts
+// prescribe, so every helper call fell through to a permission prompt and the
+// scoping below described a boundary that was not being applied.
+for (const [command, allowed] of Object.entries(HELPER_GRANTS)) {
+  const body = fs.readFileSync(path.join(pluginDir, "commands", command), "utf8");
+  const invoked = [...body.matchAll(/node "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/pr-workspace\.mjs" (\w+)/g)]
+    .map((match) => match[1]);
+  const ungranted = [...new Set(invoked)].filter((sub) => !allowed.includes(sub));
+  eq(`${command} runs only what it grants`, ungranted, []);
+}
 
 describe("release stamps");
 // Each command prompt names the version it was written for, and compares it at

@@ -31,21 +31,25 @@ some are wrong, so the useful step is reading them and writing your own comment.
 Every Codex run passes `-s read-only`, the plugin never executes a PR's build or
 tests, and local paths are stripped from review output before it is saved.
 
-A pull request is code written by a stranger, so two things it could otherwise
-reach are closed off. Codex runs with project documents disabled, so an
-`AGENTS.md` in the diff cannot become instructions to the reviewer reading it.
-And every git this plugin runs has hooks and LFS filters neutralised, because
-checkout writes the PR's bytes to disk before Codex's sandbox exists — a repo
-that puts hooks in the tree, as Husky does, would otherwise run one.
+A pull request is code written by a stranger, so what it could otherwise reach
+is closed off. Codex runs with project documents disabled, so an `AGENTS.md` in
+the diff cannot become instructions to the reviewer reading it. Every git this
+plugin runs has hooks and LFS filters neutralised, because checkout writes the
+PR's bytes to disk before Codex's sandbox exists — a repo that puts hooks in the
+tree, as Husky does, would otherwise run one. And symlinks are checked out as
+plain files naming their target rather than as links: `-s read-only` bounds what
+Codex may write, not what it may read, so a link committed in a diff would
+otherwise be a path out of the worktree and into the rest of your filesystem.
 
 Codex can fail and still print text, so "the file exists" is not evidence a
 review happened. Each saved review records the exit status of its run in the
 first line, which is where to look when the output reads oddly.
 
-`/codex-pr-reviewer:review` pre-approves one Bash rule — this plugin's own script
-by its full path — so it reaches `git` and `gh` through code that checks what it
-is doing, and never holds a direct `gh` grant that would also carry `gh pr
-review` and `gh pr merge`.
+Each command pre-approves this plugin's own script by its full path, and only
+the subcommands it actually uses: `review` and `sweep` get `doctor`, `prepare`,
+and `review`; `list` gets `list`; `clean` gets `clean`. So the destructive
+subcommand is not reachable from a review, and no command holds a direct `gh`
+grant, which would also carry `gh pr review` and `gh pr merge`.
 
 Deleting is guarded the same way round. `/codex-pr-reviewer:clean` never removes
 a review unless `--purge-reviews` asks, not even under `--all` — a review cannot

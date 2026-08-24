@@ -870,6 +870,30 @@ out="$(doctor_json "$INSTALLED")"
 check "an in-sync copy is not stale" "$(printf '%s' "$out" | field stale)" "false"
 contains "in-sync copy names its marketplace" "$(printf '%s' "$out" | field plugin.detail)" "matches test-mk"
 
+# Regression: Claude Code records which versions are live by writing
+# `.in_use/<pid>` into the *installed* copy, so that path exists in the cache and
+# never in the marketplace source. Comparing it reported every plugin that was
+# actually being used as stale — permanently, because the remedy the warning
+# prints cannot remove a file that reappears on the next run. review.md and
+# sweep.md both put that signal in front of the user, so an always-on version of
+# it is the same as having none.
+#
+# Left in place deliberately: every staleness assertion below now runs with the
+# marker present, which is the state a real install is always in.
+mkdir -p "$INSTALLED/.in_use"
+echo '{"pid":4242}' >"$INSTALLED/.in_use/4242"
+out="$(doctor_json "$INSTALLED")"
+check "a live-use marker does not make a copy stale" "$(printf '%s' "$out" | field stale)" "false"
+
+# The exclusion has to be exactly that one path. An edit sitting beside the
+# marker must still be found, or the fix has traded a false alarm for a blind spot.
+printf 'a command that only exists in the install\n' >"$INSTALLED/commands/leftover.md"
+out="$(doctor_json "$INSTALLED")"
+check "a real difference beside the marker is still found" \
+  "$(printf '%s' "$out" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>console.log(JSON.parse(s).checks.find(c=>c.name==="plugin").changed.join(",")))')" \
+  "commands/leftover.md"
+rm -f "$INSTALLED/commands/leftover.md"
+
 # The source tree itself is never stale: `claude --plugin-dir <source>` and a
 # symlinked install both run the very directory they would be compared against.
 out="$(doctor_json "$MK/plugins/codex-pr-reviewer")"
@@ -904,6 +928,302 @@ rm -f "$CONFIG/plugins/known_marketplaces.json"
 out="$(doctor_json "$INSTALLED")"
 check "no known marketplace is not stale" "$(printf '%s' "$out" | field stale)" "false"
 contains "no source is stated plainly" "$(printf '%s' "$out" | field plugin.detail)" "no local source"
+
+# ---------------------------------------------------------------------------
+
+note "an unrecognized flag is an error, not a pull request"
+# Regression: unknown flags fell through to positionals, on the stated grounds
+# that `#42` had to survive — which it does anyway, having no leading dash.
+# What actually landed there were typos: `--modle` was read as the PR to review
+# and the run went ahead at the default model, silently.
+out="$(node "$SCRIPT" review 42 --repo o/r --modle gpt-5.6 --dry-run 2>&1)"
+contains "a mistyped flag is rejected" "$out" "Unknown option \`--modle\`"
+out="$(node "$SCRIPT" review 42 --repo o/r --context --dry-run 2>&1)"
+contains "a retired flag keeps its own explanation" "$out" "it appended a positional prompt"
+
+note "--effort is validated before codex is paid for"
+# It is the one option interpolated into a quoted `-c` string rather than
+# passed as its own argv entry, so it has to be a value and not a fragment.
+out="$(node "$SCRIPT" review 42 --repo o/r --effort 'high" -c foo="bar' --dry-run 2>&1)"
+contains "a value that would break out of the quotes is refused" "$out" "is not a reasoning effort"
+out="$(node "$SCRIPT" review 42 --repo o/r --effort xhigh --dry-run 2>&1)"
+contains "a real effort still reaches codex" "$out" 'model_reasoning_effort="xhigh"'
+
+# ---------------------------------------------------------------------------
+
+note "prepare against a synthetic GitHub (stub gh)"
+# The first fixture that drives `prepare` itself. Everything above hand-writes a
+# manifest, which cannot reach the fetch, the identity checks, or the checkout —
+# the three places the PR's own bytes are handled.
+SYMUP="$SANDBOX/sym-upstream"
+mkdir -p "$SYMUP" && git -C "$SYMUP" init --quiet -b main
+git -C "$SYMUP" config user.email t@t && git -C "$SYMUP" config user.name t
+echo base >"$SYMUP/f.txt"
+git -C "$SYMUP" add -A && git -C "$SYMUP" commit --quiet -m base
+git -C "$SYMUP" checkout --quiet -b feature
+# The payload: a link out of the worktree, committed by the pull request.
+ln -s /etc/passwd "$SYMUP/escape.txt"
+echo change >>"$SYMUP/f.txt"
+git -C "$SYMUP" add -A && git -C "$SYMUP" commit --quiet -m "add a link out of the tree"
+git -C "$SYMUP" update-ref refs/pull/7/head refs/heads/feature
+git -C "$SYMUP" checkout --quiet main
+
+HEAD_OID="$(git -C "$SYMUP" rev-parse refs/pull/7/head)"
+BASE_OID="$(git -C "$SYMUP" rev-parse refs/heads/main)"
+
+# A `gh` that serves this one pull request and clones from the synthetic
+# upstream, so `prepare` runs its real code path with no network.
+#
+# The fetch has to reach a local repository while the *identity* checks see what
+# git would really contact, and those two cannot be reconciled with `insteadOf`:
+# `git remote -v` reports the rewritten URL, which is the honest answer and the
+# one the host check wants. So the fixture takes the cache-clone route instead,
+# which is what preparing someone else's repository does anyway.
+mkdir -p "$SANDBOX/ghstub"
+cat >"$SANDBOX/ghstub/gh" <<'GHSTUB'
+#!/bin/sh
+case "${1:-}" in
+  --version) echo "gh version 0.0.0 (stub)"; exit 0 ;;
+  auth) echo "Logged in to github.com account stub"; exit 0 ;;
+  pr) cat "$CPR_PR_JSON"; exit 0 ;;
+  repo)
+    # gh repo clone <slug> <dir> -- <git args…>
+    [ "${2:-}" = "clone" ] || { echo "gh stub: unsupported $*" >&2; exit 1; }
+    dir="$4"
+    shift 4
+    [ "${1:-}" = "--" ] && shift
+    exec git clone "$@" "$CPR_UPSTREAM" "$dir"
+    ;;
+esac
+echo "gh stub: unsupported $*" >&2
+exit 1
+GHSTUB
+chmod +x "$SANDBOX/ghstub/gh"
+
+write_pr_json() {
+  cat >"$SANDBOX/pr.json" <<JSON
+{"number":7,"title":"a pull request with a link","url":"https://github.com/o/r/pull/7",
+ "state":"OPEN","isDraft":false,"isCrossRepository":false,"baseRefName":"main",
+ "baseRefOid":"$1","headRefOid":"$HEAD_OID","author":{"login":"someone"},
+ "additions":1,"deletions":0,"changedFiles":1}
+JSON
+}
+
+# Runs from a directory that is not a repository, so the cache clone is chosen
+# the way it is for any repository the user does not already have.
+SYMCWD="$SANDBOX/not-a-repo"
+mkdir -p "$SYMCWD"
+prepare_sym() {
+  ( cd "${CPR_TEST_CWD:-$SYMCWD}" && env PATH="$SANDBOX/ghstub:$STUBS:$PATH" \
+      CPR_PR_JSON="$SANDBOX/pr.json" CPR_UPSTREAM="$SYMUP" \
+      node "$SCRIPT" prepare o/r#7 "$@" 2>&1 )
+}
+
+write_pr_json "$BASE_OID"
+out="$(prepare_sym)"
+SYMWT="$CACHE/worktrees/o__r/pr-7"
+check "prepare built the worktree" "$([[ -d "$SYMWT" ]] && echo yes || echo no)" "yes"
+
+# Regression: `-s read-only` bounds what codex may write, not what it may read,
+# so a symlink committed in a pull request was a path out of the worktree and
+# into anything the account could read. core.symlinks=false makes it a file.
+check "a symlink in the PR is not a symlink on disk" \
+  "$([[ -L "$SYMWT/escape.txt" ]] && echo link || echo file)" "file"
+check "it holds the link text instead of the target's contents" \
+  "$(cat "$SYMWT/escape.txt")" "/etc/passwd"
+# The index still records mode 120000, so the diff Codex is handed is unchanged
+# and the worktree is not dirty — which `review --no-prepare` refuses outright.
+#
+# Both run with the setting the plugin forces on every git it causes to run,
+# because that is the only git that ever reads this worktree. A git without it
+# sees a plain file where the index says symlink and calls it modified, which is
+# why this is set for the whole process rather than at checkout time.
+symgit() { git -c core.symlinks=false -C "$SYMWT" "$@"; }
+check "the checkout is still clean" \
+  "$(symgit status --porcelain --untracked-files=all | wc -l | tr -d ' ')" "0"
+check "the entry is still a symlink as far as the diff is concerned" \
+  "$(symgit diff --raw codex-pr/o__r/7-base -- escape.txt | grep -c 120000)" "1"
+
+note "identity: metadata and code have to be the same repository"
+# Regression: the head was checked against the API and the base was not, so the
+# review boundary could be computed from a history GitHub never described.
+# Ancestry rather than equality: a base branch legitimately advances between the
+# API call and the fetch, and equality would abort on ordinary traffic.
+git -C "$SYMUP" checkout --quiet --orphan unrelated
+git -C "$SYMUP" commit --quiet --allow-empty -m "a different line of development"
+UNRELATED_OID="$(git -C "$SYMUP" rev-parse HEAD)"
+git -C "$SYMUP" checkout --quiet main
+
+write_pr_json "$UNRELATED_OID"
+out="$(prepare_sym)"
+contains "a base the fetch does not contain stops the run" "$out" "does not contain the base commit"
+contains "and points at --clone" "$out" "--clone"
+
+# A base that has simply moved on is not a mismatch: the recorded commit is
+# still an ancestor of what was fetched.
+git -C "$SYMUP" checkout --quiet main
+echo more >>"$SYMUP/f.txt"
+git -C "$SYMUP" commit --quiet -am "main moves on"
+write_pr_json "$BASE_OID"
+out="$(prepare_sym)"
+contains "a base that merely advanced is accepted" "$out" "Preparing worktree"
+
+note "a remote for the right repo on the wrong host is not that repo"
+# Regression: every remote URL form normalized to the same owner/repo whatever
+# host served it, so a mirror could supply the code for metadata that came from
+# GitHub — the one invariant SECURITY.md names outright. The right response is
+# not to fail: it is to stop treating that checkout as this repository, say so,
+# and fetch from the host the metadata actually came from.
+MIRROR="$SANDBOX/mirror"
+git clone --quiet "$SYMUP" "$MIRROR"
+git -C "$MIRROR" remote set-url origin "https://gitlab.example.com/o/r"
+out="$(CPR_TEST_CWD="$MIRROR" prepare_sym)"
+contains "the mismatch is named" "$out" "gitlab.example.com"
+contains "and the host that did serve it is too" "$out" "github.com served this pull request"
+contains "the run continues against the cache clone" "$out" "Preparing worktree"
+
+note "a push URL does not vouch for the remote that fetches"
+# Regression: `git remote -v` prints two lines per remote, `(fetch)` and
+# `(push)`, and the parser kept the first two fields of either. A remote that
+# fetched from a mirror and pushed to GitHub therefore matched on its push URL,
+# and the fetch then went to the mirror — the exact substitution the host check
+# was added to stop. The fixture above had one URL for both, which is why the
+# check passed its own test while the hole was open.
+git -C "$MIRROR" remote set-url origin "https://gitlab.example.com/o/r"
+git -C "$MIRROR" remote set-url --push origin "https://github.com/o/r"
+check "the fixture really does push to github" \
+  "$(git -C "$MIRROR" remote -v | grep -c 'github.com/o/r (push)')" "1"
+out="$(CPR_TEST_CWD="$MIRROR" prepare_sym)"
+contains "the fetch host is the one judged" "$out" "gitlab.example.com"
+contains "so the remote is still refused" "$out" "github.com served this pull request"
+
+check "the cache clone is keyed by slug, as all prepared state is" \
+  "$([[ -d "$CACHE/repos/o__r" ]] && echo yes || echo no)" "yes"
+
+note "a worktree from an older checkout is rebuilt, not reused"
+# Regression: core.symlinks=false governs how a link is written, so it only acts
+# where something is written. A worktree prepared before it was set kept real
+# symlinks, and refreshing did not replace them — an unchanged blob is not
+# rewritten by `checkout --force`, and git under this setting reads the existing
+# link as clean, so `clean -fdx` left it too. Upgrading therefore kept exactly
+# the escape the setting exists to remove.
+rm -f "$SYMWT/escape.txt"
+ln -s /etc/passwd "$SYMWT/escape.txt"
+check "the fixture put a real link back" \
+  "$([[ -L "$SYMWT/escape.txt" ]] && echo link || echo file)" "link"
+out="$(prepare_sym)"
+contains "the stale worktree is rebuilt" "$out" "rebuilding it"
+check "and the link is a plain file again" \
+  "$([[ -L "$SYMWT/escape.txt" ]] && echo link || echo file)" "file"
+
+# The other half of the same check. A worktree with nothing wrong with it has to
+# be refreshed in place, and was not being: `git worktree list` reports a
+# worktree by its real path while this one is built from the cache root as
+# configured, so any symlink on the way — a symlinked `~/.cache`, or macOS's
+# `/var` — made a registered worktree read as absent, and every re-run became a
+# teardown and a fresh checkout. Re-running cheaply is a documented property.
+# The inode is what tells the two apart: a rebuild recreates the directory.
+before_inode="$(ls -id "$SYMWT" | awk '{print $1}')"
+out="$(prepare_sym)"
+after_inode="$(ls -id "$SYMWT" | awk '{print $1}')"
+check "a healthy worktree is reused, not rebuilt" "$after_inode" "$before_inode"
+check "and nothing claimed a rebuild" "$(printf '%s' "$out" | grep -c 'rebuilding it')" "0"
+
+note "a legacy symlink is caught on the path the review actually takes"
+# Regression: the live-link check lived only in `ensureWorktree`, so it ran
+# during `prepare`. The documented review flow is `review --no-prepare`, which
+# goes through `verifyPreparedWorktree` instead — so a worktree prepared before
+# core.symlinks=false existed reached codex with its real links intact, and git
+# under that setting does not report one as a modification either.
+rm -f "$SYMWT/escape.txt"
+ln -s /etc/passwd "$SYMWT/escape.txt"
+out="$(env PATH="$STUBS:$PATH" CPR_STUB_RUN_BODY="a finding nobody should have paid for" \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+contains "the review refuses to start" "$out" "still holds real symlinks"
+contains "and says how to fix it" "$out" "without --no-prepare"
+check "codex was never run" "$(printf '%s' "$out" | grep -c 'nobody should have paid')" "0"
+
+# A name git accepts and UTF-8 cannot represent. Decoding the `-z` listing as
+# text replaced these bytes, so `lstat` looked at a different path, missed, and
+# the catch read that as "no link here" — the check passing while the link it
+# was looking for sat in the worktree. Read as bytes, it is found.
+#
+# Only where the filesystem allows it. Linux lets a filename be any bytes but
+# NUL and `/`; APFS and HFS+ reject a name that is not valid UTF-8 outright, so
+# on macOS the case cannot be built at all and asserting on it would pass
+# vacuously. CI covers this on ubuntu.
+badname="$(printf 'bad-\xff-name')"
+if ( cd "$SANDBOX" && ln -s /dev/null "$badname" ) 2>/dev/null; then
+  rm -f "$SANDBOX/$badname"
+  ( cd "$SYMUP" && git checkout --quiet feature \
+    && ln -s /etc/passwd "$badname" \
+    && git add -A && git commit --quiet -m "a link with an undecodable name" \
+    && git update-ref refs/pull/7/head refs/heads/feature && git checkout --quiet main )
+  HEAD_OID="$(git -C "$SYMUP" rev-parse refs/pull/7/head)"
+  write_pr_json "$BASE_OID"
+  prepare_sym >/dev/null 2>&1
+  check "the odd name is checked out as a file" \
+    "$([[ -e "$SYMWT/$badname" && ! -L "$SYMWT/$badname" ]] && echo file || echo link-or-missing)" "file"
+  rm -f "$SYMWT/$badname"
+  ln -s /etc/passwd "$SYMWT/$badname"
+  out="$(env PATH="$STUBS:$PATH" CPR_STUB_RUN_BODY=x \
+    node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+  contains "a link whose name is not UTF-8 is still found" "$out" "still holds real symlinks"
+  prepare_sym >/dev/null 2>&1
+else
+  printf '  skip non-UTF-8 filename case: this filesystem rejects the name\n'
+fi
+
+note "a clone that other PRs live in is not replaced underneath them"
+# Regression: the mismatch branch fell through to `rmSync(recursive)`, which
+# removes the common git directory every linked worktree in that clone depends
+# on — including one a paid review may be reading — while their manifest records
+# stay behind describing state that no longer works.
+CLONE_DIR="$CACHE/repos/o__r"
+check "the fixture has a cache clone with an entry in it" \
+  "$([[ -d "$CLONE_DIR" ]] && echo yes || echo no)" "yes"
+git -C "$CLONE_DIR" remote set-url origin "https://github.com/someone/else"
+out="$(prepare_sym 2>&1)"
+contains "the replacement is refused" "$out" "would break"
+contains "and it names what would break" "$out" "o/r#7"
+check "nothing was removed" "$([[ -d "$CLONE_DIR" ]] && echo present || echo gone)" "present"
+check "and the worktree still stands" "$([[ -d "$SYMWT" ]] && echo present || echo gone)" "present"
+# Put it back so the rest of the section runs against a healthy clone.
+git -C "$CLONE_DIR" remote set-url origin "$SYMUP"
+
+# Both sections above deliberately leave the worktree unfit to review — one
+# plants a link, the other refuses the prepare that would clear it. Rebuild it
+# so what follows is testing what it says it is.
+prepare_sym >/dev/null 2>&1
+check "the worktree is healthy again" \
+  "$([[ -e "$SYMWT/escape.txt" && ! -L "$SYMWT/escape.txt" ]] && echo ready || echo not-ready)" "ready"
+
+note "a degraded manifest entry fails before the paid run"
+# Regression: --no-prepare checked headSha and mergeBase only where they were
+# present, while the saved document quotes both unconditionally — so an entry
+# missing one bought a whole review and then threw while writing it.
+node -e '
+  const fs = require("node:fs");
+  const file = process.argv[1];
+  const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
+  for (const entry of manifest.entries) if (entry.key === "o/r#7") delete entry.mergeBase;
+  fs.writeFileSync(file, JSON.stringify(manifest, null, 2));
+' "$CACHE/manifest.json"
+out="$(env PATH="$STUBS:$PATH" CPR_STUB_RUN_BODY="a finding nobody should have paid for" \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+contains "the missing field is named" "$out" "no usable \`mergeBase\`"
+check "and codex was never run" "$(printf '%s' "$out" | grep -c 'nobody should have paid')" "0"
+
+note "clean verifies its own removals"
+# Regression: verification was two `git -C` commands in the prompt, and that
+# grant is a prefix — it also matched reset, branch -D, and config. The run now
+# reads the repository back itself, which is also the only place with no gap
+# between the removal and the check.
+out="$(cclean --pr o/r#7 2>&1)"
+clean_status=$?
+contains "a complete removal says so" "$out" "verified gone from the repository"
+check "the worktree really is gone" "$([[ -e "$SYMWT" ]] && echo present || echo gone)" "gone"
+check "clean exits zero when nothing remains" "$clean_status" "0"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]

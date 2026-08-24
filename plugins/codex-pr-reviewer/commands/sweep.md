@@ -1,7 +1,7 @@
 ---
 description: Review several GitHub pull requests with Codex and produce one digest
 argument-hint: '[--repo owner/repo] [--limit N] [--order smallest|newest] [--parallel] [--effort low|medium|high|xhigh]'
-allowed-tools: Read, Grep, Glob, AskUserQuestion, Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs *), Bash(gh pr list:*), Bash(gh pr view:*), Bash(gh search prs:*)
+allowed-tools: Read, Grep, Glob, AskUserQuestion, Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" doctor *), Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" prepare *), Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" review *), Bash(gh pr list:*), Bash(gh pr view:*), Bash(gh search prs:*)
 ---
 
 Review a batch of pull requests with Codex and summarize them together.
@@ -18,7 +18,7 @@ Core constraint:
 
 1. **Preflight** with `node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" doctor --json`. Stop on failure.
 
-   **These instructions were written for plugin version `0.9.7`.** If the report's `pluginVersion` differs, or `stale` is true, the prompts this session loaded are older than the installed plugin. Say so — with the `plugin` check's `remedy` — as part of step 4's confirmation, so the user decides whether to spend a paid batch on outdated instructions. It is a warning rather than a block: a batch that runs on slightly older instructions still produces reviews the user reads themselves.
+   **These instructions were written for plugin version `0.9.8`.** If the report's `pluginVersion` differs, or `stale` is true, the prompts this session loaded are older than the installed plugin. Say so — with the `plugin` check's `remedy` — as part of step 4's confirmation, so the user decides whether to spend a paid batch on outdated instructions. It is a warning rather than a block: a batch that runs on slightly older instructions still produces reviews the user reads themselves.
 
 2. **Gather candidates.** These must be the *same* sources `/codex-pr-reviewer:list` uses, or the batch is drawn from a different queue than the one the user was shown:
    - With `--repo owner/repo`:
