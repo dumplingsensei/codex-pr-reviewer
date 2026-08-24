@@ -15,6 +15,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 
 const REF_NS = "refs/codex-pr-reviewer";
@@ -1958,6 +1959,12 @@ async function commandReview(argv, cwd) {
     return 0;
   }
 
+  // Resolved before anything is recorded or spawned. A value typed wrong is a
+  // configuration error, and the moment to say so is before a marker, a
+  // worktree and a paid run are all in play.
+  const timeoutMs = codexTimeoutMs();
+  const maxOutputBytes = codexMaxOutputBytes();
+
   ensurePrivateDir(reviewsDir());
   const outputPath = reviewOutputPath(entry);
   // Declared before the run rather than after it: a concurrent `clean` needs to
@@ -1969,6 +1976,8 @@ async function commandReview(argv, cwd) {
     // With --json the review text must not share stdout with the JSON payload.
     const { status, stdout, timedOut, truncated } = await streamCodex(codexArgs, {
       echo: options.json ? process.stderr : process.stdout,
+      timeoutMs,
+      maxOutputBytes,
       onSpawn: (pid) => recordCodexPid(runMarker, pid)
     });
 
@@ -1979,10 +1988,16 @@ async function commandReview(argv, cwd) {
     const body = stripWorktreePaths(stdout, entry.worktree).trim();
     const notes = [];
     if (truncated) {
-      notes.push(`_Only the first ${CODEX_MAX_OUTPUT_BYTES} bytes of output were kept; this review is cut short._`);
+      notes.push(`_Only the first ${maxOutputBytes} bytes of output were kept; this review is cut short._`);
     }
     if (timedOut) {
-      notes.push(`_Codex was stopped after ${Math.round(CODEX_TIMEOUT_MS / 60_000)} minutes and did not finish._`);
+      // Whatever unit the number is legible in: a deadline under a minute is
+      // only ever a test's, and "0 minutes" describes nothing.
+      const stoppedAfter =
+        timeoutMs >= 60_000
+          ? `${Math.round(timeoutMs / 60_000)} minutes`
+          : `${Math.round(timeoutMs / 1000)} seconds`;
+      notes.push(`_Codex was stopped after ${stoppedAfter} and did not finish._`);
     }
     // `||` not `??`: a failed `codex --version` yields "", which is not nullish.
     const model = options.model || run("codex", ["--version"]).stdout.trim() || "codex";
@@ -2049,13 +2064,71 @@ async function commandReview(argv, cwd) {
  * xhigh effort, and comfortably inside the six-hour marker TTL, so a run cannot
  * outlive the marker that protects its own worktree.
  */
-const CODEX_TIMEOUT_MS = Number(process.env.CPR_CODEX_TIMEOUT_MS) || 45 * 60 * 1000;
+const CODEX_TIMEOUT_DEFAULT_MS = 45 * 60 * 1000;
+
+// What the deadline has to land before. Saving the document and re-recording
+// the manifest entry both happen after the deadline could fire, and both are on
+// the wrong side of a marker that has already expired.
+const CODEX_TIMEOUT_MARKER_GRACE_MS = 5 * 60 * 1000;
 
 // The child's stdout was accumulated into one string with no ceiling, so a
 // codex that streamed without stopping grew the heap until Node died — losing
 // the review along with it. Everything still reaches the terminal as it
 // arrives; only what is retained for the saved document is capped.
-const CODEX_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+const CODEX_MAX_OUTPUT_DEFAULT_BYTES = 32 * 1024 * 1024;
+
+/**
+ * A positive number from the environment, or the default.
+ *
+ * `Number(env) || fallback` was wrong three ways over, and every one of them
+ * ended in the same place. A negative value is truthy, so it went straight to
+ * `setTimeout`, which treats a delay it cannot use as "now" — every review
+ * dying the instant it began. So does anything past 2³¹−1 ms, which the timers
+ * clamp to 1 rather than reject. And `0`, the one value a person means as "no
+ * limit", quietly became the default instead.
+ *
+ * Refused rather than replaced: a deadline typed wrong is a configuration
+ * error, and one that silently becomes 45 minutes is a configuration error
+ * found out about in 45 minutes.
+ */
+function positiveEnvNumber(name, fallback, env = process.env) {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new UserError(
+      `${name} must be a positive number, not ${JSON.stringify(raw)}.`,
+      `Unset it to use the default of ${fallback}.`
+    );
+  }
+  return value;
+}
+
+/**
+ * The deadline this run will use.
+ *
+ * Clamped to the run marker, because a deadline is only a bound if it lands
+ * first: past the TTL, `runIsLive` stops believing a marker whose process is
+ * alive, and a `clean` is free to take the worktree the run is still reading —
+ * so a deadline set beyond it would remove the protection it was lengthening
+ * the run under. Keeping the two in that order also keeps the value under the
+ * timer ceiling, which is the second way this used to fire immediately.
+ */
+export function codexTimeoutMs(env = process.env) {
+  const requested = positiveEnvNumber("CPR_CODEX_TIMEOUT_MS", CODEX_TIMEOUT_DEFAULT_MS, env);
+  const ceiling = RUN_MARKER_TTL_MS - CODEX_TIMEOUT_MARKER_GRACE_MS;
+  if (requested <= ceiling) return requested;
+  log(
+    `Warning: CPR_CODEX_TIMEOUT_MS=${requested} outlasts the run marker that keeps a \`clean\` off this ` +
+      `worktree, so the review would lose that protection before its own deadline. Using ${ceiling}ms.`
+  );
+  return ceiling;
+}
+
+/** How much of codex's output is retained for the saved document. */
+export function codexMaxOutputBytes(env = process.env) {
+  return positiveEnvNumber("CPR_CODEX_MAX_OUTPUT_BYTES", CODEX_MAX_OUTPUT_DEFAULT_BYTES, env);
+}
 
 /**
  * Signals codex and everything it started.
@@ -2106,7 +2179,10 @@ function signalCodexTree(child, signal) {
   }
 }
 
-function streamCodex(args, { echo = process.stdout, timeoutMs = CODEX_TIMEOUT_MS, onSpawn } = {}) {
+function streamCodex(
+  args,
+  { echo = process.stdout, timeoutMs = codexTimeoutMs(), maxOutputBytes = codexMaxOutputBytes(), onSpawn } = {}
+) {
   return new Promise((resolve, reject) => {
     const child = spawn("codex", args, {
       stdio: ["ignore", "pipe", "inherit"],
@@ -2116,6 +2192,7 @@ function streamCodex(args, { echo = process.stdout, timeoutMs = CODEX_TIMEOUT_MS
       detached: CODEX_DETACHED
     });
     let stdout = "";
+    let keptBytes = 0;
     let truncated = false;
     let timedOut = false;
     let interruptedBy = null;
@@ -2187,14 +2264,30 @@ function streamCodex(args, { echo = process.stdout, timeoutMs = CODEX_TIMEOUT_MS
       process.on(signal, forward);
     }
 
-    child.stdout.setEncoding("utf8");
+    // Counted in bytes, which is what the cap is named in. `setEncoding("utf8")`
+    // and `String.length` counted UTF-16 code units instead, so the ceiling
+    // moved with the alphabet — two bytes of Cyrillic or three of CJK arriving
+    // under it as one. The decoder holds an incomplete sequence back rather
+    // than emitting a replacement character for it, which is also what trims
+    // the tail when the cap lands inside a character.
+    const decoder = new StringDecoder("utf8");
     child.stdout.on("data", (chunk) => {
       echo.write(chunk);
-      if (stdout.length >= CODEX_MAX_OUTPUT_BYTES) {
+      if (truncated) return;
+      // Enforced on the chunk that crosses the cap rather than the one after
+      // it. The check used to run before the append, so the crossing chunk was
+      // kept whole — and a run that ended right there was over the cap with
+      // nothing marking it short, because `truncated` needed a further chunk to
+      // ever be set.
+      const room = maxOutputBytes - keptBytes;
+      if (chunk.length > room) {
+        stdout += decoder.write(chunk.subarray(0, room));
+        keptBytes += room;
         truncated = true;
         return;
       }
-      stdout += chunk;
+      stdout += decoder.write(chunk);
+      keptBytes += chunk.length;
     });
     child.on("error", (error) => {
       finish(() =>

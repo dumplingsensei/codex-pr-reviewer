@@ -1308,6 +1308,47 @@ check "codex's descendants are gone" \
   "$(kill -0 "$hook_pid" 2>/dev/null && echo alive || echo gone)" "gone"
 check "and its marker with them" "$(markers_left)" "0"
 
+note "a bound that would not bind is refused before the paid run"
+# Regression: `Number(env) || default` let a negative deadline through to
+# setTimeout, which treats a delay it cannot use as "now" — so a mistyped
+# CPR_CODEX_TIMEOUT_MS killed every review the instant it started, and only
+# after the worktree was prepared and the run recorded.
+out="$(env PATH="$STUBS:$PATH" CPR_CODEX_TIMEOUT_MS=-1 \
+  CPR_STUB_RUN_BODY="a finding nobody should have paid for" \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+check "the run fails instead of starting" "$?" "1"
+contains "and names the variable" "$out" "CPR_CODEX_TIMEOUT_MS must be a positive number"
+check "codex was never run" "$(printf '%s' "$out" | grep -c 'nobody should have paid')" "0"
+check "and nothing was left marked as running" "$(markers_left)" "0"
+
+note "the output cap is counted in bytes, on the chunk that crosses it"
+# Regression: the cap compared `String.length` — UTF-16 code units — against a
+# number of bytes, so the ceiling moved with the alphabet. It also checked
+# before appending, so the chunk that crossed the limit was kept whole and
+# `truncated` was only set if another chunk followed: a run that stopped right
+# there saved an over-cap document with nothing on it saying so.
+accented="$(node -e 'process.stdout.write("é".repeat(200))')"
+count_accents() {
+  node -e 'const t = require("node:fs").readFileSync(process.argv[1], "utf8");
+    process.stdout.write(String((t.match(/é/g) || []).length));' "$1"
+}
+env PATH="$STUBS:$PATH" CPR_CODEX_MAX_OUTPUT_BYTES=64 CPR_STUB_RUN_BODY="$accented" \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare >/dev/null 2>&1
+saved="$(ls -t "$CACHE/reviews"/o__r-pr7-*.md 2>/dev/null | head -1)"
+contains "the document says it was cut short" "$(cat "$saved")" "bytes of output were kept"
+check "the cap is 64 bytes, not 64 characters" "$(count_accents "$saved")" "32"
+
+# A cap counted in bytes can land inside a character. The decoder holds an
+# incomplete sequence back rather than emitting a replacement character for it,
+# so the document ends on the last whole character instead of on a "?".
+env PATH="$STUBS:$PATH" CPR_CODEX_MAX_OUTPUT_BYTES=65 CPR_STUB_RUN_BODY="$accented" \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare >/dev/null 2>&1
+saved="$(ls -t "$CACHE/reviews"/o__r-pr7-*.md 2>/dev/null | head -1)"
+check "a cap inside a character keeps the whole ones before it" "$(count_accents "$saved")" "32"
+check "and emits no replacement character" \
+  "$(node -e 'const t = require("node:fs").readFileSync(process.argv[1], "utf8");
+     process.stdout.write(t.includes("�") ? "mangled" : "clean");' "$saved")" "clean"
+
 note "a degraded manifest entry fails before the paid run"
 # Regression: --no-prepare checked headSha and mergeBase only where they were
 # present, while the saved document quotes both unconditionally — so an entry

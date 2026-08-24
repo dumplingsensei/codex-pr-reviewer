@@ -25,19 +25,25 @@ same harm by a narrower path. A second Ctrl-C stops waiting and kills. The
 marker also records Codex's pid beside the wrapper's, which is the only thing
 that covers a wrapper killed outright, where no handler runs at all.
 
+Both bounds are also the size they claim to be now. `CPR_CODEX_TIMEOUT_MS` is
+validated and clamped to the run marker's TTL: `Number(env) || default` let a
+negative value — and anything past 2³¹−1 ms — reach `setTimeout`, which treats a
+delay it cannot use as "now", so a mistyped deadline killed every review the
+instant it began, and a deadline past the TTL outlived the marker keeping a
+`clean` off the worktree it was running longer in. A value that is not a
+positive number is refused before the run rather than quietly becoming 45
+minutes. The output cap counts bytes rather than UTF-16 code units, and is
+enforced on the chunk that crosses it rather than the one after, so a run that
+stops on that chunk is still marked cut short; a cap landing inside a multi-byte
+character drops the partial sequence rather than rendering it as a replacement
+character. `CPR_CODEX_MAX_OUTPUT_BYTES` sets it.
+
 Deferred out of 0.9.8 rather than written after it. Three rounds of Codex review
 returned sixteen findings across the release; by the third every other area had
 gone quiet and this one held the only P1, so it was taken out so the security
-work could land. That P1 is the interrupt, fixed above. **These remain known and
-unfixed:**
+work could land. That P1 was the interrupt, and it and both bounds findings are
+fixed above. **This remains known and unfixed:**
 
-- **A configured timeout can outlive the run marker.** `CPR_CODEX_TIMEOUT_MS`
-  above six hours passes `RUN_MARKER_TTL_MS`, after which `runIsLive` rejects a
-  marker whose process is alive. Clamp it, or derive the TTL from it.
-- **The output cap is neither in bytes nor enforced on the crossing chunk.**
-  `String.length` counts UTF-16 code units, and the check runs before the
-  append, so the chunk that crosses the limit is kept whole and nothing marks it
-  truncated unless another event follows.
 - **Windows kills only the direct child.** A descendant holding the inherited
   pipe keeps `close` from firing, so the review hangs despite both signals.
   Needs a Job Object or `taskkill /T /F` — or Windows stays unsupported, which
