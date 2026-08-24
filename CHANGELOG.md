@@ -14,17 +14,23 @@ notes stay out of the value that decides whether a review happened, so an
 output-less timeout is a failure rather than a review whose only content is the
 note saying there is none.
 
+Ctrl-C, SIGTERM and SIGHUP now reach that group instead of killing the wrapper
+alone. The signal is forwarded, the run marker is cleared on the way out, and it
+is re-raised so the exit status is the signal's — 130 for an interrupt, which is
+what a `for pr in …; do` loop reads as the person stopping it rather than the
+review failing on its own. Nothing is saved for a review that did not finish.
+What it waits for before settling is the process group emptying, not just Codex
+exiting: clearing the marker while a descendant still reads the worktree is the
+same harm by a narrower path. A second Ctrl-C stops waiting and kills. The
+marker also records Codex's pid beside the wrapper's, which is the only thing
+that covers a wrapper killed outright, where no handler runs at all.
+
 Deferred out of 0.9.8 rather than written after it. Three rounds of Codex review
 returned sixteen findings across the release; by the third every other area had
 gone quiet and this one held the only P1, so it was taken out so the security
-work could land. **These are known and unfixed:**
+work could land. That P1 is the interrupt, fixed above. **These remain known and
+unfixed:**
 
-- **Termination signals are not forwarded to the group.** `detached: true` puts
-  Codex outside the terminal's foreground process group, so Ctrl-C or a SIGTERM
-  to the wrapper kills only Node. Codex and its descendants keep running, the
-  `finally` that clears the run marker never runs, and the marker left behind
-  names a dead pid — which `clean` reads as finished before deleting the
-  worktree still being read. Fixing the bound broke the interrupt.
 - **A configured timeout can outlive the run marker.** `CPR_CODEX_TIMEOUT_MS`
   above six hours passes `RUN_MARKER_TTL_MS`, after which `runIsLive` rejects a
   marker whose process is alive. Clamp it, or derive the TTL from it.

@@ -49,6 +49,22 @@ class UserError extends Error {
   }
 }
 
+/**
+ * A signal the wrapper passed on rather than died of.
+ *
+ * Thrown, not exited on, so the `finally` that clears the run marker still runs
+ * — which is the whole reason the wrapper stays alive to catch the signal at
+ * all — and carried to the top so the exit status can be the signal's rather
+ * than a 1 that would claim the review failed on its own.
+ */
+class Interrupted extends Error {
+  constructor(signal) {
+    super(`Interrupted by ${signal}.`);
+    this.name = "Interrupted";
+    this.signal = signal;
+  }
+}
+
 // Every helper subprocess is bounded: `doctor` is the preflight for every
 // slash command, and a hung credential helper would otherwise hang the plugin.
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -536,13 +552,21 @@ export function runIsLive(marker, now = Date.now(), hostname = os.hostname()) {
   if (marker.host && marker.host !== hostname) return true;
   // Signal 0 sends nothing; it only asks whether the process is there. A
   // non-positive pid addresses a process group, so it never identifies a run.
-  if (!Number.isInteger(marker.pid) || marker.pid <= 0) return false;
-  try {
-    process.kill(marker.pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM"; // running, just not ours to signal
-  }
+  //
+  // Either process still being there means the review is still happening. The
+  // wrapper is the half that can be killed outright — SIGKILL runs no handler,
+  // so nothing clears this marker — while codex, in its own process group,
+  // carries on reading the worktree. A marker that knew only the wrapper called
+  // that finished, and the next `clean` deleted the checkout from under it.
+  const pids = [marker.pid, marker.codexPid].filter((pid) => Number.isInteger(pid) && pid > 0);
+  return pids.some((pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return error.code === "EPERM"; // running, just not ours to signal
+    }
+  });
 }
 
 /**
@@ -627,8 +651,32 @@ function beginRun(entry, reviewPath) {
 }
 
 /**
- * Clears a marker. Called from a `finally`, and a killed process leaves its
- * marker behind — which `runIsLive` reads as gone, and the next `clean` sweeps.
+ * Adds codex's own pid to a marker, once there is one to add.
+ *
+ * `beginRun` writes before codex is spawned, so the marker starts out naming
+ * only the wrapper — and the wrapper is the half that can go without running
+ * anything. Recorded in a second write rather than by delaying the first: the
+ * marker has to be on disk before the paid run starts, not after it.
+ */
+function recordCodexPid(file, codexPid) {
+  if (!file || !Number.isInteger(codexPid) || codexPid <= 0) return;
+  try {
+    const marker = JSON.parse(fs.readFileSync(file, "utf8"));
+    // Same write-then-rename as `beginRun`, and the marker name already carries
+    // this run's pid, so the temporary cannot collide with another run's.
+    const temporary = `${file}.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify({ ...marker, codexPid }, null, 2)}\n`, { mode: 0o600 });
+    fs.renameSync(temporary, file);
+  } catch {
+    // The wrapper's pid is still on disk and the TTL still applies. This costs
+    // the killed-wrapper case only, not the guard itself.
+  }
+}
+
+/**
+ * Clears a marker. Called from a `finally` — including the one an interrupt
+ * now unwinds through — and a process killed outright leaves its marker behind,
+ * which `runIsLive` reads as gone once neither pid answers.
  */
 function endRun(file) {
   if (!file) return;
@@ -1920,7 +1968,8 @@ async function commandReview(argv, cwd) {
     log(`Running: codex ${codexArgs.slice(0, 4).join(" ")} … review --base ${entry.baseBranch}`);
     // With --json the review text must not share stdout with the JSON payload.
     const { status, stdout, timedOut, truncated } = await streamCodex(codexArgs, {
-      echo: options.json ? process.stderr : process.stdout
+      echo: options.json ? process.stderr : process.stdout,
+      onSpawn: (pid) => recordCodexPid(runMarker, pid)
     });
 
     // `body` is codex's output and nothing else, because it is what decides
@@ -2023,6 +2072,25 @@ const CODEX_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
  */
 const CODEX_DETACHED = process.platform !== "win32";
 
+/**
+ * Signals the wrapper forwards to codex instead of dying of.
+ *
+ * Ctrl-C sends SIGINT to the terminal's foreground process group, and
+ * `detached` above deliberately took codex out of it — so the wrapper now
+ * receives the interrupt alone. Left on the default disposition that is the
+ * worst of both: Node dies where it stands, the `finally` that clears the run
+ * marker never runs, and codex goes on reading a worktree whose marker names a
+ * pid that is no longer there — which `clean` reads as a finished review.
+ * Forwarding is what makes the group leadership pay for itself rather than
+ * cost.
+ */
+const FORWARDED_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
+
+// How long codex has to end on the polite signal before it is killed outright.
+// The same grace whether the deadline asked or the user did: something is
+// waiting on the answer either way.
+const CODEX_KILL_GRACE_MS = 10_000;
+
 function signalCodexTree(child, signal) {
   try {
     if (CODEX_DETACHED && Number.isInteger(child.pid)) process.kill(-child.pid, signal);
@@ -2038,26 +2106,86 @@ function signalCodexTree(child, signal) {
   }
 }
 
-function streamCodex(args, { echo = process.stdout, timeoutMs = CODEX_TIMEOUT_MS } = {}) {
+function streamCodex(args, { echo = process.stdout, timeoutMs = CODEX_TIMEOUT_MS, onSpawn } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn("codex", args, {
       stdio: ["ignore", "pipe", "inherit"],
-      // Its own process group, so the timeout below can end the whole tree.
-      // Deliberately not `unref`ed: this process still waits for the review.
+      // Its own process group, so the deadline below and the forwarded signals
+      // can end the whole tree. Deliberately not `unref`ed: this process still
+      // waits for the review.
       detached: CODEX_DETACHED
     });
     let stdout = "";
     let truncated = false;
     let timedOut = false;
+    let interruptedBy = null;
+    let settled = false;
+
+    // A failed spawn has no pid, and nothing to record. Told before anything
+    // else, because the marker is the only thing that can protect this
+    // worktree from a `clean` if the wrapper is killed in the next instant.
+    if (Number.isInteger(child.pid)) onSpawn?.(child.pid);
+
+    // A codex ignoring the polite signal still has to let go of the worktree,
+    // so the second one is not optional. Unreferenced: if the child goes on the
+    // first, this timer must not keep the process alive waiting to fire.
+    const endCodexTree = (signal) => {
+      signalCodexTree(child, signal);
+      setTimeout(() => signalCodexTree(child, "SIGKILL"), CODEX_KILL_GRACE_MS).unref();
+    };
 
     const deadline = setTimeout(() => {
       timedOut = true;
-      signalCodexTree(child, "SIGTERM");
-      // A codex ignoring SIGTERM still has to let go of the worktree, so the
-      // second signal is not optional. Unreferenced: if the child exits on the
-      // first one, this timer must not keep the process alive waiting to fire.
-      setTimeout(() => signalCodexTree(child, "SIGKILL"), 10_000).unref();
+      endCodexTree("SIGTERM");
     }, timeoutMs);
+
+    // Whether anything at all is left in codex's process group.
+    //
+    // The child going is not the tree going: a descendant that ignored the
+    // signal can outlive codex itself, and settling is what lets the run marker
+    // be cleared — which would leave a `clean` free to delete a worktree that
+    // is still being read. The group answers this directly, since signal 0 to a
+    // negative pid fails only once nothing is left to receive it.
+    const treeIsGone = () => {
+      if (!CODEX_DETACHED || !Number.isInteger(child.pid)) return true;
+      try {
+        process.kill(-child.pid, 0);
+        return false;
+      } catch (error) {
+        return error.code !== "EPERM"; // EPERM is something alive we may not signal
+      }
+    };
+
+    const forwarders = new Map();
+
+    // Settling once, and letting the handlers go with it: `error`, `exit` and
+    // `close` can all arrive for one run, and a process left holding a SIGINT
+    // listener after its child is gone no longer stops on Ctrl-C.
+    const finish = (settle) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      for (const [signal, forward] of forwarders) process.off(signal, forward);
+      settle();
+    };
+
+    for (const signal of FORWARDED_SIGNALS) {
+      const forward = () => {
+        if (interruptedBy) {
+          // Insisting. Stop waiting for the tree and go: something may still be
+          // holding the worktree, but a second Ctrl-C is a person saying they
+          // would rather have their terminal back than a tidy exit.
+          signalCodexTree(child, "SIGKILL");
+          finish(() => reject(new Interrupted(interruptedBy)));
+          return;
+        }
+        interruptedBy = signal;
+        clearTimeout(deadline);
+        endCodexTree(signal);
+      };
+      forwarders.set(signal, forward);
+      process.on(signal, forward);
+    }
 
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
@@ -2069,15 +2197,38 @@ function streamCodex(args, { echo = process.stdout, timeoutMs = CODEX_TIMEOUT_MS
       stdout += chunk;
     });
     child.on("error", (error) => {
-      clearTimeout(deadline);
-      reject(
-        error.code === "ENOENT"
-          ? new UserError("`codex` is not installed or not on PATH.", "Run `/codex-pr-reviewer:review` after installing the Codex CLI.")
-          : error
+      finish(() =>
+        reject(
+          error.code === "ENOENT"
+            ? new UserError("`codex` is not installed or not on PATH.", "Run `/codex-pr-reviewer:review` after installing the Codex CLI.")
+            : error
+        )
       );
     });
+    child.on("exit", () => {
+      // Only an interrupted run settles here. A finished one waits for `close`,
+      // which is what guarantees the last of codex's output is in `stdout`
+      // before it is saved — but `close` waits on every holder of the inherited
+      // pipe, and after a kill that can be a descendant that never lets go. An
+      // interrupted run saves nothing, so it has nothing left to wait for, and
+      // must not hang on a pipe to discover that.
+      //
+      // It does wait for the group to empty, though, up to the same grace the
+      // SIGKILL runs on: settling clears the run marker, and clearing it while
+      // a survivor still reads the worktree is the very thing this is here to
+      // stop. Normally the group is already empty and the first look settles.
+      if (!interruptedBy) return;
+      const waitUntil = Date.now() + CODEX_KILL_GRACE_MS;
+      const settleWhenGone = () => {
+        if (treeIsGone() || Date.now() >= waitUntil) {
+          finish(() => reject(new Interrupted(interruptedBy)));
+          return;
+        }
+        setTimeout(settleWhenGone, 50);
+      };
+      settleWhenGone();
+    });
     child.on("close", (status) => {
-      clearTimeout(deadline);
       // `stdout` stays exactly what codex wrote, and the notes travel beside it.
       // Folding them in was worse than untidy: a run that timed out having
       // produced nothing came back with the note as its entire output, so the
@@ -2087,7 +2238,7 @@ function streamCodex(args, { echo = process.stdout, timeoutMs = CODEX_TIMEOUT_MS
       //
       // 124 is the convention `run()` already uses for a timeout, so callers
       // reading a status do not need a second rule for this one.
-      resolve({ status: timedOut ? 124 : status, stdout, timedOut, truncated });
+      finish(() => resolve({ status: timedOut ? 124 : status, stdout, timedOut, truncated }));
     });
   });
 }
@@ -2822,6 +2973,19 @@ if (invokedDirectly) {
       process.exitCode = code ?? 0;
     })
     .catch((error) => {
+      if (error instanceof Interrupted) {
+        // Re-raised rather than exited on: a shell reads 130 as "the user
+        // stopped this", and a `for pr in …; do` loop stops with it. Exiting 1
+        // would say the review failed on its own, which is a different thing
+        // and keeps the loop running. The status is set first so it is still
+        // right if stderr never drains and the callback never comes.
+        process.exitCode = 128 + os.constants.signals[error.signal];
+        process.stderr.write("\nInterrupted — codex was stopped, and no review was saved.\n", () => {
+          process.removeAllListeners(error.signal);
+          process.kill(process.pid, error.signal);
+        });
+        return;
+      }
       if (error instanceof UserError) {
         process.stderr.write(`error: ${error.message}\n`);
         if (error.remedy) process.stderr.write(`${error.remedy}\n`);

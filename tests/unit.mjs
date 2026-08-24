@@ -325,6 +325,12 @@ eq("pid 0", runIsLive(marker({ pid: 0 })), false);
 eq("a negative pid", runIsLive(marker({ pid: -1 })), false);
 eq("a pid that is a string", runIsLive(marker({ pid: String(process.pid) })), false);
 eq("no pid at all", runIsLive(marker({ pid: undefined })), false);
+// The wrapper can be killed outright — SIGKILL runs no handler, so nothing
+// clears the marker — while codex carries on in its own process group, reading
+// the worktree. A marker that knew only the wrapper reported that as finished.
+eq("a dead wrapper but a live codex", runIsLive(marker({ pid: 999_999, codexPid: process.pid })), true);
+eq("both processes gone", runIsLive(marker({ pid: 999_999, codexPid: 999_998 })), false);
+eq("a codex pid that identifies nothing", runIsLive(marker({ pid: 999_999, codexPid: 0 })), false);
 // Another machine's pid cannot be probed from here, so the age cap is all there
 // is: believed while fresh, gone once it is not.
 eq("a fresh run on another host", runIsLive(marker({ host: "elsewhere", pid: 999_999 }), Date.now(), "here"), true);

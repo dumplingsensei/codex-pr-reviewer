@@ -1232,6 +1232,82 @@ check "the fixture recorded a grandchild" "$([[ "$gpid" -gt 0 ]] && echo yes || 
 check "the whole process tree was ended" \
   "$(kill -0 "$gpid" 2>/dev/null && echo alive || echo gone)" "gone"
 
+note "an interrupt reaches codex, not only the wrapper"
+# Regression: `detached: true` put codex in its own process group, which is what
+# took it out of the terminal's foreground group — so Ctrl-C, or a SIGTERM to
+# the wrapper, arrived at Node alone. Node died where it stood, the `finally`
+# clearing the run marker never ran, and codex went on reading the worktree
+# behind a marker naming a pid that was no longer there, which `clean` reads as
+# a finished review. The wrapper forwards the signal to the group now, and
+# unwinds through its own cleanup before re-raising it.
+markers_left() { ls "$CACHE/runs"/*.json 2>/dev/null | wc -l | tr -d ' '; }
+reviews_saved() { ls "$CACHE/reviews"/o__r-pr7-*.md 2>/dev/null | wc -l | tr -d ' '; }
+
+# One hook holds a job the stub put in the background, the other holds only
+# foreground descendants. Both are codex's children; they differ in what their
+# own shell does to SIGINT, which is why the cases below signal them differently.
+cat >"$SANDBOX/hold-detached.sh" <<HOOK
+#!/bin/sh
+echo \$\$ >"$SANDBOX/hook.pid"
+sleep 40 &
+echo \$! >"$SANDBOX/detached.pid"
+sleep 35
+HOOK
+cat >"$SANDBOX/hold-foreground.sh" <<HOOK
+#!/bin/sh
+echo \$\$ >"$SANDBOX/hook.pid"
+sleep 35
+HOOK
+chmod +x "$SANDBOX/hold-detached.sh" "$SANDBOX/hold-foreground.sh"
+
+# A review is only interruptible once its marker exists: signalling before that
+# would prove nothing about clearing it.
+start_interruptible_review() {
+  local hook="$1" ready="$2"
+  rm -f "$CACHE/runs"/*.json "$SANDBOX/hook.pid" "$SANDBOX/detached.pid"
+  env PATH="$STUBS:$PATH" CPR_STUB_RUN_HOOK="$hook" CPR_STUB_RUN_BODY= \
+    node "$SCRIPT" review o/r#7 --repo o/r --no-prepare >"$SANDBOX/interrupt.out" 2>&1 &
+  review_pid=$!
+  for _ in $(seq 1 100); do
+    [[ -s "$ready" && "$(markers_left)" != "0" ]] && break
+    sleep 0.1
+  done
+}
+
+saved_before="$(reviews_saved)"
+start_interruptible_review "$SANDBOX/hold-detached.sh" "$SANDBOX/detached.pid"
+check "the run is marked before it can be interrupted" "$(markers_left)" "1"
+# The wrapper is the half that can be killed outright, and SIGKILL runs no
+# handler — so the marker has to name codex too, or a `clean` reads a review
+# that is still running as finished and deletes the worktree it is reading.
+contains "the marker names codex itself, not only the wrapper" \
+  "$(cat "$CACHE/runs"/*.json)" '"codexPid"'
+held="$(cat "$SANDBOX/detached.pid")"
+
+kill -TERM "$review_pid"
+wait "$review_pid"; term_status=$?
+check "the wrapper dies of the signal it was sent" "$term_status" "143"
+check "codex's own descendant goes with it" \
+  "$(kill -0 "$held" 2>/dev/null && echo alive || echo gone)" "gone"
+check "and the run marker is cleared on the way out" "$(markers_left)" "0"
+contains "the interruption is reported rather than silent" \
+  "$(cat "$SANDBOX/interrupt.out")" "no review was saved"
+check "an interrupted review saves no document" "$(reviews_saved)" "$saved_before"
+
+# Ctrl-C is the case this exists for, and 130 is what a `for pr in …; do` loop
+# reads as "the person stopped this" rather than "the review failed on its own".
+# Only foreground descendants here: a job the stub backgrounded has SIGINT
+# ignored by its own shell, which is what the SIGKILL escalation covers and not
+# what this case is about.
+start_interruptible_review "$SANDBOX/hold-foreground.sh" "$SANDBOX/hook.pid"
+hook_pid="$(cat "$SANDBOX/hook.pid")"
+kill -INT "$review_pid"
+wait "$review_pid"; int_status=$?
+check "an interrupt reports as an interrupt" "$int_status" "130"
+check "codex's descendants are gone" \
+  "$(kill -0 "$hook_pid" 2>/dev/null && echo alive || echo gone)" "gone"
+check "and its marker with them" "$(markers_left)" "0"
+
 note "a degraded manifest entry fails before the paid run"
 # Regression: --no-prepare checked headSha and mergeBase only where they were
 # present, while the saved document quotes both unconditionally — so an entry
