@@ -25,11 +25,16 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" doctor
 ## Safety
 
 Reviews print to your terminal and are saved to disk. Nothing is published: no
-command comments on a pull request, and the prompts tell Claude not to route
-around that with `gh` or a GitHub MCP tool. Raw review findings are advisory and
-some are wrong, so the useful step is reading them and writing your own comment.
-Every Codex run passes `-s read-only`, the plugin never executes a PR's build or
-tests, and local paths are stripped from review output before it is saved.
+command comments on a pull request, `review` holds no `gh` grant at all, and
+while a command runs the prompts tell Claude not to route around that with `gh`
+or a GitHub MCP tool. Raw findings are advisory and some are wrong, so `review`
+ends by reading the code each one names and marking it confirmed, refuted, or
+unverified — that is what a comment should be written from, and `--no-vet` skips
+it. Asking for that comment once the command has finished is an ordinary
+request: you see the full text first, and the `gh` that posts it was never
+pre-approved, so you see the permission prompt too. Every Codex run passes
+`-s read-only`, the plugin never executes a PR's build or tests, and local paths
+are stripped from review output before it is saved.
 
 A pull request is code written by a stranger, so what it could otherwise reach
 is closed off. Codex runs with project documents disabled, so an `AGENTS.md` in
