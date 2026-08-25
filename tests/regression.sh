@@ -1331,7 +1331,11 @@ HOOK
 chmod +x "$SANDBOX/hold-suspend.sh"
 
 process_state() {
-  ps -o state= -p "$1" 2>/dev/null | tr -d '[:space:]'
+  # The primary state letter only. Linux prints exactly that; BSD `ps` appends
+  # flag characters to it — `<` for raised priority, `+` for a foreground group,
+  # `s` for a session leader — so a stopped process reads `T` here and `T<` on a
+  # macOS runner, which is a difference in the reporting and not in the process.
+  ps -o state= -p "$1" 2>/dev/null | tr -d '[:space:]' | cut -c1
 }
 progress_count() {
   wc -l <"$SANDBOX/suspend.progress" 2>/dev/null | tr -d ' '
