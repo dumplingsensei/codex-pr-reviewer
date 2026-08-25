@@ -5,6 +5,25 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.11
+
+The upgrade remedy now names the copy of Codex that PATH resolves, instead of a
+package. `npm install -g @openai/codex` was said unconditionally, and on a
+machine with more than one Codex it can update an install the shell never
+reaches — a standalone one under `~/.local/bin` sitting ahead of an npm one
+under a Homebrew prefix is ordinary, not exotic. The person followed the advice,
+nothing changed, and the fault read as the plugin's rather than the binary's.
+
+`doctor` resolves the `codex` entries on PATH the way `spawnSync` does, and the
+remedy for a Codex without `review --base` names the first of them — the one a
+review would actually run — along with any behind it, which updating does
+nothing for. Where that binary offers `codex update` the remedy says so, because
+the binary knows how it was installed and the shell resolves the command to the
+same copy this plugin spawns. Where it does not, the package name stays, said as
+the guess it is and pinned to the path it has to reach. The probe runs only on
+the way to the remedy, so a healthy toolchain costs nothing extra, and nothing
+is ever updated on the user's behalf.
+
 ## 0.9.10
 
 Ctrl-Z now suspends Codex with the wrapper instead of leaving the detached

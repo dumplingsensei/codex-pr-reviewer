@@ -35,7 +35,8 @@ const {
   reviewSnapshotDigest,
   runIsLive,
   codexTimeoutMs,
-  codexMaxOutputBytes
+  codexMaxOutputBytes,
+  codexOnPath
 } = await import(path.join(pluginDir, "scripts", "pr-workspace.mjs"));
 
 let failures = 0;
@@ -361,11 +362,75 @@ describe("codexMaxOutputBytes");
 eq("the default when unset", codexMaxOutputBytes({}), 32 * 1024 * 1024);
 eq("a configured cap", codexMaxOutputBytes({ CPR_CODEX_MAX_OUTPUT_BYTES: "64" }), 64);
 throws("a cap of nothing", () => codexMaxOutputBytes({ CPR_CODEX_MAX_OUTPUT_BYTES: "0" }));
+
 // Both of these count things, and a fraction reached `Buffer.subarray`, which
 // truncates a fractional endpoint to nothing while the counter advances by the
 // fraction — a cap of 0.5 kept no bytes and reported no review.
 throws("a fractional cap", () => codexMaxOutputBytes({ CPR_CODEX_MAX_OUTPUT_BYTES: "0.5" }));
 throws("a fractional deadline", () => codexTimeoutMs({ CPR_CODEX_TIMEOUT_MS: "1500.5" }));
+describe("codexOnPath");
+// The upgrade remedy names the copy PATH resolves. Naming a package instead
+// sent people to update an install their shell never reaches: a standalone
+// codex under ~/.local/bin ahead of an npm one under a Homebrew prefix is an
+// ordinary machine, and there `npm install -g @openai/codex` changes nothing
+// the plugin will run.
+const pathScratch = fs.mkdtempSync(path.join(os.tmpdir(), "cpr-path-"));
+const binDir = (name, { entry = "codex", mode = 0o755, kind = "file" } = {}) => {
+  const dir = path.join(pathScratch, name);
+  fs.mkdirSync(dir, { recursive: true });
+  const target = path.join(dir, entry);
+  if (kind === "dir") fs.mkdirSync(target, { recursive: true });
+  else fs.writeFileSync(target, "#!/bin/sh\nexit 0\n", { mode });
+  return dir;
+};
+const codexAt = (dir, entry = "codex") => path.join(dir, entry);
+const asPath = (...dirs) => dirs.join(path.delimiter);
+const first = binDir("first");
+const second = binDir("second");
+const unreadable = binDir("no-exec-bit", { mode: 0o644 });
+const namedDir = binDir("dir-called-codex", { kind: "dir" });
+const windows = binDir("windows", { entry: "codex.EXE" });
+
+eq("nothing on an empty PATH", codexOnPath({ PATH: "" }, "linux"), []);
+eq("nothing when PATH is unset", codexOnPath({}, "linux"), []);
+eq("in the order PATH lists them", codexOnPath({ PATH: asPath(first, second) }, "linux"), [
+  codexAt(first),
+  codexAt(second)
+]);
+// Which one is shadowed is the whole question the remedy answers, so the order
+// has to follow PATH rather than anything about the directories themselves.
+eq("reordering PATH reorders the answer", codexOnPath({ PATH: asPath(second, first) }, "linux"), [
+  codexAt(second),
+  codexAt(first)
+]);
+eq("a directory listed twice is one binary", codexOnPath({ PATH: asPath(first, first) }, "linux"), [
+  codexAt(first)
+]);
+// A POSIX shell reads an empty entry as the working directory. `spawnSync`,
+// which is what actually launches codex here, does not — and a remedy naming
+// ./codex would be pointing at whatever the user happened to be standing in.
+eq("an empty entry is not the working directory", codexOnPath({ PATH: asPath("", first) }, "linux"), [
+  codexAt(first)
+]);
+eq("a directory called codex is not one", codexOnPath({ PATH: asPath(namedDir, first) }, "linux"), [
+  codexAt(first)
+]);
+// Skipped as root, where X_OK is satisfied by any file: the mode bit that this
+// asserts on stops being the thing under test.
+if (process.getuid?.() !== 0) {
+  eq("a file without the execute bit is not one", codexOnPath({ PATH: asPath(unreadable, first) }, "linux"), [
+    codexAt(first)
+  ]);
+}
+// Windows resolves a bare name through PATHEXT, so the extensions are part of
+// the name to look for there and part of nothing anywhere else.
+eq(
+  "PATHEXT is how a name resolves on win32",
+  codexOnPath({ PATH: windows, PATHEXT: ".COM;.EXE" }, "win32"),
+  [codexAt(windows, "codex.EXE")]
+);
+eq("and is not consulted off it", codexOnPath({ PATH: windows, PATHEXT: ".COM;.EXE" }, "linux"), []);
+fs.rmSync(pathScratch, { recursive: true, force: true });
 
 describe("tool grants");
 // Posting is the one irreversible act here, so only the command that posts may
