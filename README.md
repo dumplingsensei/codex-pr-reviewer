@@ -38,7 +38,7 @@ node plugins/codex-pr-reviewer/scripts/pr-workspace.mjs doctor
 
 | Command | What it does |
 |---|---|
-| `/codex-pr-reviewer:review <pr>` | Fetch a PR and review it. `<pr>` is `42`, `owner/repo#42`, or a URL. |
+| `/codex-pr-reviewer:review <pr>` | Fetch a PR, review it, and check the findings against the code. `<pr>` is `42`, `owner/repo#42`, or a URL. |
 | `/codex-pr-reviewer:list` | Show PRs awaiting your review, across GitHub or in one repo. |
 | `/codex-pr-reviewer:sweep [--limit N]` | Review a batch (smallest first) into one digest. |
 | `/codex-pr-reviewer:clean` | Remove the worktrees, branches, and clones the plugin created. |
@@ -69,7 +69,7 @@ Fork PRs need no extra remotes: GitHub serves `refs/pull/<N>/head` from the base
 - **PR content is untrusted input.** Every Codex run passes `-s read-only` explicitly rather than trusting config defaults, the plugin never runs the PR's build, tests, or hooks, and the prompts tell Claude to treat diff text as data, never instructions.
 - **The reviewer's instructions cannot come from the PR.** Codex reads `AGENTS.md` and its fallbacks from its working directory — which *is* the pull request — so reviews run with `project_doc_max_bytes=0`. The prompts' anti-injection rules bind Claude and are not inherited by the Codex process, which is why this is enforced on the command line.
 - **Checkout cannot execute the PR either.** Fetching writes attacker-authored bytes into a tree before Codex's sandbox exists, and git runs hooks and filters during that write. Every git this plugin causes to run — including the one `gh` spawns — gets `core.hooksPath` aimed at an empty directory and neutralised LFS filters via `GIT_CONFIG_*`. Without it, a repository that configures hooks into the tree, which is what Husky does, lets a PR touching `.husky/post-checkout` run a script the moment its worktree appears.
-- **Nothing is published, by any command.** Reviews print to your terminal and save to disk. No subcommand or flag comments on a PR — see [Publishing is out of scope](#publishing-is-out-of-scope).
+- **Nothing is published, by any command.** Reviews print to your terminal and save to disk. No subcommand or flag comments on a PR, and `review` holds no `gh` grant at all, so a PR whose text asks to be approved has nowhere to go — see [Publishing is out of scope](#publishing-is-out-of-scope).
 - **Each command is granted only the subcommands it uses.** `review` and `sweep` pre-approve `pr-workspace.mjs` by full path and only its `doctor`, `prepare`, and `review` subcommands; `list` gets `list`; `clean` gets `clean`. So `clean` — the one destructive subcommand — is not reachable from a review, and no command reaches `gh` directly, where a grant would also carry `gh pr review`, `gh pr merge`, and `gh api`. `sweep` and `list` additionally hold read-only `gh` subcommands for finding pull requests. `clean` holds nothing else at all: it verifies its own removals, so the `git -C` grant it used to need — a prefix that also matched `reset`, `branch -D`, and `config` — is gone. Pre-approval is not a sandbox: `allowed-tools` grants permission rather than removing capability, so `node -e` stays callable and simply stops being silent, arriving as a permission prompt instead. The narrow rules are what make that prompt the boundary.
 - **Local paths are stripped** from saved review output, so a comment you paste never leaks your filesystem layout.
 - **Cleanup is precise.** The plugin records what it created in a manifest and `clean` removes only that, deleting a branch only while it still points at the recorded commit. Saved reviews survive every clean unless `--purge-reviews` names them.
@@ -88,7 +88,9 @@ This plugin reviews pull requests. It does not comment on them, and no subcomman
 
 **Everything guarding it was guarding something optional.** A publish path needs its own checks — did this plugin write this review, does it belong to this PR, did the run succeed, are these the approved bytes — plus GitHub's 65,536-character cap and an answer for the head moving in between. That is a lot of surface defending a step you are better off doing by hand.
 
-The prompts tell Claude not to route around this with `gh pr comment`, a GitHub MCP tool, or anything else. An instruction, not a lock — nothing here can stop `gh` on your own PATH — so if a review gets published, you decided that, having read it.
+**What checking the findings is for.** `review` ends by reading the code each finding names and marking it confirmed, refuted, or unverified, with a `file:line` behind each verdict. That is the step that turns twenty machine-generated claims into the two you would actually stand behind — so if you do comment, you are writing from findings someone looked at rather than from the raw list. `--no-vet` skips it; `sweep` does not do it at all, because a digest across a batch is already the summary.
+
+**The scope is the command, not your session.** While `review` or `sweep` is running, Claude publishes nothing by any route. Afterwards the instructions stop being a refusal: ask for a comment and you get one, written from the confirmed findings, shown to you in full before it goes anywhere, and posted through a `gh` that was never pre-approved — so you see the permission prompt. An instruction, not a lock — nothing here can stop `gh` on your own PATH — so if a review gets published, you decided that, having read it.
 
 ## Updating
 

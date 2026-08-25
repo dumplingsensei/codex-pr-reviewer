@@ -492,6 +492,39 @@ for (const [command, allowed] of Object.entries(HELPER_GRANTS)) {
   eq(`${command} runs only what it grants`, ungranted, []);
 }
 
+describe("claude-side flags");
+// `--wait`, `--background` and `--no-vet` are acted on by the prompt, not the
+// script, which knows none of them. An unrecognised flag is read as a
+// positional, so a forwarded one is either dropped silently or taken for the
+// pull request reference — and "Could not read `--no-vet` as a pull request"
+// reads like the user mistyped rather than like the prompt leaking its own flag.
+const reviewPrompt = fs.readFileSync(path.join(pluginDir, "commands", "review.md"), "utf8");
+const CLAUDE_SIDE_FLAGS = ["--wait", "--background", "--no-vet"];
+// Three places have to agree, and the drift is always one of them being missed:
+// the hint the user reads, the list the prompt parses, and the sentence saying
+// the script never sees it.
+const argumentHint = /argument-hint: '(.*)'/.exec(reviewPrompt)[1];
+const recognized = /Recognized flags:([^.]*)/.exec(reviewPrompt)[1];
+const notForwarded = /([^.]*)\s+are handled by you, not the script/.exec(reviewPrompt)[1];
+for (const flag of CLAUDE_SIDE_FLAGS) {
+  eq(`${flag} is offered in the argument hint`, argumentHint.includes(flag), true);
+  eq(`${flag} is recognized where arguments are parsed`, recognized.includes(flag), true);
+  eq(`${flag} is named as one the script never sees`, notForwarded.includes(flag), true);
+}
+// The stronger half: whatever the prose says, no invocation in this prompt may
+// carry one of these through to the script. Asserted non-empty first — a regex
+// that stopped matching would leave every check below vacuously true.
+const invocations = [...reviewPrompt.matchAll(/^.*pr-workspace\.mjs"? \w+.*$/gm)].map((match) => match[0]);
+eq("there are invocations to check", invocations.length > 0, true);
+for (const flag of CLAUDE_SIDE_FLAGS) {
+  eq(`no ${flag} reaches a scripted invocation`, invocations.filter((line) => line.includes(flag)), []);
+}
+
+// A sweep does not vet, and says so rather than leaving the difference implicit:
+// a digest that reads as checked is worse than one that admits it is not.
+const sweepPrompt = fs.readFileSync(path.join(pluginDir, "commands", "sweep.md"), "utf8");
+eq("sweep says its digest is not vetted", /not vetted PR by PR/i.test(sweepPrompt), true);
+
 describe("release stamps");
 // Each command prompt names the version it was written for, and compares it at
 // runtime against the version `doctor` reports. A stamp left behind at release

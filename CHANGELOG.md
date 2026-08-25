@@ -5,6 +5,49 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.12
+
+`review` no longer stops at printing. It now reads the code each of Codex's
+findings names and marks it confirmed, refuted, or unverified, with a `file:line`
+behind every verdict — refutations included, since a verdict with nothing behind
+it is another unchecked claim, only yours instead of Codex's. Three buckets
+rather than a confidence score: nothing here posts automatically, so there is no
+threshold for a number to clear, and a "confirmed" that means *I looked* is worth
+more than one that means *I feel*. The step belongs at the end of the command
+because that is the only cheap moment for it — the worktree is on disk, `prepare`
+has already said what the PR touches, and `Read`, `Grep` and `Glob` are granted.
+Anything later has to fetch the pull request again and reviews it afresh rather
+than checking these findings. `--no-vet` skips it, and like `--wait` and
+`--background` it is acted on by the prompt, never forwarded to the script.
+
+The publishing rule is now scoped to the command instead of the session. It read
+as a standing refusal, and because a command's instructions stay in context after
+it finishes, Claude went on declining to help — waiting for the user to post by
+hand — even when asked directly and after the reasoning had been heard. Nothing
+publishes while `review` or `sweep` is running, and `review` still holds no `gh`
+grant at all, so a pull request whose text asks to be approved has nowhere to go;
+that property is the part worth keeping and it is unchanged. Afterwards the
+instructions stop being a prohibition and become care: the full text is shown
+first, only that text is posted, the raw review never is, and approval attaches
+to a comment the user has read rather than to a general yes about the review. The
+`gh` that would post it is still not pre-approved, so the permission prompt
+remains the checkpoint rather than one Claude adds on top of it.
+
+No new capability came with any of this. No `gh` grant, no `publish` subcommand,
+no script change, and no dependency on another plugin — the checking is Claude
+reading the worktree with grants `review` already held.
+
+`sweep` does not vet, and now says so instead of leaving the difference to be
+inferred: a digest across a batch is already the summary, and per-PR checking
+multiplies the cost of output nobody reads line by line. A digest that reads as
+checked is worse than one that admits it is not.
+
+Unit coverage pins the three places a Claude-side flag has to be named — the
+argument hint, the parsed list, and the sentence saying the script never sees it
+— and asserts that none of them reaches a scripted invocation, with the
+invocation scan asserted non-empty so a regex that stopped matching cannot make
+the rest vacuously true.
+
 ## 0.9.11
 
 The upgrade remedy now names the copy of Codex that PATH resolves, instead of a
