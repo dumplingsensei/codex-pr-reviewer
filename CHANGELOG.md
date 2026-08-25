@@ -5,7 +5,7 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
-## 0.9.10 — unreleased
+## 0.9.10
 
 Ctrl-Z now suspends Codex with the wrapper instead of leaving the detached
 Codex process group working behind a stopped deadline and output reader. The
