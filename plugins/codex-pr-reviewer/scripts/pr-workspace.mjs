@@ -1206,10 +1206,98 @@ function checkPluginBuild() {
 // healthy toolchain and then failed at the first clone.
 const GIT_MIN = [2, 19];
 
-// Stated once. Both codex remedies name it, and only one of them is reachable
-// in the test suite, so a rename would leave the other pointing at a package
-// that no longer exists with the suite still green.
+// Stated once. Three remedies name it — a missing codex, one too old to update
+// itself, and the fallback for a PATH that no longer holds the codex that just
+// answered — and only the middle one is reachable in the test suite, so a
+// rename would leave the others pointing at a package that no longer exists
+// with the suite still green.
 const CODEX_INSTALL = "npm install -g @openai/codex";
+
+/**
+ * Every `codex` on PATH, in the order a shell — and `spawn` — resolves them.
+ *
+ * The first is the one this plugin runs. The rest are shadowed, and updating
+ * one of those changes nothing about the review that follows. Not hypothetical:
+ * a standalone install under `~/.local/bin` and an npm one under a Homebrew
+ * prefix coexist happily, and `npm install -g @openai/codex` — what the upgrade
+ * remedy used to say, unconditionally — updates the copy PATH does not reach.
+ * The person updates, nothing changes, and the advice reads as wrong rather
+ * than as aimed at the wrong binary.
+ *
+ * Resolution mirrors `spawnSync`, which is what actually launches codex here,
+ * rather than a shell: an empty PATH entry is skipped where a POSIX shell would
+ * read it as the working directory. A directory named `codex` is not an
+ * executable whatever its mode bits say.
+ */
+export function codexOnPath(env = process.env, platform = process.platform) {
+  // Windows resolves a bare name through PATHEXT; POSIX takes it as written.
+  const names =
+    platform === "win32"
+      ? (env.PATHEXT || ".COM;.EXE;.BAT;.CMD")
+          .split(";")
+          .filter(Boolean)
+          .map((extension) => `codex${extension}`)
+      : ["codex"];
+  const found = [];
+  for (const dir of (env.PATH ?? env.Path ?? "").split(path.delimiter)) {
+    if (!dir) continue;
+    for (const name of names) {
+      const candidate = path.join(dir, name);
+      try {
+        if (fs.statSync(candidate).isDirectory()) continue;
+        fs.accessSync(candidate, fs.constants.X_OK);
+      } catch {
+        continue;
+      }
+      // One directory listed twice on PATH is one binary, not two.
+      if (!found.includes(candidate)) found.push(candidate);
+    }
+  }
+  return found;
+}
+
+/**
+ * How to upgrade the codex this plugin will actually run.
+ *
+ * Asks the binary in front of us whether it updates itself, for the reason the
+ * `--base` probe asks rather than comparing version numbers: `codex update`
+ * knows how that copy was installed — standalone, npm, bun, pnpm, a Homebrew
+ * cask — and a CLI old enough to lack `review --base` may predate the
+ * subcommand too. Where it exists it is the one instruction that is right
+ * whatever the install method, because the shell resolves it to the same binary
+ * this plugin spawns. Where it does not, the package name is still the best
+ * guess available, said as a guess and pinned to the path it has to reach.
+ *
+ * Never run for the user. A doctor that repairs the toolchain it was asked to
+ * describe is a doctor nobody can run to find out where they stand.
+ */
+function codexUpgradeRemedy() {
+  const [running, ...shadowed] = codexOnPath();
+  // On the failing path only: doctor already spends three codex invocations on
+  // a toolchain that turns out to be healthy, and this answers nothing there.
+  const help = run("codex", ["--help"]);
+  // A line whose first token is `update`, with the description column after it
+  // or nothing at all — the two shapes a subcommand listing takes. Matching the
+  // bare word anywhere would find it in prose about updating.
+  const selfUpdates = help.status === 0 && /^\s+update(\s{2,}|\s*$)/m.test(combinedOutput(help));
+  const shadowNote = shadowed.length
+    ? ` Also on PATH behind it: ${shadowed.join(", ")} — updating those changes nothing here.`
+    : "";
+
+  if (!running) {
+    // `codex --version` answered, so PATH held one a moment ago. Whatever moved
+    // it, the generic instruction is still better than naming a path that is
+    // not there.
+    return `Update the Codex CLI: \`${CODEX_INSTALL}\`.`;
+  }
+  if (selfUpdates) {
+    return `Update the Codex CLI: \`codex update\` — it updates ${running}, the copy PATH gives this plugin.${shadowNote}`;
+  }
+  return (
+    `Update the Codex CLI at ${running} — that is the copy PATH gives this plugin, and ` +
+    `\`${CODEX_INSTALL}\` only reaches it if npm is what installed it.${shadowNote}`
+  );
+}
 
 function checkGit() {
   const result = run("git", ["--version"]);
@@ -1301,7 +1389,7 @@ function checkCodex() {
       ok: false,
       detail: `${version.stdout.trim()} — \`codex review\` does not accept --base`,
       remedy:
-        `This plugin pins the diff to the merge-base with \`codex review --base <branch>\`, which this Codex does not support. Update the Codex CLI: \`${CODEX_INSTALL}\`.`
+        `This plugin pins the diff to the merge-base with \`codex review --base <branch>\`, which this Codex does not support. ${codexUpgradeRemedy()}`
     };
   }
 

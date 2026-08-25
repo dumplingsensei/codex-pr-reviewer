@@ -5,12 +5,15 @@
 #
 # `doctor` asks three separate things — the version, the login state, and
 # whether `codex review` accepts --base — and a test that gets past the
-# preflight has to answer all three. That contract used to be written out
-# independently in tests/regression.sh (five times) and in
-# .github/workflows/tests.yml, so adding a probe meant finding every copy. The
-# YAML one is the dangerous one: the regression suite cannot see it, and missing
-# it fails the integration job with "toolchain unhealthy", which reads as broken
-# CI rather than a stale stub. That happened once already.
+# preflight has to answer all three. A fourth — whether the binary has an
+# `update` subcommand — is only asked on the way to an upgrade remedy.
+#
+# That contract used to be written out independently in tests/regression.sh
+# (five times) and in .github/workflows/tests.yml, so adding a probe meant
+# finding every copy. The YAML one is the dangerous one: the regression suite
+# cannot see it, and missing it fails the integration job with "toolchain
+# unhealthy", which reads as broken CI rather than a stale stub. That happened
+# once already.
 #
 # Behaviour is set by environment, so a test varies one thing without restating
 # the rest. Every knob is optional.
@@ -22,6 +25,7 @@
 #   CPR_STUB_PROBE_BASE    "no" to answer `review --help` without --base
 #   CPR_STUB_PROBE_ERR     stderr for a probe that fails instead of answering
 #   CPR_STUB_PROBE_EXIT    its exit status                        (default 0)
+#   CPR_STUB_SELF_UPDATE   "no" to list no `update` subcommand under `--help`
 #   CPR_STUB_RUN_HOOK      shell run before a review's output, for race tests
 #   CPR_STUB_RUN_BODY      what a review run prints on stdout
 #   CPR_STUB_RUN_EXIT      its exit status                        (default 0)
@@ -36,6 +40,18 @@ case "${1:-}" in
     version="${CPR_STUB_VERSION-codex-cli 0.0.0 (stub)}"
     [ -n "$version" ] && echo "$version"
     exit "${CPR_STUB_VERSION_EXIT-0}"
+    ;;
+
+  --help)
+    # Only the upgrade remedy reads this, and only the command list in it: it
+    # decides between `codex update` and naming a package manager.
+    echo "Usage: codex [OPTIONS] [PROMPT]"
+    echo ""
+    echo "Commands:"
+    echo "  exec            Run Codex non-interactively"
+    echo "  review          Run a code review non-interactively"
+    [ "${CPR_STUB_SELF_UPDATE-yes}" = "no" ] || echo "  update          Update Codex to the latest version"
+    exit 0
     ;;
 
   login)

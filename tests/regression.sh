@@ -449,15 +449,35 @@ esac
 exit 0
 STUB
 chmod +x "$SANDBOX/preflight/gh"
-# Named, so the two assertions below cannot end up describing different stubs.
+# A second codex, behind the first on PATH and never run. The remedy has to
+# name the copy PATH resolves rather than a package: a standalone install ahead
+# of an npm one is an ordinary machine, and `npm install -g @openai/codex` there
+# updates the copy that never runs. The person follows the advice, nothing
+# changes, and the plugin looks wrong rather than the binary.
+mkdir -p "$SANDBOX/shadowed"
+cp "$STUBS/codex" "$SANDBOX/shadowed/codex"
+# macOS sets TMPDIR with a trailing slash, so $SANDBOX can hold a doubled one.
+# `path.join` collapses it, and the remedy prints the collapsed form.
+shadowed_codex="$(printf '%s' "$SANDBOX/shadowed/codex" | tr -s /)"
+# Named, so the assertions below cannot end up describing different stubs.
 without_base() {
-  env CPR_STUB_PROBE_BASE=no PATH="$SANDBOX/preflight:$STUBS:$PATH" "$@"
+  env CPR_STUB_PROBE_BASE=no PATH="$SANDBOX/preflight:$STUBS:$SANDBOX/shadowed:$PATH" "$@"
 }
 out="$(without_base node "$SCRIPT" doctor 2>&1)"
 contains "a codex without --base is refused" "$out" "does not accept --base"
-contains "and the remedy names the upgrade" "$out" "npm install -g @openai/codex"
+contains "and the remedy names the codex PATH resolves" "$out" "$STUBS/codex"
+contains "and prefers the binary's own updater" "$out" '`codex update`'
+contains "and says the shadowed copy is not the one" "$out" "$shadowed_codex"
 check "and doctor fails rather than warning" \
   "$(without_base node "$SCRIPT" doctor >/dev/null 2>&1; echo $?)" "1"
+
+# A codex too old for `review --base` can be too old for `codex update` too.
+# Then the package name is the best guess left — said as a guess, and pinned to
+# the path it has to reach, rather than as an instruction that silently targets
+# whichever install npm happens to own.
+out="$(without_base env CPR_STUB_SELF_UPDATE=no node "$SCRIPT" doctor 2>&1)"
+contains "a codex without \`update\` falls back to the package" "$out" "npm install -g @openai/codex"
+contains "and still names the path that has to change" "$out" "$STUBS/codex"
 
 # A codex whose `review --help` never answers is a different problem from one
 # that answers without --base, and telling someone to reinstall the CLI cannot
@@ -466,7 +486,7 @@ out="$(CPR_STUB_PROBE_ERR="error: could not connect" CPR_STUB_PROBE_EXIT=70 \
   PATH="$SANDBOX/preflight:$STUBS:$PATH" node "$SCRIPT" doctor 2>&1)"
 contains "a probe that fails is not reported as a missing flag" "$out" "exited 70"
 check "and does not send the user to reinstall" \
-  "$(printf '%s' "$out" | grep -c 'npm install -g @openai/codex')" "0"
+  "$(printf '%s' "$out" | grep -cE 'npm install -g @openai/codex|codex update')" "0"
 
 # The same stub, answering with --base. Asserted on doctor's exit status, not on
 # the absence of one message: "no complaint about --base" is also satisfied by a
