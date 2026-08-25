@@ -1313,6 +1313,138 @@ check "codex's descendants are gone" \
   "$(kill -0 "$hook_pid" 2>/dev/null && echo alive || echo gone)" "gone"
 check "and its marker with them" "$(markers_left)" "0"
 
+note "Ctrl-Z suspends codex with the wrapper, and fg resumes both"
+# Regression: codex runs in its own process group so the deadline can signal
+# everything it started. That also takes it out of the terminal's foreground
+# group: Ctrl-Z stopped this wrapper while codex kept working, with the timer
+# and output reader that bound it frozen. Suspension is job control, not an
+# interruption — stop the detached group first, let the wrapper stop normally,
+# and continue the group when the wrapper is continued.
+cat >"$SANDBOX/hold-suspend.sh" <<HOOK
+#!/bin/sh
+echo \$\$ >"$SANDBOX/suspend-hook.pid"
+while :; do
+  printf '.\\n' >>"$SANDBOX/suspend.progress"
+  sleep 0.1
+done
+HOOK
+chmod +x "$SANDBOX/hold-suspend.sh"
+
+process_state() {
+  ps -o state= -p "$1" 2>/dev/null | tr -d '[:space:]'
+}
+progress_count() {
+  wc -l <"$SANDBOX/suspend.progress" 2>/dev/null | tr -d ' '
+}
+
+rm -f "$SANDBOX/suspend-hook.pid" "$SANDBOX/suspend.progress"
+# A job-control stop is discarded for an orphaned process group. Noninteractive
+# bash normally leaves background processes in its own group; monitor mode gives
+# this one the same separate, non-orphaned job topology an interactive shell does.
+set -m
+start_interruptible_review "$SANDBOX/hold-suspend.sh" "$SANDBOX/suspend-hook.pid"
+set +m
+suspend_hook="$(cat "$SANDBOX/suspend-hook.pid")"
+for _ in $(seq 1 100); do
+  [[ "$(progress_count)" -ge 2 ]] && break
+  sleep 0.1
+done
+
+kill -TSTP "$review_pid"
+for _ in $(seq 1 100); do
+  [[ "$(process_state "$review_pid")" == T && "$(process_state "$suspend_hook")" == T ]] && break
+  sleep 0.1
+done
+check "the wrapper is stopped by SIGTSTP" "$(process_state "$review_pid")" "T"
+check "codex's process group is stopped with it" "$(process_state "$suspend_hook")" "T"
+suspended_at="$(progress_count)"
+sleep 0.5
+check "codex makes no progress while the wrapper is suspended" \
+  "$(progress_count)" "$suspended_at"
+
+kill -CONT "$review_pid"
+for _ in $(seq 1 100); do
+  [[ "$(progress_count)" -gt "$suspended_at" ]] && break
+  sleep 0.1
+done
+check "SIGCONT resumes codex's process group" \
+  "$([[ "$(progress_count)" -gt "$suspended_at" ]] && echo resumed || echo stopped)" "resumed"
+
+# The handler removes itself while it re-raises SIGTSTP, then has to restore
+# itself after continuation. A second cycle catches a one-shot implementation.
+kill -TSTP "$review_pid"
+for _ in $(seq 1 100); do
+  [[ "$(process_state "$review_pid")" == T && "$(process_state "$suspend_hook")" == T ]] && break
+  sleep 0.1
+done
+check "the restored handler suspends the wrapper again" "$(process_state "$review_pid")" "T"
+check "and stops codex again" "$(process_state "$suspend_hook")" "T"
+second_suspension="$(progress_count)"
+kill -CONT "$review_pid"
+for _ in $(seq 1 100); do
+  [[ "$(progress_count)" -gt "$second_suspension" ]] && break
+  sleep 0.1
+done
+check "the second SIGCONT resumes both again" \
+  "$([[ "$(progress_count)" -gt "$second_suspension" ]] && echo resumed || echo stopped)" "resumed"
+
+kill -TERM "$review_pid"
+wait "$review_pid"; suspend_status=$?
+check "the resumed wrapper still handles termination normally" "$suspend_status" "143"
+check "the resumed codex process is ended" \
+  "$(kill -0 "$suspend_hook" 2>/dev/null && echo alive || echo gone)" "gone"
+check "and its marker is cleared" "$(markers_left)" "0"
+
+note "time suspended still counts against the original deadline"
+# The deadline is intentionally wall-clock/monotonic time, not active review
+# time. The wrapper resumes inside its SIGTSTP handler and continues codex there
+# before returning to the event loop, so an overdue timer ends a running group
+# immediately instead of signalling one that is still stopped or granting a
+# fresh timeout after `fg`.
+cat >"$SANDBOX/hold-suspend-deadline.sh" <<HOOK
+#!/bin/sh
+echo \$\$ >"$SANDBOX/suspend-hook.pid"
+trap 'printf "TERM\\n" >"$SANDBOX/suspend-deadline.term"; exit 0' TERM
+while :; do
+  printf '.\\n' >>"$SANDBOX/suspend.progress"
+  sleep 0.1
+done
+HOOK
+chmod +x "$SANDBOX/hold-suspend-deadline.sh"
+rm -f "$CACHE/runs"/*.json "$SANDBOX/suspend-hook.pid" \
+  "$SANDBOX/suspend.progress" "$SANDBOX/suspend-deadline.term"
+set -m
+env PATH="$STUBS:$PATH" CPR_CODEX_TIMEOUT_MS=5000 \
+  CPR_STUB_RUN_HOOK="$SANDBOX/hold-suspend-deadline.sh" CPR_STUB_RUN_BODY= \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare >"$SANDBOX/suspend-deadline.out" 2>&1 &
+deadline_review_pid=$!
+set +m
+for _ in $(seq 1 100); do
+  [[ -s "$SANDBOX/suspend-hook.pid" && "$(markers_left)" != "0" ]] && break
+  sleep 0.1
+done
+deadline_hook="$(cat "$SANDBOX/suspend-hook.pid")"
+kill -TSTP "$deadline_review_pid"
+for _ in $(seq 1 100); do
+  [[ "$(process_state "$deadline_review_pid")" == T && "$(process_state "$deadline_hook")" == T ]] && break
+  sleep 0.1
+done
+check "the deadline case has both processes stopped" \
+  "$(process_state "$deadline_review_pid")/$(process_state "$deadline_hook")" "T/T"
+sleep 6
+kill -CONT "$deadline_review_pid"
+for _ in $(seq 1 30); do
+  [[ -s "$SANDBOX/suspend-deadline.term" ]] && break
+  sleep 0.1
+done
+check "the overdue timer signals codex instead of granting a fresh deadline" \
+  "$([[ -s "$SANDBOX/suspend-deadline.term" ]] && echo immediate || echo extended)" "immediate"
+wait "$deadline_review_pid"; suspended_timeout_status=$?
+check "an overdue deadline returns as a timeout" "$suspended_timeout_status" "124"
+check "the timed-out codex process is gone" \
+  "$(kill -0 "$deadline_hook" 2>/dev/null && echo alive || echo gone)" "gone"
+check "and the timed-out marker is cleared" "$(markers_left)" "0"
+
 note "Ctrl-\\ is forwarded like the other stop signals"
 # Regression: SIGQUIT was missing from the forwarded list, so the one stop key
 # that is not Ctrl-C still killed the wrapper on its default disposition — no

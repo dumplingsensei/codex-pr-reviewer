@@ -5,6 +5,23 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.10 — unreleased
+
+Ctrl-Z now suspends Codex with the wrapper instead of leaving the detached
+Codex process group working behind a stopped deadline and output reader. The
+wrapper handles job control separately from termination: on SIGTSTP it stops
+the whole Codex group with SIGSTOP, then suspends with its normal SIGTSTP
+disposition; after `fg`/SIGCONT it continues the group before returning to the
+event loop. Repeated suspend/resume cycles keep working, and the handlers still
+leave through the same cleanup path as the other signals.
+
+Suspension counts against the original monotonic deadline. If the deadline
+passes while the job is stopped, continuing the job resumes Codex first and the
+overdue timeout then ends it immediately; suspending a review never grants it a
+fresh allowance. Regression coverage pins both that ordering and the process
+states on the supported POSIX platforms. Windows remains unsupported and is
+unchanged.
+
 ## 0.9.9
 
 Bounds on a Codex run: a 45-minute timeout signalling the whole process group

@@ -2164,7 +2164,7 @@ export function codexMaxOutputBytes(env = process.env) {
 const CODEX_DETACHED = process.platform !== "win32";
 
 /**
- * Signals the wrapper forwards to codex instead of dying of.
+ * Termination signals the wrapper forwards to codex instead of dying of.
  *
  * Ctrl-C sends SIGINT to the terminal's foreground process group, and
  * `detached` above deliberately took codex out of it — so the wrapper now
@@ -2177,7 +2177,9 @@ const CODEX_DETACHED = process.platform !== "win32";
  *
  * SIGQUIT belongs here for the same reason SIGINT does, and for a while did
  * not: Ctrl-\ goes to the foreground group too, so leaving it out left one key
- * on the keyboard that still reproduced the whole defect above.
+ * on the keyboard that still reproduced the whole defect above. SIGTSTP does
+ * not belong here: suspension has to stop and later continue the group, not
+ * arm the termination path's SIGKILL escalation.
  */
 const FORWARDED_SIGNALS = ["SIGINT", "SIGQUIT", "SIGTERM", "SIGHUP"];
 
@@ -2211,13 +2213,60 @@ function streamCodex(
   { echo = process.stdout, timeoutMs = codexTimeoutMs(), maxOutputBytes = codexMaxOutputBytes(), onSpawn } = {}
 ) {
   return new Promise((resolve, reject) => {
-    const child = spawn("codex", args, {
-      stdio: ["ignore", "pipe", "inherit"],
-      // Its own process group, so the deadline below and the forwarded signals
-      // can end the whole tree. Deliberately not `unref`ed: this process still
-      // waits for the review.
-      detached: CODEX_DETACHED
-    });
+    let child = null;
+    let ending = false;
+    const signalHandlers = new Map();
+
+    if (CODEX_DETACHED) {
+      // Install this before spawning: once codex has detached, any interval
+      // before the listener exists is the original bug in miniature — Ctrl-Z
+      // can stop Node while the new process group carries on.
+      //
+      // Ctrl-Z reaches the wrapper's foreground process group, but codex is in
+      // the separate group created below. Stop that whole group first, then
+      // restore SIGTSTP's default disposition and send it to this process so
+      // the shell observes an ordinary suspended job.
+      //
+      // `process.kill()` does not return to JavaScript while this process is
+      // stopped. After `fg`/SIGCONT it resumes at the `finally`, which continues
+      // codex before returning to the event loop. That ordering matters when
+      // the original monotonic deadline expired during the suspension: its
+      // overdue callback may run next, but it cannot signal a still-stopped
+      // group. Suspended time remains part of the original deadline.
+      const suspend = () => {
+        // Once an interrupt, deadline or cleanup has started ending the tree,
+        // stopping it would freeze the grace that guarantees it eventually
+        // leaves the worktree. Whichever event reached the loop first wins.
+        if (ending) return;
+
+        signalCodexTree(child, "SIGSTOP");
+        process.off("SIGTSTP", suspend);
+        try {
+          process.kill(process.pid, "SIGTSTP");
+        } finally {
+          // Restore the handler before continuing the group, closing the small
+          // window in which a second Ctrl-Z could otherwise stop only Node.
+          process.on("SIGTSTP", suspend);
+          signalCodexTree(child, "SIGCONT");
+        }
+      };
+      signalHandlers.set("SIGTSTP", suspend);
+      process.on("SIGTSTP", suspend);
+    }
+
+    try {
+      child = spawn("codex", args, {
+        stdio: ["ignore", "pipe", "inherit"],
+        // Its own process group, so the deadline below and the forwarded signals
+        // can end the whole tree. Deliberately not `unref`ed: this process still
+        // waits for the review.
+        detached: CODEX_DETACHED
+      });
+    } catch (error) {
+      for (const [signal, handler] of signalHandlers) process.off(signal, handler);
+      reject(error);
+      return;
+    }
     let stdout = "";
     let keptBytes = 0;
     let truncated = false;
@@ -2237,6 +2286,7 @@ function streamCodex(
     // so the second one is not optional. Unreferenced: if the child goes on the
     // first, this timer must not keep the process alive waiting to fire.
     const endCodexTree = (signal) => {
+      ending = true;
       signalCodexTree(child, signal);
       setTimeout(() => signalCodexTree(child, "SIGKILL"), CODEX_KILL_GRACE_MS).unref();
     };
@@ -2290,8 +2340,6 @@ function streamCodex(
       attempt();
     };
 
-    const forwarders = new Map();
-
     // Settling once, and letting the handlers go with it: `error`, `exit` and
     // `close` can all arrive for one run, and a process left holding a SIGINT
     // listener after its child is gone no longer stops on Ctrl-C.
@@ -2300,7 +2348,7 @@ function streamCodex(
       settled = true;
       clearTimeout(deadline);
       clearTimeout(strandedTimer);
-      for (const [signal, forward] of forwarders) process.off(signal, forward);
+      for (const [signal, handler] of signalHandlers) process.off(signal, handler);
       settle();
     };
 
@@ -2318,7 +2366,7 @@ function streamCodex(
         clearTimeout(deadline);
         endCodexTree(signal);
       };
-      forwarders.set(signal, forward);
+      signalHandlers.set(signal, forward);
       process.on(signal, forward);
     }
 

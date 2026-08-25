@@ -1,6 +1,6 @@
 {
   "name": "codex-pr-reviewer",
-  "version": "0.9.9",
+  "version": "0.9.10",
   "description": "Fetch any GitHub PR into an isolated worktree and review it with Codex.",
   "author": {
     "name": "dumplingsensei"
