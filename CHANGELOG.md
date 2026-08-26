@@ -18,7 +18,29 @@ because that is the only cheap moment for it — the worktree is on disk, `prepa
 has already said what the PR touches, and `Read`, `Grep` and `Glob` are granted.
 Anything later has to fetch the pull request again and reviews it afresh rather
 than checking these findings. `--no-vet` skips it, and like `--wait` and
-`--background` it is acted on by the prompt, never forwarded to the script.
+`--background` it is acted on by the prompt, never forwarded to the script. So
+does `--dry-run`, which prepares no worktree and so leaves nothing to read the
+findings against.
+
+Every path in a finding resolves against the worktree `prepare` reported and
+nothing else. Local paths are stripped from a saved review, so `foo.py:151` is
+worktree-relative; resolved against the working directory the user happened to
+invoke from, it would check their own checkout and report the answer with a
+straight face. A finding naming an absolute path, or climbing out with `..`, is
+reported as having pointed outside the pull request rather than followed.
+
+Whether a finding is true and whether it is this pull request's problem are
+asked separately, because collapsing them is how a real defect disappears. A
+finding that a linter would catch, or one on lines the PR never touched, is not
+refuted — it is true and out of scope, and it stays confirmed with a label
+saying which. Refuted is reserved for checked and untrue, which is rarer than it
+looks: behaviour that is plainly the point of the pull request, and claims
+contradicted by code a few lines away that Codex did not read.
+
+`--dry-run` is also named in the step that parses arguments now. It was
+advertised in the argument hint and acted on in two later steps while appearing
+in neither the recognized list nor the list of flags the script never sees,
+which left the prompt contradicting itself about a flag it was already using.
 
 The publishing rule is now scoped to the command instead of the session. It read
 as a standing refusal, and because a command's instructions stay in context after
