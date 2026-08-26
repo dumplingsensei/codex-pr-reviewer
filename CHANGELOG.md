@@ -23,6 +23,14 @@ the pre-approved way to read and stay preferred, and a shell read used in their
 place inherits the same limits and no others — read-only, rooted at the worktree,
 never `gh`, never running the pull request's own code.
 
+The same sentence shipped in `README.md` and — as a stated security property — in
+`SECURITY.md`. Both now describe what the mode actually does, since a security
+document that promises a checkpoint nobody will see is the worst place of the
+three to leave it. The passages saying a `gh` write prompts before a comment is
+posted are untouched: those concern posting rather than reading, and whether
+`auto` treats them the same way is a separate question this release did not
+test.
+
 The second is precision. Vetting already demanded a `file:line` behind every
 verdict, and was producing numbers that drifted, almost always by one: an `await`
 cited to the comment above it, a `yield` cited to its own closing brace. The
@@ -30,7 +38,10 @@ reasoning was sound and the verdicts held either way, but a citation exists so a
 reader can check it, and one that lands on a brace cannot be checked. Citations
 now carry a few words of the line's real text alongside the number, which makes
 the drift self-correcting — a quote that comes out as a brace, a comment or a
-blank line is the number reporting its own error.
+blank line is the number reporting its own error. The rule is bounded to
+citations that drifted off the defect — when the comment or the delimiter is
+itself what the finding is about, it is the right line, and quoting it is what
+shows the reader the problem.
 
 ## 0.9.12
 
