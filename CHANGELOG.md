@@ -22,12 +22,22 @@ than checking these findings. `--no-vet` skips it, and like `--wait` and
 does `--dry-run`, which prepares no worktree and so leaves nothing to read the
 findings against.
 
-Every path in a finding resolves against the worktree `prepare` reported and
-nothing else. Local paths are stripped from a saved review, so `foo.py:151` is
-worktree-relative; resolved against the working directory the user happened to
-invoke from, it would check their own checkout and report the answer with a
-straight face. A finding naming an absolute path, or climbing out with `..`, is
-reported as having pointed outside the pull request rather than followed.
+Every citation resolves against the worktree `prepare` reported and nothing
+else. Codex prints absolute paths inside that worktree and the wrapper echoes
+them unchanged; stripping happens on the way to disk, so the saved copy is
+worktree-relative and the two shapes mean the same file. Either resolved against
+the working directory the user invoked from would read their own checkout — for
+a pull request against their own repository the same paths exist there with
+different contents, so the read succeeds, the line is present, and the verdict is
+about the wrong file. Only a citation that still lands outside the worktree once
+resolved is reported as pointing outside the pull request rather than followed.
+
+A review that was cut short is vetted as a fragment or not at all. The wrapper
+exits 0 for anything that ran and was saved, so a Codex that timed out or
+overflowed the output cap looks like success from outside; the saved file is
+where it says otherwise, in the `exit=<n>` on its first line and a note reading
+`this review is cut short` or `did not finish`. Vetting says so before it starts
+rather than presenting what survived as a complete picture.
 
 Whether a finding is true and whether it is this pull request's problem are
 asked separately, because collapsing them is how a real defect disappears. A
