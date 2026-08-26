@@ -5,6 +5,33 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.13
+
+Two corrections to `review`, both found by running the command against a live
+pull request rather than by reading it again.
+
+The first is a sentence that was untrue. The prompt told the model that a command
+outside the pre-approved set "has to be put to the user as a permission prompt,"
+and offered that prompt as the boundary to treat as one. Under
+`permissions.defaultMode: auto` no prompt appears — a read-only command outside
+the grant simply runs — so the boundary the prompt pointed at was not there, and
+a model that believed the description would have thought itself inside a fence
+that does not exist. The scoping is still worth keeping; what it is not is
+self-announcing. It is now described as a rule the model keeps rather than a wall
+that stops it. Step 7 gains the matching detail: `Read`, `Grep` and `Glob` are
+the pre-approved way to read and stay preferred, and a shell read used in their
+place inherits the same limits and no others — read-only, rooted at the worktree,
+never `gh`, never running the pull request's own code.
+
+The second is precision. Vetting already demanded a `file:line` behind every
+verdict, and was producing numbers that drifted, almost always by one: an `await`
+cited to the comment above it, a `yield` cited to its own closing brace. The
+reasoning was sound and the verdicts held either way, but a citation exists so a
+reader can check it, and one that lands on a brace cannot be checked. Citations
+now carry a few words of the line's real text alongside the number, which makes
+the drift self-correcting — a quote that comes out as a brace, a comment or a
+blank line is the number reporting its own error.
+
 ## 0.9.12
 
 `review` no longer stops at printing. It now reads the code each of Codex's
