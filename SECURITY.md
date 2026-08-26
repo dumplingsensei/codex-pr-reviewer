@@ -66,8 +66,10 @@ vulnerabilities on their own. A concrete exploit that turns one into something
 worse *is* in scope.
 
 - **Pre-approval is not a sandbox.** `allowed-tools` grants permission; it does
-  not remove capability. A narrow rule makes an unexpected command prompt you
-  rather than run silently, which is the boundary — not a wall.
+  not remove capability, and it does not guarantee visibility either. Whether an
+  unexpected command prompts you is your permission mode's call — under `auto` a
+  read-only command outside the grant simply runs. So the narrow rules are
+  scoping the prompts are written to keep, not a wall that stops them.
 - **Filter drivers other than Git LFS.** Hooks are disabled and LFS filters are
   neutralised for every git this plugin runs. A driver you have configured under
   some other name that a pull request can guess is not covered; closing that
