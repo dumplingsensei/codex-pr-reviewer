@@ -35,9 +35,19 @@ resolved is reported as pointing outside the pull request rather than followed.
 A review that was cut short is vetted as a fragment or not at all. The wrapper
 exits 0 for anything that ran and was saved, so a Codex that timed out or
 overflowed the output cap looks like success from outside; the saved file is
-where it says otherwise, in the `exit=<n>` on its first line and a note reading
-`this review is cut short` or `did not finish`. Vetting says so before it starts
-rather than presenting what survived as a complete picture.
+where it says otherwise. Both of its signals are read precisely: the first
+line's `exit=<n>` is Codex's own status and reads `exit=0` on every ordinary
+review, so a nonzero value is what matters rather than the marker being there,
+and the wrapper's note is matched as a whole line — a review whose subject is
+truncation quotes `cut short` inside its own findings, which a search of the
+file would otherwise take for the note. With neither signal it is a complete
+review. With either, vetting says the findings are partial before it starts.
+
+Background mode returns to the review. Step 4 recommends it for nearly every
+real pull request and step 5 ends the turn on launching it, so showing the
+result and checking it had no trigger on the path most reviews take: the command
+recommended a mode in which its own last two steps never ran. The turn the task
+reports back in picks up where the launch left off.
 
 Whether a finding is true and whether it is this pull request's problem are
 asked separately, because collapsing them is how a real defect disappears. A

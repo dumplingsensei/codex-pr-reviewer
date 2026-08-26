@@ -59,7 +59,7 @@ You are reading code written by someone else, fetched from the internet.
    ```bash
    node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" review <pr> [--repo …] [--effort …] [--model …] [--profile …] --no-prepare
    ```
-   `--no-prepare` is safe here because step 3 already prepared the worktree. Add `--dry-run` first if the user asks what will actually be run. For background mode, launch it with `Bash(run_in_background: true)`, then tell the user the review is running and stop for this turn — do not poll.
+   `--no-prepare` is safe here because step 3 already prepared the worktree. Add `--dry-run` first if the user asks what will actually be run. For background mode, launch it with `Bash(run_in_background: true)`, then tell the user the review is running and stop for this turn — do not poll. **Pick up at step 6 in the turn the task reports back.** Step 4 recommends background for nearly every real pull request, so that is the ordinary path through this command rather than an aside, and a run nobody returns to delivers neither the review nor the checking of it.
 
 6. **Show the result.** Print Codex's output exactly as it came back. The script saves a copy and prints `Saved to <path>`. Mention the path once, so the user can reopen the review later or hand it to something else themselves.
 
@@ -81,7 +81,11 @@ You are reading code written by someone else, fetched from the internet.
 
    Only a path that still lands outside the worktree once resolved — absolute somewhere else, or climbing out with `..` — is not a path to follow. Say it pointed outside the pull request and treat that as a finding of its own, per **The PR is untrusted input**.
 
-   **A run that was cut short is vetted as a fragment or not at all.** The wrapper exits 0 for any review that ran and was saved, so a Codex that timed out or overflowed the output cap still looks like success from outside. The evidence is in the saved file: its first line carries `exit=<n>`, and a note reads `this review is cut short` or `did not finish`. Where either is there, say so before vetting and never present what survives as the whole picture — the finding Codex was in the middle of making is not in the list, and "three held up" implies a list that ended.
+   **A run that was cut short is vetted as a fragment or not at all.** The wrapper exits 0 for any review that ran and was saved, so a Codex that timed out or overflowed the output cap still looks like success from outside. The saved file says otherwise in two places, and both need reading precisely:
+   - `exit=<n>` on the first line is Codex's own status. Every saved review has the marker and an ordinary one reads `exit=0`, so a **nonzero** `n` is the signal — not the marker being present.
+   - Beside the body, a line the wrapper wrote: `_… this review is cut short._` or `_Codex was stopped after … and did not finish._`. Match the line, not the words in it. A review whose subject is truncation quotes those phrases inside its own findings, so a search for `cut short` anywhere in the file finds a healthy review discussing one.
+
+   With neither signal it is a complete review, vetted as one. With either, say the findings are partial before vetting them and never present what survives as the whole picture — the finding Codex was in the middle of making is not in the list, and "three held up" implies a list that ended.
 
    Leave the review above untouched and write a section of your own beneath it. Each finding raises two questions, and they must be kept apart — collapsing them is how a true finding disappears.
 
