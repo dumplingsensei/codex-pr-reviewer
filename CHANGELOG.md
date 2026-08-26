@@ -37,7 +37,9 @@ exits 0 for anything that ran and was saved, so a Codex that timed out or
 overflowed the output cap looks like success from outside; the saved file is
 where it says otherwise. Both of its signals are read precisely: the first
 line's `exit=<n>` is Codex's own status and reads `exit=0` on every ordinary
-review, so a nonzero value is what matters rather than the marker being there,
+review, so anything other than exactly `exit=0` is what matters rather than the
+marker being there — read as a string, since a Codex killed by a signal has no
+exit code at all and the marker then reads `exit=null`,
 and the wrapper's note is matched as a whole line — a review whose subject is
 truncation quotes `cut short` inside its own findings, which a search of the
 file would otherwise take for the note. With neither signal it is a complete
