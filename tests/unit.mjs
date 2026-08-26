@@ -511,6 +511,21 @@ for (const flag of CLAUDE_SIDE_FLAGS) {
   eq(`${flag} is recognized where arguments are parsed`, recognized.includes(flag), true);
   eq(`${flag} is named as one the script never sees`, notForwarded.includes(flag), true);
 }
+// A flag advertised in the hint but missing from the parsed list leaves the
+// prompt contradicting itself: `--dry-run` was offered, acted on in steps 3 and
+// 5, and named nowhere in between, so the step that decides what to forward had
+// no entry for it.
+const hintedFlags = [...new Set(argumentHint.match(/--[a-z-]+/g) ?? [])];
+eq("the hint advertises flags at all", hintedFlags.length > 0, true);
+eq(
+  "every advertised flag is recognized where arguments are parsed",
+  hintedFlags.filter((flag) => !recognized.includes(flag)),
+  []
+);
+// And the converse, which is the half that would silently break a review: a
+// flag the script owns must never be described as one it never sees.
+eq("--dry-run is the script's, not the prompt's", notForwarded.includes("--dry-run"), false);
+
 // The stronger half: whatever the prose says, no invocation in this prompt may
 // carry one of these through to the script. Asserted non-empty first — a regex
 // that stopped matching would leave every check below vacuously true.
