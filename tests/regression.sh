@@ -125,6 +125,20 @@ else
 fi
 contains "--effort reaches the codex command" "$out" 'model_reasoning_effort="high"'
 
+# `--profile` is forwarded verbatim as codex's `-p`, and nothing asserted that
+# until Codex started carrying two unrelated things called a profile. `-p` is
+# the config-layer one — it layers $CODEX_HOME/<name>.config.toml over the base
+# user config, which is what this flag has always meant and still does. The
+# other is the filesystem permission profile, the beta mechanism that could one
+# day confine the reviewer's reads to the worktree; it is selected differently
+# and does not compose with the `-s read-only` this script passes. So the pin is
+# on the argv: whatever the read-confinement work ends up doing, it must not
+# quietly repurpose the flag users already pass, and if it has to displace it,
+# that is a documented change rather than a silent one.
+out="$(node "$SCRIPT" review 42 --repo o/r --profile probe --dry-run 2>&1)"
+contains "--profile reaches codex as -p" "$out" "-p probe"
+contains "and the read-only sandbox is still selected" "$out" "-s read-only"
+
 # Codex reads AGENTS.md from its working directory before it starts, and that
 # directory is the pull request. Left on, a PR rewrites the instructions of the
 # reviewer sent to inspect it; review.md's anti-injection rules bind Claude, not

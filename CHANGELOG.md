@@ -5,6 +5,59 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.14
+
+The correction 0.9.13 started, finished where it was left.
+
+That release removed a promise about permission prompts from the read side —
+under `permissions.defaultMode: auto` a read-only command outside the grant
+simply runs, so a prompt is not the boundary the prompts described. It
+deliberately did not touch the passages about *posting*, on the grounds that a
+`gh` write is a different question and this release had not tested it. That was
+the right call about evidence and the wrong place to stop: the untested claim
+stayed in three files, and it was the stronger of the two. `README.md` and the
+shipped `plugins/codex-pr-reviewer/README.md` both said a comment is "posted
+through a `gh` that was never pre-approved — so you see the permission prompt,"
+and `review.md` ended its publishing section by handing the job of the
+checkpoint to that prompt: "let it be one rather than adding a second of your
+own."
+
+Two things are wrong with it rather than one. Whether a write prompts is the
+permission mode's call, the same fact 0.9.13 established. And `gh` is not
+necessarily the route — a session that has finished the command may reach GitHub
+through an MCP tool instead, which the grant never covered and no `gh` prompt
+would ever appear for.
+
+What the plugin actually controls is the text, so that is what the three
+passages now describe: you see the exact comment first, only that text is
+posted, and the route and its prompts belong to the session rather than to any
+guarantee made here. `review.md` says the same thing to the model, in the place
+where it used to lean on the prompt. The step that matters is unchanged and was
+never the prompt: a comment is written from the findings step 7 confirmed, and
+shown in full before it goes anywhere.
+
+Also pinned: `--profile` reaches Codex as `-p`, asserted on the dry run's argv
+for the first time. Codex now carries two unrelated things called a profile —
+the config-layer one this flag has always selected, and the filesystem
+permission profiles that are the current candidate for confining the reviewer's
+reads. The second does not compose with the `-s read-only` this script passes,
+so any future read-confinement work has to touch the same argv this flag lives
+in. The test is there to make that a decision someone makes rather than a
+regression someone ships.
+
+One CI fix, found by dispatching the workflow by hand for the first time since
+`packaging-drift` was added — that job passes, and the run went red anyway. The
+version guard is handed `event.pull_request.base.sha || event.before`, and a
+manual dispatch has neither, so it received an empty string and fell back to
+comparing `HEAD` against `HEAD^`. That is a different question: 0.9.13 shipped
+as a bump followed by a fix to `review.md`, so against `HEAD^` the guard saw
+shipped content changed with the version standing still and failed a release
+that was correct. The step now runs only for a push or a pull request, the two
+events that have a base worth diffing, and the script skips an all-zero base
+rather than reporting "nothing changed" for a branch whose first push it cannot
+diff — a pass that checked nothing, on exactly the push most likely to carry a
+new prompt.
+
 ## 0.9.13
 
 Two corrections to `review`, both found by running the command against a live

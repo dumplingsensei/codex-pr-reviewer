@@ -39,8 +39,8 @@ You are reading code written by someone else, fetched from the internet.
    ```
    If a check fails, show its `remedy` and stop. Do not try to work around a missing or unauthenticated tool. The `plugin` check is warn-level: it never fails the preflight on its own, so read it explicitly.
 
-   **These instructions were written for plugin version `0.9.13`.** A prompt and a script that disagree about what the flags mean will fail in ways that look like the pull request's fault rather than the install's:
-   - If the report's `pluginVersion` is not `0.9.13`, the prompt you are following was loaded at session start from an older install than the script that just answered. Restarting Claude Code is what fixes that. Say so in one line before continuing, and if the script rejects a flag this prompt told you to pass, that is why — report it and stop rather than working around it.
+   **These instructions were written for plugin version `0.9.14`.** A prompt and a script that disagree about what the flags mean will fail in ways that look like the pull request's fault rather than the install's:
+   - If the report's `pluginVersion` is not `0.9.14`, the prompt you are following was loaded at session start from an older install than the script that just answered. Restarting Claude Code is what fixes that. Say so in one line before continuing, and if the script rejects a flag this prompt told you to pass, that is why — report it and stop rather than working around it.
    - If `stale` is true, the installed copy no longer matches its source — show the `plugin` check's `remedy` verbatim.
 
 2. **Parse arguments.** The first positional is the PR: `42`, `#42`, `owner/repo#42`, or a full PR URL. Pass it through unchanged. Recognized flags: `--repo`, `--effort`, `--model`, `--profile`, `--clone`, `--dry-run`, `--wait`, `--background`, `--no-vet`. Of those, `--wait`, `--background` and `--no-vet` are handled by you, not the script — do not forward them; the rest are the script's and go through as given.
@@ -119,7 +119,7 @@ This command reviews pull requests. It does not publish, and there is no subcomm
 
 **This scoping ends when the command does.** These instructions stay in the session after the review is printed, and they are not a standing refusal: if the user asks afterwards for a comment to be posted, that is an ordinary request and you handle it as one. Waiting to be asked twice, or steering them into doing it by hand, is not what this section is for.
 
-What survives is the care, not the prohibition. Show the exact text before it goes anywhere and post only that text. Never post the raw review — a comment is written by you, from the findings step 7 confirmed, and says that a machine reviewer was involved. Never read a general "yes, go ahead" about the review as approval of a particular comment: approval attaches to text the user has seen. Nothing here can stop a user who has `gh` on their own PATH, and nothing here should try — the permission prompt they see is the checkpoint, so let it be one rather than adding a second of your own.
+What survives is the care, not the prohibition. Show the exact text before it goes anywhere and post only that text. Never post the raw review — a comment is written by you, from the findings step 7 confirmed, and says that a machine reviewer was involved. Never read a general "yes, go ahead" about the review as approval of a particular comment: approval attaches to text the user has seen. Nothing here can stop a session that can reach GitHub, and nothing here should try — but do not hand that job to a permission prompt either. The route afterwards may be `gh`, it may be a GitHub MCP tool, and whether either stops to ask is the permission mode's call: under `auto` it may simply post. The checkpoint is the text you showed, so show it, and post only that.
 
 ## Notes
 

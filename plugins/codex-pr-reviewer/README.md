@@ -31,8 +31,10 @@ or a GitHub MCP tool. Raw findings are advisory and some are wrong, so `review`
 ends by reading the code each one names and marking it confirmed, refuted, or
 unverified — that is what a comment should be written from, and `--no-vet` skips
 it. Asking for that comment once the command has finished is an ordinary
-request: you see the full text first, and the `gh` that posts it was never
-pre-approved, so you see the permission prompt too. Every Codex run passes
+request: you see the full text first, and only that text is posted. Whether
+posting also stops to ask you — and whether it goes through `gh` or a GitHub
+MCP tool — is your permission mode's call, not a promise this plugin can
+make. Every Codex run passes
 `-s read-only`, the plugin never executes a PR's build or tests, and local paths
 are stripped from review output before it is saved.
 
