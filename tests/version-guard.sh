@@ -15,6 +15,20 @@ set -uo pipefail
 BASE="${1:-}"
 PLUGIN_JSON="plugins/codex-pr-reviewer/.claude-plugin/plugin.json"
 
+# A branch created by this push has no commit before it, and GitHub says so with
+# an all-zero sha rather than an empty string. Diffing against it fails, `changed`
+# comes back empty, and the guard reports "no shipped plugin content changed" —
+# a pass that checked nothing, on exactly the push most likely to carry a new
+# prompt. Say it was skipped instead.
+if [[ "$BASE" =~ ^0+$ ]]; then
+  echo "  SKIP — no commit before this push to compare against"
+  exit 0
+fi
+
+# The fallback answers a narrower question than the caller's: it is "did the last
+# commit ship content without moving the version", which is right locally and
+# wrong for a release that took two commits. CI passes a base explicitly for
+# that reason.
 if [[ -z "$BASE" ]]; then
   if ! BASE="$(git rev-parse --verify --quiet HEAD^)"; then
     echo "  SKIP — no parent commit to compare against"

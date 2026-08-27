@@ -59,8 +59,19 @@ jobs:
       - run: ./tests/regression.sh
       # Once per run, not once per matrix leg: it reads git history, which does
       # not vary by platform or Node version.
+      # Only where a base commit exists to diff against. A push has
+      # `event.before` and a pull request has `base.sha`; a schedule or a manual
+      # dispatch has neither, and the empty string sends the script to its local
+      # `HEAD^` fallback — which answers a different question. A release that
+      # takes two commits, the bump and then a fix to a prompt, has shipped
+      # content changed against `HEAD^` with the version already moved, so the
+      # guard failed on `main` for a release that was correct. A red build
+      # nobody can act on is worse than the gap it leaves: nothing reaches users
+      # between a push and the next one, and both of those run this.
       - name: Shipped content moved the version
-        if: matrix.os == 'ubuntu-latest' && matrix.node == '22'
+        if: >-
+          matrix.os == 'ubuntu-latest' && matrix.node == '22'
+          && (github.event_name == 'push' || github.event_name == 'pull_request')
         run: ./tests/version-guard.sh "${{ github.event.pull_request.base.sha || github.event.before }}"
       # The manifests decide whether this installs at all, and nothing else here
       # reads them the way Claude Code does. One leg only: the answer does not
