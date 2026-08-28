@@ -22,6 +22,13 @@ Codex which worktrees are approved, prohibit network and sibling-cache
 discovery, and require unresolved material claims to appear under
 `Verification limits`.
 
+The real review run uses `--strict-config`, not only the capability probe, so a
+Codex version that ignores `developer_instructions` cannot consume a paid review
+without its evidence boundary. Merged-commit materialization happens only for
+approved context PRs; reviewing a merged primary remains possible when its base
+branch has been deleted. Path redaction processes longer roots first, preventing
+`pr-4` from relabelling primary citations under `pr-42`.
+
 Context paths are redacted from saved output, active-run markers protect every
 evidence worktree from cleanup, and cleanup verifies and removes landed
 worktrees and branches with the same digest-bound plan as primary checkouts.

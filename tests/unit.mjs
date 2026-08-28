@@ -230,6 +230,15 @@ eq(
   ),
   "src/a.js:1 context/acme__app-pr7/head/src/b.js:2 context/acme__app-pr7/landed/src/c.js:3"
 );
+eq(
+  "rewrites a longer primary root before a prefixing context root",
+  stripReviewPaths(
+    "/cache/app/pr-42/src/primary.js:1 /cache/app/pr-4/src/context.js:2",
+    "/cache/app/pr-42",
+    [{ repo: "acme/app", number: 4, worktree: "/cache/app/pr-4" }]
+  ),
+  "src/primary.js:1 context/acme__app-pr4/head/src/context.js:2"
+);
 
 describe("buildReviewInstructions");
 const instructions = buildReviewInstructions(

@@ -55,7 +55,7 @@ node plugins/codex-pr-reviewer/scripts/pr-workspace.mjs doctor
    ├─ git branch -f codex-pr/42-base $(git merge-base <base> <head>)
    ├─ git worktree add -B codex-pr/42 <cache>/worktrees/owner__repo/pr-42
    │
-   └─ codex -C <worktree> -s read-only review --base codex-pr/42-base
+   └─ codex --strict-config -C <worktree> -s read-only review --base codex-pr/42-base
 ```
 
 - **`--base` pinned to a branch at the merge-base** makes the review see exactly what GitHub's "Files changed" tab shows, whether Codex reads `--base` with two-dot or three-dot semantics. Verified against `gh pr diff`: identical file lists, identical `+225/-18` totals.
@@ -149,7 +149,7 @@ pr-workspace.mjs doctor  [--json]
 
 ```
 $ pr-workspace.mjs review cli/cli#14057 --context-pr cli/go-gh#236 --dry-run
-codex -C <cache>/worktrees/cli__cli/pr-14057 -s read-only \
+codex --strict-config -C <cache>/worktrees/cli__cli/pr-14057 -s read-only \
   -c project_doc_max_bytes=0 -c developer_instructions='<generated evidence policy>' \
   review --base codex-pr/14057-base --title 'PR #14057: docs: recommend nix-shell …'
 ```
