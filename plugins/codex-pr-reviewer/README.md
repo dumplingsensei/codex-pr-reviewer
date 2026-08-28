@@ -40,10 +40,12 @@ it. Asking for that comment once the command has finished is an ordinary
 request: you see the full text first, and only that text is posted. Whether
 posting also stops to ask you — and whether it goes through `gh` or a GitHub
 MCP tool — is your permission mode's call, not a promise this plugin can
-make. Every Codex run passes `-s read-only`, receives generated developer
-instructions that scope reads to the primary and approved context worktrees,
-and has project documents disabled. The plugin never executes a PR's build or
-tests, and all primary and context cache paths are stripped from review output
+make. Every Codex run passes `--strict-config` and `-s read-only`, receives
+generated developer instructions that scope reads to the primary and approved
+context worktrees, and has project documents disabled. An unsupported
+instruction key therefore stops the run instead of silently weakening it. The
+plugin never executes a PR's build or tests, and all primary and context cache
+paths are stripped from review output
 before it is saved.
 
 A pull request is code written by a stranger, so what it could otherwise reach

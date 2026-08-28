@@ -1770,36 +1770,6 @@ function prepare(options, positionals, cwd) {
     typeof pr.mergeCommit?.oid === "string" && /^[0-9a-f]{7,64}$/.test(pr.mergeCommit.oid)
       ? pr.mergeCommit.oid
       : null;
-  if (pr.state === "MERGED") {
-    if (!mergeCommitSha) {
-      throw new UserError(
-        `GitHub did not report the commit that landed ${slug}#${number}.`,
-        "The merged tree cannot be used as review evidence without an exact merge commit."
-      );
-    }
-    let mergeObject = git(repoDir, ["cat-file", "-e", `${mergeCommitSha}^{commit}`]);
-    if (mergeObject.status !== 0) {
-      mergeObject = git(repoDir, ["fetch", "--force", "--no-tags", remote, mergeCommitSha]);
-    }
-    if (
-      mergeObject.status !== 0 ||
-      git(repoDir, ["cat-file", "-e", `${mergeCommitSha}^{commit}`]).status !== 0
-    ) {
-      throw new UserError(
-        `Could not materialize GitHub's merge commit for ${slug}#${number}.`,
-        `Expected ${mergeCommitSha.slice(0, 12)} from \`${remote}\`.`
-      );
-    }
-    if (
-      baseSource === pr.baseRefName &&
-      git(repoDir, ["merge-base", "--is-ancestor", mergeCommitSha, baseRef]).status !== 0
-    ) {
-      throw new UserError(
-        `The fetched base of ${slug}#${number} does not contain GitHub's merge commit.`,
-        `\`${pr.baseRefName}\` is at ${baseTipSha.slice(0, 12)}, but GitHub reports merge commit ${mergeCommitSha.slice(0, 12)}.`
-      );
-    }
-  }
 
   const mergeBase = gitOut(repoDir, ["merge-base", baseRef, headRef]);
   const { headBranch, baseBranch, worktree } = target;
@@ -1855,6 +1825,7 @@ function prepare(options, positionals, cwd) {
     headSha,
     mergeBase,
     baseRefName: pr.baseRefName,
+    baseSource,
     baseTipSha,
     mergeCommitSha,
     mergedAt: pr.mergedAt ?? null,
@@ -1912,6 +1883,42 @@ function prepareContextSnapshot(entry) {
   }
   if (!entry.mergeCommitSha) {
     throw new UserError(`Merged context ${entry.key} has no verified merge commit.`);
+  }
+
+  let mergeObject = git(entry.repoDir, ["cat-file", "-e", `${entry.mergeCommitSha}^{commit}`]);
+  if (mergeObject.status !== 0) {
+    mergeObject = git(entry.repoDir, [
+      "fetch",
+      "--force",
+      "--no-tags",
+      entry.remote,
+      entry.mergeCommitSha
+    ]);
+  }
+  if (
+    mergeObject.status !== 0 ||
+    git(entry.repoDir, ["cat-file", "-e", `${entry.mergeCommitSha}^{commit}`]).status !== 0
+  ) {
+    throw new UserError(
+      `Could not materialize GitHub's merge commit for ${entry.key}.`,
+      `Expected ${entry.mergeCommitSha.slice(0, 12)} from \`${entry.remote}\`.`
+    );
+  }
+
+  // A live base branch should contain the merge GitHub reported. A deleted
+  // branch falls back to its pre-merge base commit, where this ancestry cannot
+  // hold and is not an identity check.
+  const baseRef = entry.refs?.[1];
+  if (
+    entry.baseSource === entry.baseRefName &&
+    (!baseRef ||
+      git(entry.repoDir, ["merge-base", "--is-ancestor", entry.mergeCommitSha, baseRef]).status !==
+        0)
+  ) {
+    throw new UserError(
+      `The fetched base of ${entry.key} does not contain GitHub's merge commit.`,
+      `\`${entry.baseRefName}\` is at ${entry.baseTipSha.slice(0, 12)}, but GitHub reports merge commit ${entry.mergeCommitSha.slice(0, 12)}.`
+    );
   }
 
   const target = landedTarget(entry);
@@ -2122,24 +2129,28 @@ export function stripWorktreePaths(text, worktree) {
 }
 
 export function stripReviewPaths(text, primaryWorktree, contexts = []) {
-  let result = String(text);
-  const replaceRoot = (root, label) => {
-    if (!root) return;
-    const escaped = escapeRegex(root);
-    result = result
-      .replaceAll(new RegExp(`${escaped}/`, "g"), `${label}/`)
-      .replaceAll(new RegExp(escaped, "g"), label);
-  };
-
+  const roots = [{ root: primaryWorktree, label: "" }];
   for (const context of contexts) {
     const label = `context/${slugToDir(context.repo)}-pr${context.number}`;
-    if (context.landedWorktree) replaceRoot(context.landedWorktree, `${label}/landed`);
-    replaceRoot(context.worktree, `${label}/head`);
+    if (context.landedWorktree) {
+      roots.push({ root: context.landedWorktree, label: `${label}/landed` });
+    }
+    roots.push({ root: context.worktree, label: `${label}/head` });
   }
-  const primary = escapeRegex(primaryWorktree);
-  return result
-    .replaceAll(new RegExp(`${primary}/`, "g"), "")
-    .replaceAll(new RegExp(primary, "g"), ".");
+
+  // A worktree can prefix another (`pr-4` and `pr-42`, or `pr-4-landed`).
+  // Rewrite the most specific root first so a shorter path cannot relabel a
+  // citation from another checkout.
+  roots.sort((left, right) => right.root.length - left.root.length);
+  let result = String(text);
+  for (const { root, label } of roots) {
+    if (!root) continue;
+    const escaped = escapeRegex(root);
+    result = result
+      .replaceAll(new RegExp(`${escaped}/`, "g"), label ? `${label}/` : "")
+      .replaceAll(new RegExp(`${escaped}$`, "g"), label || ".");
+  }
+  return result;
 }
 
 /**
@@ -2430,6 +2441,7 @@ async function commandReview(argv, cwd) {
   // so this is the only place that hole can be closed.
   const instructions = buildReviewInstructions(entry, contexts);
   const codexArgs = [
+    "--strict-config",
     "-C",
     entry.worktree,
     "-s",

@@ -138,6 +138,7 @@ contains "--effort reaches the codex command" "$out" 'model_reasoning_effort="hi
 out="$(node "$SCRIPT" review 42 --repo o/r --profile probe --dry-run 2>&1)"
 contains "--profile reaches codex as -p" "$out" "-p probe"
 contains "and the read-only sandbox is still selected" "$out" "-s read-only"
+contains "the paid review keeps strict config validation enabled" "$out" "--strict-config"
 
 # Codex reads AGENTS.md from its working directory before it starts, and that
 # directory is the pull request. Left on, a PR rewrites the instructions of the
@@ -178,7 +179,7 @@ note "--dry-run has no side effects"
 # and built a worktree before printing the command it "would" run.
 rm -rf "$CACHE"
 out="$(node "$SCRIPT" review o/r#7 --repo o/r --dry-run 2>&1)"
-contains "dry-run prints a codex command" "$out" "codex -C"
+contains "dry-run prints a strict codex command" "$out" "codex --strict-config -C"
 check "dry-run created nothing on disk" \
   "$(find "$CACHE" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')" "0"
 
@@ -1167,6 +1168,44 @@ contains "cleanup plans the landed worktree" "$context_plan" "$CONTEXT_LANDED_WT
 cclean --pr o/context#8 >/dev/null 2>&1
 check "cleanup removes the landed worktree" \
   "$([[ -e "$CONTEXT_LANDED_WT" ]] && echo present || echo gone)" "gone"
+
+note "a merged primary with a deleted base does not need landed context"
+MERGEDUP="$SANDBOX/merged-upstream"
+mkdir -p "$MERGEDUP" && git -C "$MERGEDUP" init --quiet -b main
+git -C "$MERGEDUP" config user.email t@t
+git -C "$MERGEDUP" config user.name t
+printf 'base\n' >"$MERGEDUP/primary.txt"
+git -C "$MERGEDUP" add primary.txt
+git -C "$MERGEDUP" commit --quiet -m base
+MERGED_BASE="$(git -C "$MERGEDUP" rev-parse HEAD)"
+git -C "$MERGEDUP" checkout --quiet -b merged-feature
+printf 'change\n' >>"$MERGEDUP/primary.txt"
+git -C "$MERGEDUP" add primary.txt
+git -C "$MERGEDUP" commit --quiet -m change
+MERGED_HEAD="$(git -C "$MERGEDUP" rev-parse HEAD)"
+git -C "$MERGEDUP" update-ref refs/pull/10/head "$MERGED_HEAD"
+git -C "$MERGEDUP" branch -D main >/dev/null
+cat >"$SANDBOX/merged-primary.json" <<JSON
+{"number":10,"title":"merged primary","url":"https://github.com/o/merged/pull/10",
+ "state":"MERGED","isDraft":false,"isCrossRepository":false,"baseRefName":"main",
+ "baseRefOid":"$MERGED_BASE","headRefOid":"$MERGED_HEAD",
+ "mergeCommit":{"oid":"ffffffffffffffffffffffffffffffffffffffff"},
+ "mergedAt":"2026-08-28T00:00:00Z","author":{"login":"someone"},
+ "additions":1,"deletions":0,"changedFiles":1}
+JSON
+merged_prepare="$(
+  cd "$SYMCWD" && env PATH="$SANDBOX/ghstub:$STUBS:$PATH" \
+    CPR_PR_JSON="$SANDBOX/merged-primary.json" CPR_UPSTREAM="$MERGEDUP" \
+    node "$SCRIPT" prepare o/merged#10 --json 2>"$SANDBOX/merged-primary-prepare.log"
+)"
+check "the merged primary prepares without fetching its merge commit" "$?" "0"
+contains "the deleted-base fallback is recorded" "$merged_prepare" "branch deleted"
+out="$(
+  cd "$SYMCWD" && env PATH="$STUBS:$PATH" CPR_STUB_RUN_BODY="merged primary review" \
+    node "$SCRIPT" review o/merged#10 --no-prepare 2>&1
+)"
+contains "the merged primary reaches codex without landed evidence" "$out" "merged primary review"
+cclean --pr o/merged#10 >/dev/null 2>&1
 note "identity: metadata and code have to be the same repository"
 # Regression: the head was checked against the API and the base was not, so the
 # review boundary could be computed from a history GitHub never described.

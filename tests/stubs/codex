@@ -56,13 +56,19 @@ case "${1:-}" in
     ;;
 
   --strict-config)
-    if [ "${CPR_STUB_PROBE_INSTRUCTIONS-yes}" = "no" ]; then
-      echo "unknown configuration key developer_instructions" >&2
-      exit 1
-    fi
-    echo "Usage: codex review [OPTIONS] [PROMPT]"
-    echo "      --base <BRANCH>"
-    exit 0
+    # Doctor adds --help; a real review now keeps strict mode enabled too and
+    # must fall through to the run behavior below.
+    case " $* " in
+      *" review --help "*)
+        if [ "${CPR_STUB_PROBE_INSTRUCTIONS-yes}" = "no" ]; then
+          echo "unknown configuration key developer_instructions" >&2
+          exit 1
+        fi
+        echo "Usage: codex review [OPTIONS] [PROMPT]"
+        echo "      --base <BRANCH>"
+        exit 0
+        ;;
+    esac
     ;;
 
   login)
