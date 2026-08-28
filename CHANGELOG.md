@@ -5,6 +5,30 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.15
+
+Reviews can now verify cross-repository dependency claims against explicitly
+approved pull requests. `review` detects repository-qualified references only as
+untrusted suggestions, asks before fetching them, and accepts the repeatable
+`--context-pr owner/repo#N` flag for direct approval. Codex remains scoped to the
+primary PR; context repositories are evidence, not additional finding targets.
+
+Each context is independently pinned and verified. Open PRs expose the
+contributor head and its merge-base diff. Merged PRs additionally expose
+GitHub's exact `mergeCommit` in a separate landed worktree, so effective behavior
+is not inferred from a contributor head that may differ after a squash merge,
+conflict resolution, or merge queue. Generated developer instructions tell
+Codex which worktrees are approved, prohibit network and sibling-cache
+discovery, and require unresolved material claims to appear under
+`Verification limits`.
+
+Context paths are redacted from saved output, active-run markers protect every
+evidence worktree from cleanup, and cleanup verifies and removes landed
+worktrees and branches with the same digest-bound plan as primary checkouts.
+Unit and synthetic regression coverage exercise reference parsing, instruction
+generation, path hygiene, merged-head/landed divergence, active-run protection,
+and cleanup.
+
 ## 0.9.14
 
 The correction 0.9.13 started, finished where it was left.
