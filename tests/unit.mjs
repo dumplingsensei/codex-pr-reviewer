@@ -19,10 +19,14 @@ const root = path.join(here, "..");
 const pluginDir = path.join(root, "plugins", "codex-pr-reviewer");
 const {
   parsePrRef,
+  parseContextPrRefs,
+  extractReferenceHints,
   remoteUrlToSlug,
   remoteUrlParts,
   apiHostOf,
   stripWorktreePaths,
+  stripReviewPaths,
+  buildReviewInstructions,
   canonicalSlug,
   slugToDir,
   entryKey,
@@ -86,6 +90,42 @@ eq("http URL", parsePrRef("http://github.com/o/r/pull/1"), { repo: "o/r", number
 throws("rejects prose", () => parsePrRef("the second one"));
 throws("rejects empty", () => parsePrRef(""));
 throws("rejects undefined", () => parsePrRef(undefined));
+
+describe("parseContextPrRefs");
+eq(
+  "accepts and deduplicates qualified contexts",
+  parseContextPrRefs(["Owner/Repo#7", "https://github.com/owner/repo/pull/7", "o/two#8"]),
+  [
+    { repo: "owner/repo", number: 7, key: "owner/repo#7" },
+    { repo: "o/two", number: 8, key: "o/two#8" }
+  ]
+);
+throws("rejects bare context numbers", () => parseContextPrRefs(["7"]));
+throws("rejects the primary PR as context", () =>
+  parseContextPrRefs(["owner/repo#7"], "owner/repo#7")
+);
+throws("caps context count", () =>
+  parseContextPrRefs(["o/a#1", "o/b#2", "o/c#3", "o/d#4", "o/e#5"])
+);
+
+describe("extractReferenceHints");
+const hintedDiff = [
+  "diff --git a/docs/a.md b/docs/a.md",
+  "--- a/docs/a.md",
+  "+++ b/docs/a.md",
+  "@@ -9,0 +10,2 @@",
+  "+Implemented by other-repo#62 / PR #71.",
+  "+See https://github.com/acme/service/pull/9.",
+  "-Removed owner/repo#1."
+].join("\n");
+eq("returns added reference lines", extractReferenceHints(hintedDiff), {
+  referenceHints: [
+    { path: "docs/a.md", line: 10, text: "Implemented by other-repo#62 / PR #71." },
+    { path: "docs/a.md", line: 11, text: "See https://github.com/acme/service/pull/9." }
+  ],
+  referenceHintsTruncated: false
+});
+eq("reports a capped hint list", extractReferenceHints(hintedDiff, 1).referenceHintsTruncated, true);
 
 describe("remoteUrlToSlug");
 eq("scp-style ssh", remoteUrlToSlug("git@github.com:cli/cli.git"), "cli/cli");
@@ -171,6 +211,66 @@ eq(
   "a.go and b.go"
 );
 eq("leaves unrelated text alone", stripWorktreePaths("no paths here", "/wt"), "no paths here");
+
+describe("stripReviewPaths");
+const contextPaths = [
+  {
+    repo: "Acme/App",
+    number: 7,
+    worktree: "/cache/app/pr-7",
+    landedWorktree: "/cache/app/pr-7-landed"
+  }
+];
+eq(
+  "distinguishes primary, head, and landed paths",
+  stripReviewPaths(
+    "/primary/src/a.js:1 /cache/app/pr-7/src/b.js:2 /cache/app/pr-7-landed/src/c.js:3",
+    "/primary",
+    contextPaths
+  ),
+  "src/a.js:1 context/acme__app-pr7/head/src/b.js:2 context/acme__app-pr7/landed/src/c.js:3"
+);
+
+describe("buildReviewInstructions");
+const instructions = buildReviewInstructions(
+  { key: "acme/docs#3", worktree: "/primary", baseBranch: "codex/base" },
+  [
+    {
+      key: "acme/app#7",
+      repo: "acme/app",
+      number: 7,
+      state: "MERGED",
+      snapshotKind: "landed",
+      snapshotSha: "abc1234",
+      snapshotWorktree: "/context-landed",
+      mergeBase: "base123",
+      headSha: "head123",
+      worktree: "/context-head"
+    }
+  ]
+);
+eq("targets only the primary PR", instructions.includes("Review only acme/docs#3"), true);
+eq("names the landed evidence snapshot", instructions.includes("landed tree abc1234"), true);
+eq("requires verification limits", instructions.includes("Verification limits"), true);
+eq("forbids unrelated repositories", instructions.includes("unrelated repositories"), true);
+eq("includes the follow-through policy block", instructions.includes("<default_follow_through_policy>"), true);
+eq("includes the deeper evidence nudge", instructions.includes("<dig_deeper_nudge>"), true);
+eq(
+  "states the no-context boundary",
+  buildReviewInstructions(
+    { key: "acme/docs#3", worktree: "/primary", baseBranch: "codex/base" },
+    []
+  ).includes("No cross-repository context was approved"),
+  true
+);
+eq(
+  "does not stringify missing dry-run metadata",
+  buildReviewInstructions(
+    { key: "acme/docs#3", worktree: "/primary", baseBranch: "codex/base" },
+    [{ key: "acme/app#7", unprepared: true }]
+  ).includes("undefined"),
+  false
+);
 
 describe("slug canonicalization");
 // Regression: `.replace("/", "__")` substituted only the first slash, so a

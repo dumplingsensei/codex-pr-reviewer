@@ -145,6 +145,25 @@ contains "and the read-only sandbox is still selected" "$out" "-s read-only"
 # this child process.
 contains "project documents are disabled for the review" "$out" "project_doc_max_bytes=0"
 
+# Context PRs are repeatable, but each one must be qualified so approval cannot
+# silently bind to whichever repository happens to be the current directory.
+node "$SCRIPT" review o/r#7 \
+  --context-pr o/context#8 --context-pr x/dependency#9 \
+  --dry-run --json >"$SANDBOX/context-dry.json" 2>/dev/null
+check "repeatable context refs reach the dry-run plan" \
+  "$(node -e 'const j=require(process.argv[1]); console.log(j.contexts.map((x)=>x.key).join(","))' "$SANDBOX/context-dry.json")" \
+  "o/context#8,x/dependency#9"
+contains "context policy uses developer instructions, not a positional prompt" \
+  "$(cat "$SANDBOX/context-dry.json")" "<context_evidence>"
+check "codex review still starts directly with --base" \
+  "$(node -e 'const j=require(process.argv[1]); const i=j.command.indexOf("review"); console.log(j.command[i+1])' "$SANDBOX/context-dry.json")" \
+  "--base"
+out="$(node "$SCRIPT" review o/r#7 --context-pr 8 --dry-run 2>&1)"
+contains "a bare context PR is rejected" "$out" "has no repository"
+out="$(node "$SCRIPT" review o/r#7 --dry-run 2>&1)"
+contains "a review without contexts keeps an explicit evidence boundary" \
+  "$out" "No cross-repository context was approved"
+
 # Both flags were removed rather than repaired: --context appended a positional
 # prompt that `codex review --base` rejects outright ("the argument '--base
 # <BRANCH>' cannot be used with '[PROMPT]'"), so it had never worked; and
@@ -501,6 +520,12 @@ out="$(CPR_STUB_PROBE_ERR="error: could not connect" CPR_STUB_PROBE_EXIT=70 \
 contains "a probe that fails is not reported as a missing flag" "$out" "exited 70"
 check "and does not send the user to reinstall" \
   "$(printf '%s' "$out" | grep -cE 'npm install -g @openai/codex|codex update')" "0"
+
+# Cross-repository evidence uses developer instructions rather than the
+# positional prompt older Codex versions reject beside --base.
+out="$(CPR_STUB_PROBE_INSTRUCTIONS=no \
+  PATH="$SANDBOX/preflight:$STUBS:$PATH" node "$SCRIPT" doctor 2>&1)"
+contains "a codex without developer instructions is refused" "$out" "developer_instructions"
 
 # The same stub, answering with --base. Asserted on doctor's exit status, not on
 # the absence of one message: "no complaint about --base" is also satisfied by a
@@ -1078,6 +1103,70 @@ check "the checkout is still clean" \
 check "the entry is still a symlink as far as the diff is concerned" \
   "$(symgit diff --raw codex-pr/o__r/7-base -- escape.txt | grep -c 120000)" "1"
 
+
+note "a merged cross-repository context uses the landed tree"
+git -C "$SYMUP" checkout --quiet -b context-feature main
+printf 'contributor head\n' >"$SYMUP/context.txt"
+git -C "$SYMUP" add context.txt
+git -C "$SYMUP" commit --quiet -m "context contributor head"
+CONTEXT_HEAD="$(git -C "$SYMUP" rev-parse HEAD)"
+git -C "$SYMUP" update-ref refs/pull/8/head "$CONTEXT_HEAD"
+git -C "$SYMUP" checkout --quiet main
+git -C "$SYMUP" merge --quiet --squash context-feature
+printf 'landed tree\n' >"$SYMUP/context.txt"
+git -C "$SYMUP" add context.txt
+git -C "$SYMUP" commit --quiet -m "land context with merge-time resolution"
+CONTEXT_MERGE="$(git -C "$SYMUP" rev-parse HEAD)"
+cat >"$SANDBOX/context-pr.json" <<JSON
+{"number":8,"title":"context implementation","url":"https://github.com/o/context/pull/8",
+ "state":"MERGED","isDraft":false,"isCrossRepository":false,"baseRefName":"main",
+ "baseRefOid":"$BASE_OID","headRefOid":"$CONTEXT_HEAD",
+ "mergeCommit":{"oid":"$CONTEXT_MERGE"},"mergedAt":"2026-08-28T00:00:00Z",
+ "author":{"login":"someone"},"additions":1,"deletions":0,"changedFiles":1}
+JSON
+
+CONTEXT_HEAD_WT="$(printf '%s' "$CACHE/worktrees/o__context/pr-8" | tr -s /)"
+CONTEXT_LANDED_WT="$(printf '%s' "$CACHE/worktrees/o__context/pr-8-landed" | tr -s /)"
+context_json="$(
+  cd "$SYMCWD" && env PATH="$SANDBOX/ghstub:$STUBS:$PATH" \
+    CPR_PR_JSON="$SANDBOX/context-pr.json" CPR_UPSTREAM="$SYMUP" \
+    CPR_STUB_RUN_HOOK="cat \"$CACHE\"/runs/*.json > \"$SANDBOX/context-marker.json\"; node \"$SCRIPT\" clean --pr o/context#8 --dry-run --json > \"$SANDBOX/context-held.json\" 2>/dev/null" \
+    CPR_STUB_RUN_BODY="$SYMWT/f.txt:1 $CONTEXT_HEAD_WT/context.txt:1 $CONTEXT_LANDED_WT/context.txt:1" \
+    node "$SCRIPT" review o/r#7 --context-pr o/context#8 --no-prepare --json 2>"$SANDBOX/context-review.log"
+)"
+check "the context review completed" "$?" "0"
+check "the run marker protects the primary and context" \
+  "$(node -e 'const m=require(process.argv[1]);process.stdout.write(m.keys.join(","))' "$SANDBOX/context-marker.json")" \
+  "o/r#7,o/context#8"
+check "cleanup holds an active context back" \
+  "$(json_at "$SANDBOX/context-held.json" wouldRemove)" "0"
+check "cleanup reports the held context entry" \
+  "$(json_at "$SANDBOX/context-held.json" running.0.key)" "o/context#8"
+check "the context JSON reports the landed snapshot" \
+  "$(printf '%s' "$context_json" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).contexts[0].snapshotSha))')" \
+  "$CONTEXT_MERGE"
+check "the contributor-head worktree remains the PR head" \
+  "$(cat "$CONTEXT_HEAD_WT/context.txt")" "contributor head"
+check "the evidence worktree is the tree that landed" \
+  "$(cat "$CONTEXT_LANDED_WT/context.txt")" "landed tree"
+context_review_path="$(
+  printf '%s' "$context_json" |
+    node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).reviewPath))'
+)"
+context_review_body="$(cat "$context_review_path")"
+contains "the saved review labels the merged context" "$context_review_body" 'o/context#8` · MERGED'
+contains "the saved review rewrites the context head path" \
+  "$context_review_body" "context/o__context-pr8/head/context.txt:1"
+contains "the saved review rewrites the landed path" \
+  "$context_review_body" "context/o__context-pr8/landed/context.txt:1"
+check "the saved review leaks no context cache path" \
+  "$(printf '%s' "$context_review_body" | grep -c "$CONTEXT_HEAD_WT")" "0"
+
+context_plan="$(node "$SCRIPT" clean --pr o/context#8 --dry-run --json 2>/dev/null)"
+contains "cleanup plans the landed worktree" "$context_plan" "$CONTEXT_LANDED_WT"
+cclean --pr o/context#8 >/dev/null 2>&1
+check "cleanup removes the landed worktree" \
+  "$([[ -e "$CONTEXT_LANDED_WT" ]] && echo present || echo gone)" "gone"
 note "identity: metadata and code have to be the same repository"
 # Regression: the head was checked against the API and the base was not, so the
 # review boundary could be computed from a history GitHub never described.

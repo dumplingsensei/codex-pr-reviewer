@@ -2,16 +2,16 @@
 
 ## Why this plugin has a threat model
 
-`codex-pr-reviewer` fetches pull requests written by strangers, checks them out
-into a working tree on your machine, and runs a model over them. Three things
-follow from that, and they are what this policy is about:
+`codex-pr-reviewer` fetches pull requests written by strangers, checks approved
+primary and context PRs out into worktrees on your machine, and runs a model over
+them. Three things follow from that, and they are what this policy is about:
 
 - **Checking out a pull request writes attacker-authored bytes to disk.** That
   happens before any sandbox exists, and `git` executes hooks and filters while
   it does it.
-- **The reviewer reads the code it is reviewing.** Anything a pull request can
-  put in front of Codex — source, comments, test fixtures, project documents —
-  is text that will try to be read as instructions.
+- **The reviewer reads the code it is reviewing and approved evidence.**
+  Anything a pull request can put in front of Codex — source, comments, test
+  fixtures, project documents — is text that will try to be read as instructions.
 - **The plugin writes into your real repositories.** Branches, refs, and
   worktrees are created inside whichever checkout hosted the pull request, and
   `clean` deletes them again.
@@ -55,8 +55,9 @@ older than what is installed.
   records: path traversal, a manifest that directs a delete somewhere it should
   not reach, a symlink that escapes a worktree.
 - Fetching code from one place while reporting metadata from another.
-- Anything that gets the plugin to act on someone else's repository, or on a
-  pull request other than the one named.
+- Anything that gets the plugin to act on an unapproved repository or pull
+  request. References detected in a primary diff must remain suggestions until
+  the user approves specific, repository-qualified context PRs.
 - Leaking local paths, tokens, or private code into a saved review.
 
 ## Known and accepted
@@ -80,8 +81,11 @@ worse *is* in scope.
   pull request controls — `core.symlinks=false` means a link committed in the
   diff is checked out as text naming its target rather than as a path anything
   can follow — but a reviewer that has been argued into looking somewhere else
-  can still read your files and quote them into its output. What limits the
-  damage is that the review goes to a `0600` file in your cache and the plugin
+  can still read your files and quote them into its output. Generated developer
+  instructions constrain evidence reads to the primary and explicitly approved
+  context worktrees, but that is an instruction rather than filesystem
+  confinement. What limits the damage is that the review goes to a `0600` file
+  in your cache and the plugin
   has no way to publish it: nothing leaves the machine unless you send it. Read
   a review before you paste it. Confining reads properly needs Codex's
   permission profiles, which are in beta as of Codex 0.138.
@@ -95,7 +99,8 @@ worse *is* in scope.
   not separated is the local bookkeeping. Fixing that means the host in every
   identity plus a migration for entries written without it.
 - **The in-flight cleanup race.** A `clean` that took its snapshot before a
-  review recorded itself cannot hold back a marker that does not exist yet. The
+  review recorded itself cannot hold back a marker that does not exist yet.
+  Markers protect every primary and context evidence entry once present, but the
   guard is not a lock, and a lock that outlives a crashed run is a worse failure.
 - **The manifest lock expires**, by design, for the same reason. A holder that
   overruns that window can in principle be preempted between checking that the

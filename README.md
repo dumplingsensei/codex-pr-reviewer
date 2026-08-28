@@ -38,7 +38,7 @@ node plugins/codex-pr-reviewer/scripts/pr-workspace.mjs doctor
 
 | Command | What it does |
 |---|---|
-| `/codex-pr-reviewer:review <pr>` | Fetch a PR, review it, and check the findings against the code. `<pr>` is `42`, `owner/repo#42`, or a URL. |
+| `/codex-pr-reviewer:review <pr> [--context-pr owner/repo#N]…` | Fetch a PR, review it, and check the findings against the code. `<pr>` is `42`, `owner/repo#42`, or a URL. Repeat `--context-pr` for approved cross-repository evidence. |
 | `/codex-pr-reviewer:list` | Show PRs awaiting your review, across GitHub or in one repo. |
 | `/codex-pr-reviewer:sweep [--limit N]` | Review a batch (smallest first) into one digest. |
 | `/codex-pr-reviewer:clean` | Remove the worktrees, branches, and clones the plugin created. |
@@ -63,6 +63,9 @@ node plugins/codex-pr-reviewer/scripts/pr-workspace.mjs doctor
 - **A worktree** never touches the branch you are on, survives a dirty working tree, and holds several PRs at once — none of which `gh pr checkout` can do.
 
 Fork PRs need no extra remotes: GitHub serves `refs/pull/<N>/head` from the base repository.
+Cross-repository evidence is opt-in. The review command scans only added diff lines for repository-qualified references, shows them as untrusted suggestions, and asks once which—if any—to use before fetching another repository. `--context-pr owner/repo#N` supplies that approval explicitly and is repeatable up to four contexts. Codex still reviews only the primary PR: context worktrees can establish or refute its dependency claims, but defects confined to a context PR are not findings against the primary.
+
+For an open context PR, Codex gets its pinned contributor head and merge-base diff. For a merged context PR, it also gets a separate worktree pinned to GitHub's `mergeCommit`; that landed tree is authoritative for effective behavior because merge queues, conflict resolution, or squash-merge changes can make it differ from the contributor head.
 
 ## Safety
 
@@ -73,11 +76,12 @@ Fork PRs need no extra remotes: GitHub serves `refs/pull/<N>/head` from the base
 - **Each command is granted only the subcommands it uses.** `review` and `sweep` pre-approve `pr-workspace.mjs` by full path and only its `doctor`, `prepare`, and `review` subcommands; `list` gets `list`; `clean` gets `clean`. So `clean` — the one destructive subcommand — is not reachable from a review, and no command reaches `gh` directly, where a grant would also carry `gh pr review`, `gh pr merge`, and `gh api`. `sweep` and `list` additionally hold read-only `gh` subcommands for finding pull requests. `clean` holds nothing else at all: it verifies its own removals, so the `git -C` grant it used to need — a prefix that also matched `reset`, `branch -D`, and `config` — is gone. Pre-approval is not a sandbox: `allowed-tools` grants permission rather than removing capability, so `node -e` stays callable. Whether it also becomes *visible* is your permission mode's call — under `auto`, a read-only command outside the grant simply runs — so the narrow rules are scoping the prompts are written to keep rather than a wall that stops them.
 - **Local paths are stripped** from saved review output, so a comment you paste never leaks your filesystem layout.
 - **Cleanup is precise.** The plugin records what it created in a manifest and `clean` removes only that, deleting a branch only while it still points at the recorded commit. Saved reviews survive every clean unless `--purge-reviews` names them.
-- **A review in flight is left alone.** Cleanup holds a running review's PR back — worktree, branches, shared clone — and says which, rather than deleting state out from under a paid run. A guard, not a lock: see [Script reference](#script-reference).
+- **A review in flight is left alone.** Cleanup holds back the primary PR and every approved context — head worktrees, merged landed snapshots, branches, and shared clones — and says which, rather than deleting state out from under a paid run. A guard, not a lock: see [Script reference](#script-reference).
 - **What is fetched is what GitHub says it is.** Metadata and code arrive by different paths, so all three ends are tied together: the remote must be on the same host that served the PR's metadata, the fetched head must equal the API's `headRefOid`, and the fetched base must contain its `baseRefOid`. The base is checked by ancestry rather than equality, because a base branch legitimately moves between the API call and the fetch. Any of the three failing stops the run and points at `--clone`.
 - **A pull request cannot point the reviewer out of its own worktree.** `-s read-only` bounds what Codex may write, not what it may read, so a symlink committed in a diff would be a path into the rest of your filesystem. Every git this plugin runs sets `core.symlinks=false`, which checks such a link out as a small regular file holding the link text — the target becomes a string to review instead of a path to follow. The diff is unaffected: the index still records the entry as a symlink, so the review sees exactly GitHub's diff and the worktree is not dirty. The setting is forced per-process rather than written into anyone's repository, so a plain `git status` you run yourself inside a worktree will report symlink entries as modified; the plugin's own git, which is the one that checks, does not.
 - **A review cannot run forever.** Codex is stopped after 45 minutes (`CPR_CODEX_TIMEOUT_MS` to change it), signalling its whole process group, and the output kept for the saved document is capped — so a wedged or runaway run cannot hold a worktree indefinitely or exhaust memory. Both cases say so in the saved review rather than looking like a short one.
 - **A failed run is visible as one.** Codex can exit nonzero and still print a body, and an interrupted run emits `Review was interrupted…`, so "the file exists" was never evidence a review happened. The exit status is written into the saved document's first line as `exit=<n>`.
+- **Process success is not evidence coverage.** A review can exit successfully while an external compatibility claim remains unverified. The reviewer must name material limits separately; sweep preserves that state instead of reporting it as a clean verdict.
 - **A stale install says so** — see [Updating](#updating).
 
 ## Publishing is out of scope
@@ -115,11 +119,12 @@ While working on the plugin, skip the cache — `claude --plugin-dir /path/to/co
 Everything lives under `${XDG_CACHE_HOME:-~/.cache}/codex-pr-reviewer`:
 
 ```
-manifest.json                     what the plugin created, for precise cleanup
-repos/owner__repo/                cached clones (only for repos you lack locally)
-worktrees/owner__repo/pr-42/      the isolated checkout Codex reads
-reviews/owner__repo-pr42-*.md     saved review documents
-runs/owner__repo-pr42-<pid>.json  a review in flight, so cleanup leaves it alone
+manifest.json                            what the plugin created, for precise cleanup
+repos/owner__repo/                       cached clones (only for repos you lack locally)
+worktrees/owner__repo/pr-42/             the PR head checkout Codex reads
+worktrees/owner__repo/pr-42-landed/      a merged context's exact landed tree
+reviews/owner__repo-pr42-*.md            saved review documents
+runs/owner__repo-pr42-<pid>.json         every checkout a review is currently reading
 ```
 
 ## Script reference
@@ -129,9 +134,9 @@ The commands are thin; the git and `gh` choreography lives in one zero-dependenc
 ```
 pr-workspace.mjs doctor  [--json]
                  prepare <pr> [--repo owner/repo] [--clone] [--json]
-                 review  <pr> [--repo …] [--model M] [--effort E]
-                              [--profile P] [--no-prepare] [--dry-run] [--json]
-                 list    [--repo owner/repo] [--json]
+                 review  <pr> [--repo …] [--context-pr owner/repo#N]…
+                              [--model M] [--effort E] [--profile P]
+                              [--no-prepare] [--dry-run] [--json]
                  clean   [--pr N | --repo owner/repo | --all | --older-than DAYS]
                          --confirm-plan <digest> [--purge-clones]
                          [--purge-reviews --confirm-reviews <digest>]
@@ -143,8 +148,9 @@ pr-workspace.mjs doctor  [--json]
 `review --dry-run` prints the exact `codex` command it would run, without running it:
 
 ```
-$ pr-workspace.mjs review cli/cli#14057 --dry-run
+$ pr-workspace.mjs review cli/cli#14057 --context-pr cli/go-gh#236 --dry-run
 codex -C <cache>/worktrees/cli__cli/pr-14057 -s read-only \
+  -c project_doc_max_bytes=0 -c developer_instructions='<generated evidence policy>' \
   review --base codex-pr/14057-base --title 'PR #14057: docs: recommend nix-shell …'
 ```
 
@@ -154,8 +160,8 @@ codex -C <cache>/worktrees/cli__cli/pr-14057 -s read-only \
 
 - **A bare `--pr N` is not scoped to the current repository.** `review 42` resolves the repo from the directory you are in; `clean --pr 42` selects PR #42 in *every* repository the manifest knows about. The command names each entry's repository before asking — but pass `owner/repo#42`, or add `--repo`, when only one is meant.
 - **`--purge-reviews` is deliberately awkward,** and not implied by `--all` the way `--purge-clones` is: a clone can be re-fetched, a review is the output of a paid run. It takes `--confirm-reviews <digest>` over the exact list a dry run printed, so a review saved during the confirmation is not deleted having appeared in nothing anyone approved. Matching is on the whole filename rather than a `<slug>-pr<N>-` prefix, which would otherwise catch `o/r-pr7-archive#9` for `o/r#7`.
-- **A running review holds its PR back.** `review` records a marker under `runs/` — pid, host, start time, destination — before handing work to Codex, and `clean` skips those entries, worktree and branches included. A marker whose process is gone is swept; one older than six hours expires, so a recycled pid cannot block cleanup forever. `--include-running` overrides the guard for a crashed run.
-- **One window stays open deliberately.** A `clean` whose snapshot predates a review's marker cannot hold back what does not exist yet, so that review may still lose the worktree it is reading; `prepare` is likewise free to refresh a worktree mid-review. The cost is bounded rather than avoided — a review re-records its PR when it saves, so output that *was* produced stays reachable. Closing either means locking, and a lock that outlives a crashed run is the worse failure.
+- **A running review holds all of its evidence back.** `review` records a marker under `runs/` — pid, host, start time, destination, primary PR, and context PRs — before handing work to Codex, and `clean` skips every named entry, including a merged context's landed worktree and branch. A marker whose process is gone is swept; one older than six hours expires, so a recycled pid cannot block cleanup forever. `--include-running` overrides the guard for a crashed run.
+- **One window stays open deliberately.** A `clean` whose snapshot predates a review's marker cannot hold back what does not exist yet, so that review may still lose a worktree it is reading; `prepare` is likewise free to refresh a worktree mid-review. The cost is bounded rather than avoided — a review re-records its primary PR and contexts when it saves, so output that *was* produced stays reachable. Closing either means locking, and a lock that outlives a crashed run is the worse failure.
 
 `--context` and `--trust-worktree` were removed in 0.8.0, and passing either is an error rather than a silent no-op. `--context` appended the PR title and description as a positional prompt, which `codex review` refuses alongside `--base` — *the argument '--base <BRANCH>' cannot be used with '[PROMPT]'* — so every run that used it failed at argument parsing, documented and advertised and never once working. `--trust-worktree` gave effect to `.codex` configuration inside a repository fetched from the internet, which is not something a flag should be able to ask for.
 

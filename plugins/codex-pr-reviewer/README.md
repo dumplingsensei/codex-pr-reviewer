@@ -10,7 +10,7 @@ matches GitHub's "Files changed" exactly, and hands that checkout to `codex revi
 
 | Command | What it does |
 |---|---|
-| `/codex-pr-reviewer:review <pr>` | Fetch a PR and review it. `<pr>` is `42`, `owner/repo#42`, or a PR URL. |
+| `/codex-pr-reviewer:review <pr> [--context-pr owner/repo#N]…` | Fetch a PR and review it. `<pr>` is `42`, `owner/repo#42`, or a PR URL. Repeat `--context-pr` for approved cross-repository evidence. |
 | `/codex-pr-reviewer:list` | Show PRs awaiting your review. |
 | `/codex-pr-reviewer:sweep [--limit N]` | Review a batch (smallest first) and produce one digest. |
 | `/codex-pr-reviewer:clean` | Remove the worktrees, branches, and clones the plugin created. Saved reviews stay unless `--purge-reviews`. |
@@ -21,6 +21,12 @@ Check with:
 ```
 node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" doctor
 ```
+
+## Cross-repository evidence
+
+The review command scans added diff lines for repository-qualified references, treats them as untrusted suggestions, and asks which—if any—to use before fetching another repository. An explicit, repeatable `--context-pr owner/repo#N` provides the same approval. Up to four context PRs may be attached.
+
+Context repositories are evidence, never additional review targets. Open contexts use a pinned contributor head and merge-base diff. Merged contexts also use a separate worktree pinned to GitHub's `mergeCommit`; the landed tree is authoritative when merge queues, conflict resolution, or squash changes made it differ from the contributor head. Material external claims that the approved evidence cannot establish are reported as verification limits, even when Codex exits successfully.
 
 ## Safety
 
@@ -34,9 +40,11 @@ it. Asking for that comment once the command has finished is an ordinary
 request: you see the full text first, and only that text is posted. Whether
 posting also stops to ask you — and whether it goes through `gh` or a GitHub
 MCP tool — is your permission mode's call, not a promise this plugin can
-make. Every Codex run passes
-`-s read-only`, the plugin never executes a PR's build or tests, and local paths
-are stripped from review output before it is saved.
+make. Every Codex run passes `-s read-only`, receives generated developer
+instructions that scope reads to the primary and approved context worktrees,
+and has project documents disabled. The plugin never executes a PR's build or
+tests, and all primary and context cache paths are stripped from review output
+before it is saved.
 
 A pull request is code written by a stranger, so what it could otherwise reach
 is closed off. Codex runs with project documents disabled, so an `AGENTS.md` in
@@ -65,11 +73,12 @@ whole removal is bound by digest to the plan a dry run showed, so a PR prepared
 between the preview and the confirmation cannot be swept up in it, and a branch
 is deleted only while it still points at the commit that was recorded.
 
-A review still running is left alone: its worktree, branches, and shared clone
-are held back and named, rather than deleted from under a paid run whose output
-has not been written yet. That is a guard rather than a lock — a review starting
-after a clean has taken its snapshot can still lose its checkout, and re-records
-its own entry when it saves so at least the output stays reachable.
+A review still running is left alone: its primary worktree, every context head
+and landed snapshot, their branches, and their shared clones are held back and
+named rather than deleted from under a paid run. That is a guard rather than a
+lock — a review starting after a clean has taken its snapshot can still lose a
+checkout, and re-records every evidence entry when it saves so at least the
+output stays reachable.
 
 Those rules live in the command prompts, which Claude Code caches at install
 time and loads at session start — so `doctor` reports when the running copy is
