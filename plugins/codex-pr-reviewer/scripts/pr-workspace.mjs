@@ -765,26 +765,39 @@ function restoreEntryIfDropped(entry) {
  * PR reference resolution
  * ------------------------------------------------------------------ */
 
-/** Accepts `42`, `#42`, `owner/repo#42`, and github.com PR URLs. */
+/** Accepts `42`, `#42`, `owner/repo#42`, and http(s) github.com PR URLs. */
 export function parsePrRef(raw) {
   const text = String(raw ?? "").trim();
   if (!text) {
     throw new UserError("No pull request given. Pass a number, `owner/repo#42`, or a PR URL.");
   }
 
-  const url = text.match(/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/i);
-  if (url) {
-    return { repo: `${url[1]}/${stripGitSuffix(url[2])}`, number: Number(url[3]) };
-  }
+  // Hostname must be exactly `github.com`. A substring match treated
+  // `https://notgithub.com/…` and `https://evil.example/github.com/…` as
+  // github.com PR URLs and would fetch the wrong repository as context.
+  if (/^https?:\/\//i.test(text)) {
+    let parsed;
+    try {
+      parsed = new URL(text);
+    } catch {
+      parsed = null;
+    }
+    if (parsed?.hostname === "github.com") {
+      const match = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/files)?\/?$/);
+      if (match) {
+        return { repo: `${match[1]}/${stripGitSuffix(match[2])}`, number: Number(match[3]) };
+      }
+    }
+  } else {
+    const scoped = text.match(/^([^/\s]+)\/([^#\s]+)#(\d+)$/);
+    if (scoped) {
+      return { repo: `${scoped[1]}/${stripGitSuffix(scoped[2])}`, number: Number(scoped[3]) };
+    }
 
-  const scoped = text.match(/^([^/\s]+)\/([^#\s]+)#(\d+)$/);
-  if (scoped) {
-    return { repo: `${scoped[1]}/${stripGitSuffix(scoped[2])}`, number: Number(scoped[3]) };
-  }
-
-  const bare = text.match(/^#?(\d+)$/);
-  if (bare) {
-    return { repo: null, number: Number(bare[1]) };
+    const bare = text.match(/^#?(\d+)$/);
+    if (bare) {
+      return { repo: null, number: Number(bare[1]) };
+    }
   }
 
   throw new UserError(
@@ -827,40 +840,153 @@ export function parseContextPrRefs(values, primaryKey = null) {
   }
   return refs;
 }
-export function extractReferenceHints(diff, limit = 50) {
+/**
+ * Unified-diff scanner that treats `+++` as a file header only before a hunk.
+ * An added line whose text begins `++ ` is `+++ …` in the patch and must keep
+ * the current path rather than being mistaken for the next file.
+ */
+function createReferenceHintScanner(limit = 50) {
   const hints = [];
   let pathName = null;
   let newLine = 0;
   let truncated = false;
+  let inHunk = false;
   const reference =
     /(?:https?:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+|[^/\s#]+\/[^/\s#]+#\d+|\b[\w.-]+#\d+|\bPR\s*#\d+)/i;
+  // Every alternative needs `#` or `github.com`. The unanchored pattern is
+  // quadratic on a tens-of-MiB added line of ordinary text, so skip it when
+  // neither marker is present.
+  const mayHoldReference = (text) => text.includes("#") || /github\.com/i.test(text);
 
-  for (const line of String(diff).split(/\r?\n/)) {
-    if (line.startsWith("+++ ")) {
-      const named = line.slice(4);
-      pathName = named === "/dev/null" ? null : named.replace(/^b\//, "");
-      continue;
-    }
-    if (line.startsWith("@@ ")) {
-      const match = line.match(/\+(\d+)/);
-      newLine = match ? Number(match[1]) : 0;
-      continue;
-    }
-    if (line.startsWith("+") && !line.startsWith("+++")) {
-      const text = line.slice(1);
-      if (pathName && reference.test(text)) {
-        if (hints.length < limit) {
-          hints.push({ path: pathName, line: newLine, text });
-        } else {
-          truncated = true;
-        }
+  return {
+    push(line) {
+      if (line.startsWith("diff ") || line.startsWith("--- ")) {
+        inHunk = false;
+        if (line.startsWith("diff ")) pathName = null;
+        return;
       }
-      newLine += 1;
-      continue;
+      if (!inHunk && line.startsWith("+++ ")) {
+        const named = line.slice(4);
+        pathName = named === "/dev/null" ? null : named.replace(/^b\//, "");
+        return;
+      }
+      if (line.startsWith("@@ ")) {
+        inHunk = true;
+        const match = line.match(/\+(\d+)/);
+        newLine = match ? Number(match[1]) : 0;
+        return;
+      }
+      if (!inHunk) return;
+      if (line.startsWith("+")) {
+        if (pathName && mayHoldReference(line)) {
+          const text = line.slice(1);
+          if (reference.test(text)) {
+            if (hints.length < limit) {
+              hints.push({ path: pathName, line: newLine, text });
+            } else {
+              truncated = true;
+            }
+          }
+        }
+        newLine += 1;
+        return;
+      }
+      if (!line.startsWith("-") && !line.startsWith("\\")) newLine += 1;
+    },
+    result() {
+      return { referenceHints: hints, referenceHintsTruncated: truncated };
     }
-    if (!line.startsWith("-") && !line.startsWith("\\")) newLine += 1;
+  };
+}
+
+export function extractReferenceHints(diff, limit = 50) {
+  const scanner = createReferenceHintScanner(limit);
+  for (const line of String(diff).split(/\r?\n/)) scanner.push(line);
+  return scanner.result();
+}
+
+/**
+ * Drain `git diff` without buffering the patch. `gitOut` caps stdout at 64 MiB,
+ * so a larger textual PR failed with `ENOBUFS` after refs and the worktree
+ * already existed but before the manifest recorded them.
+ */
+function scanWorktreeDiffHints(worktree, baseBranch, limit = 50) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cpr-diff-"));
+  const outFile = path.join(dir, "patch");
+  const errFile = path.join(dir, "err");
+  const args = ["-C", worktree, "diff", "--unified=0", "--no-color", baseBranch, "--"];
+  try {
+    const outFd = fs.openSync(outFile, "w");
+    const errFd = fs.openSync(errFile, "w");
+    let result;
+    try {
+      result = spawnSync("git", args, {
+        stdio: ["ignore", outFd, errFd],
+        timeout: DEFAULT_TIMEOUT_MS
+      });
+    } finally {
+      fs.closeSync(outFd);
+      fs.closeSync(errFd);
+    }
+    const timedOut = result.error?.code === "ETIMEDOUT" || result.signal === "SIGTERM";
+    const status = timedOut ? 124 : result.status;
+    if (result.error?.code === "ENOENT") {
+      throw new UserError("`git` is not installed or not on PATH.");
+    }
+    if (status !== 0) {
+      const detail = fs.existsSync(errFile) ? fs.readFileSync(errFile, "utf8").trim() : "";
+      throw new UserError(
+        `\`git ${args.join(" ")}\` failed (exit ${status}).`,
+        detail || null
+      );
+    }
+    const scanner = createReferenceHintScanner(limit);
+    const fd = fs.openSync(outFile, "r");
+    try {
+      const decoder = new StringDecoder("utf8");
+      const buf = Buffer.alloc(64 * 1024);
+      // Keep the unfinished line as chunks. Appending every 64 KiB onto one
+      // string recopies the prefix (and rescans it for `\n`), which is
+      // quadratic on a tens-of-MiB added line. Join each line at most once.
+      const parts = [];
+      const pushLine = (line) => {
+        scanner.push(line.endsWith("\r") ? line.slice(0, -1) : line);
+      };
+      const consume = (text) => {
+        let start = 0;
+        for (;;) {
+          const nl = text.indexOf("\n", start);
+          if (nl === -1) {
+            if (start < text.length) {
+              parts.push(start === 0 ? text : text.slice(start));
+            }
+            return;
+          }
+          const piece = text.slice(start, nl);
+          if (parts.length === 0) {
+            pushLine(piece);
+          } else {
+            parts.push(piece);
+            pushLine(parts.join(""));
+            parts.length = 0;
+          }
+          start = nl + 1;
+        }
+      };
+      for (;;) {
+        const n = fs.readSync(fd, buf, 0, buf.length);
+        if (n === 0) break;
+        consume(decoder.write(buf.subarray(0, n)));
+      }
+      consume(decoder.end());
+      if (parts.length) pushLine(parts.length === 1 ? parts[0] : parts.join(""));
+    } finally {
+      fs.closeSync(fd);
+    }
+    return scanner.result();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
-  return { referenceHints: hints, referenceHintsTruncated: truncated };
 }
 
 const stripGitSuffix = (value) => value.replace(/\.git$/i, "");
@@ -1498,12 +1624,27 @@ function checkCodex() {
     "--help"
   ]);
   if (instructionProbe.status !== 0) {
+    const probeOutput = combinedOutput(instructionProbe);
+    const lastLine = probeOutput.trim().split("\n").slice(-1)[0] || "no output";
+    // Only a rejection of this key is an upgrade problem. A timeout, crash, or
+    // unrelated config error used to be reported as "not accepted" with a
+    // remedy that could not fix it.
+    if (/developer_instructions/i.test(probeOutput)) {
+      return {
+        name: "codex",
+        ok: false,
+        detail: `${version.stdout.trim()} — developer_instructions is not accepted`,
+        remedy:
+          `Cross-repository evidence needs Codex developer instructions without a positional prompt. ${codexUpgradeRemedy()}`
+      };
+    }
     return {
       name: "codex",
       ok: false,
-      detail: `${version.stdout.trim()} — developer_instructions is not accepted`,
-      remedy:
-        `Cross-repository evidence needs Codex developer instructions without a positional prompt. ${codexUpgradeRemedy()}`
+      detail: `${version.stdout.trim()} — developer_instructions probe ${
+        instructionProbe.timedOut ? "timed out" : `exited ${instructionProbe.status}`
+      }`,
+      remedy: `Could not ask this Codex whether it accepts developer instructions: ${lastLine}`
     };
   }
 
@@ -1595,6 +1736,73 @@ function fetchPullRefs(repoDir, remote, number, baseRefName, baseRefOid) {
     `Could not fetch the base branch \`${baseRefName}\` for PR #${number}.`,
     "The branch appears to be deleted on the remote and its base commit is unreachable. Pass --clone to retry against a fresh cache clone."
   );
+}
+
+const prMergeCommitSha = (pr) =>
+  typeof pr.mergeCommit?.oid === "string" && /^[0-9a-f]{7,64}$/.test(pr.mergeCommit.oid)
+    ? pr.mergeCommit.oid
+    : null;
+
+const prIdentityKey = (pr) =>
+  [
+    pr.state ?? "",
+    pr.headRefOid ?? "",
+    pr.baseRefName ?? "",
+    pr.baseRefOid ?? "",
+    prMergeCommitSha(pr) ?? ""
+  ].join("\0");
+
+/**
+ * Fetches the PR refs and checks they are the commits GitHub just advertised.
+ * Shared by the first attempt and the one retry when metadata moves mid-fetch.
+ */
+function fetchAndVerifyPull(repoDir, remote, slug, number, pr) {
+  log(`Fetching pull ref and base branch (${pr.baseRefName})…`);
+  const { headRef, baseRef, baseSource } = fetchPullRefs(
+    repoDir,
+    remote,
+    number,
+    pr.baseRefName,
+    pr.baseRefOid
+  );
+
+  const headSha = gitOut(repoDir, ["rev-parse", headRef]);
+
+  // What was fetched has to be what GitHub says the head is. Without this the
+  // metadata comes from the API while the code comes from whichever remote
+  // matched the slug, and nothing ever compares the two — so a review can be
+  // run, saved, and posted against a commit the pull request does not contain.
+  if (pr.headRefOid && headSha !== pr.headRefOid) {
+    throw new UserError(
+      `The fetched head of ${slug}#${number} is not the one GitHub advertises.`,
+      `Fetched ${headSha.slice(0, 12)} from \`${remote}\`, expected ${String(pr.headRefOid).slice(0, 12)}. Pass --clone to fetch from the repository the API is describing.`
+    );
+  }
+
+  // The same question on the base side, asked the way the base can honestly
+  // answer it. The head is a fixed commit, so it compares by equality; a base
+  // branch is a moving target that legitimately advances between `gh pr view`
+  // and this fetch, and demanding equality would abort on ordinary traffic in
+  // the repository. What must hold is that the base GitHub recorded is *in* the
+  // history that was fetched — anything else means the two are unrelated lines
+  // of development, which is the case this exists to catch.
+  //
+  // Only on the by-name path: the fallback fetches `baseRefOid` itself, so
+  // there the check compares that commit with itself.
+  if (pr.baseRefOid && baseSource === pr.baseRefName) {
+    const baseSha = gitOut(repoDir, ["rev-parse", baseRef]);
+    const contains =
+      baseSha === pr.baseRefOid ||
+      git(repoDir, ["merge-base", "--is-ancestor", pr.baseRefOid, baseRef]).status === 0;
+    if (!contains) {
+      throw new UserError(
+        `The fetched base of ${slug}#${number} does not contain the base commit GitHub advertises.`,
+        `\`${pr.baseRefName}\` fetched from \`${remote}\` is at ${baseSha.slice(0, 12)}, which does not descend from ${String(pr.baseRefOid).slice(0, 12)}. Pass --clone to fetch from the repository the API is describing.`
+      );
+    }
+  }
+
+  return { headRef, baseRef, baseSource, headSha };
 }
 
 /**
@@ -1713,71 +1921,56 @@ function prepare(options, positionals, cwd) {
   const { slug, number } = target;
 
   log(`Resolving ${slug}#${number}…`);
-  const pr = ghJson(["pr", "view", String(number), "--repo", slug, "--json", PR_FIELDS]);
+  let pr = ghJson(["pr", "view", String(number), "--repo", slug, "--json", PR_FIELDS]);
 
   const { repoDir, remote, mode } = resolveHostRepo(slug, cwd, {
     forceClone: options.clone,
     host: apiHostOf(pr)
   });
 
-  log(`Fetching pull ref and base branch (${pr.baseRefName})…`);
-  const { headRef, baseRef, baseSource } = fetchPullRefs(
-    repoDir,
-    remote,
-    number,
-    pr.baseRefName,
-    pr.baseRefOid
-  );
-
-  const headSha = gitOut(repoDir, ["rev-parse", headRef]);
-
-  // What was fetched has to be what GitHub says the head is. Without this the
-  // metadata comes from the API while the code comes from whichever remote
-  // matched the slug, and nothing ever compares the two — so a review can be
-  // run, saved, and posted against a commit the pull request does not contain.
-  if (pr.headRefOid && headSha !== pr.headRefOid) {
+  const known = readManifest().entries.find((item) => item.key === target.key);
+  // A landed snapshot is registered in a specific repository. Switching hosts
+  // (cache clone → local checkout, or `--clone` the other way) would recreate
+  // the global landed path in the new repo and overwrite `repoDir`, leaving the
+  // old landed branch with no manifest record `clean` can reach.
+  if (
+    known?.landedWorktree &&
+    known.repoDir &&
+    physicalPath(known.repoDir) !== physicalPath(repoDir)
+  ) {
     throw new UserError(
-      `The fetched head of ${slug}#${number} is not the one GitHub advertises.`,
-      `Fetched ${headSha.slice(0, 12)} from \`${remote}\`, expected ${String(pr.headRefOid).slice(0, 12)}. Pass --clone to fetch from the repository the API is describing.`
+      `${target.key} already has a landed snapshot in ${known.repoDir}; refusing to prepare it from ${repoDir}.`,
+      "Clean that pull request first (`clean --pr <ref>`), then prepare it against the new repository. The existing record was left as-is."
     );
   }
 
-  // The same question on the base side, asked the way the base can honestly
-  // answer it. The head is a fixed commit, so it compares by equality; a base
-  // branch is a moving target that legitimately advances between `gh pr view`
-  // and this fetch, and demanding equality would abort on ordinary traffic in
-  // the repository. What must hold is that the base GitHub recorded is *in* the
-  // history that was fetched — anything else means the two are unrelated lines
-  // of development, which is the case this exists to catch.
-  //
-  // Only on the by-name path: the fallback fetches `baseRefOid` itself, so
-  // there the check compares that commit with itself.
-  if (pr.baseRefOid && baseSource === pr.baseRefName) {
-    const baseSha = gitOut(repoDir, ["rev-parse", baseRef]);
-    const contains =
-      baseSha === pr.baseRefOid ||
-      git(repoDir, ["merge-base", "--is-ancestor", pr.baseRefOid, baseRef]).status === 0;
-    if (!contains) {
+  let fetched = fetchAndVerifyPull(repoDir, remote, slug, number, pr);
+  let latest = ghJson(["pr", "view", String(number), "--repo", slug, "--json", PR_FIELDS]);
+  if (prIdentityKey(pr) !== prIdentityKey(latest)) {
+    log(
+      `GitHub's view of ${slug}#${number} changed during fetch; retrying once against the new metadata.`
+    );
+    pr = latest;
+    fetched = fetchAndVerifyPull(repoDir, remote, slug, number, pr);
+    latest = ghJson(["pr", "view", String(number), "--repo", slug, "--json", PR_FIELDS]);
+    if (prIdentityKey(pr) !== prIdentityKey(latest)) {
       throw new UserError(
-        `The fetched base of ${slug}#${number} does not contain the base commit GitHub advertises.`,
-        `\`${pr.baseRefName}\` fetched from \`${remote}\` is at ${baseSha.slice(0, 12)}, which does not descend from ${String(pr.baseRefOid).slice(0, 12)}. Pass --clone to fetch from the repository the API is describing.`
+        `${slug}#${number} is still changing (state, head, base, or merge identity moved during prepare).`,
+        "Re-run once the pull request is stable so the snapshot is not labeled from stale metadata."
       );
     }
   }
+  pr = latest;
 
+  const { headRef, baseRef, baseSource, headSha } = fetched;
   const baseTipSha = gitOut(repoDir, ["rev-parse", baseRef]);
-  const mergeCommitSha =
-    typeof pr.mergeCommit?.oid === "string" && /^[0-9a-f]{7,64}$/.test(pr.mergeCommit.oid)
-      ? pr.mergeCommit.oid
-      : null;
-
+  const mergeCommitSha = prMergeCommitSha(pr);
   const mergeBase = gitOut(repoDir, ["merge-base", baseRef, headRef]);
   const { headBranch, baseBranch, worktree } = target;
 
   // These branch names belong to the plugin, but the namespace is not reserved
   // and `--force` below would move whatever is sitting there. Anything already
   // present that this plugin did not record is someone else's.
-  const known = readManifest().entries.find((item) => item.key === target.key);
   for (const branch of [headBranch, baseBranch]) {
     const exists =
       git(repoDir, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]).status === 0;
@@ -1801,10 +1994,10 @@ function prepare(options, positionals, cwd) {
   const changed = gitOut(worktree, ["diff", "--numstat", baseBranch, "--"])
     .split("\n")
     .filter(Boolean).length;
-  const referenceScan = extractReferenceHints(
-    gitOut(worktree, ["diff", "--unified=0", "--no-color", baseBranch, "--"])
-  );
+  const referenceScan = scanWorktreeDiffHints(worktree, baseBranch);
 
+  const sameRepo =
+    known?.repoDir && physicalPath(known.repoDir) === physicalPath(repoDir);
   const entry = {
     key: target.key,
     repo: slug,
@@ -1829,7 +2022,7 @@ function prepare(options, positionals, cwd) {
     baseTipSha,
     mergeCommitSha,
     mergedAt: pr.mergedAt ?? null,
-    ...(known?.landedWorktree
+    ...(sameRepo && known?.landedWorktree
       ? {
           landedWorktree: known.landedWorktree,
           landedBranch: known.landedBranch,
@@ -2140,7 +2333,8 @@ export function stripReviewPaths(text, primaryWorktree, contexts = []) {
 
   // A worktree can prefix another (`pr-4` and `pr-42`, or `pr-4-landed`).
   // Rewrite the most specific root first so a shorter path cannot relabel a
-  // citation from another checkout.
+  // citation from another checkout. Bare roots match only at a path boundary
+  // (whitespace, punctuation, Markdown, or end) so `pr-4` never consumes `pr-42`.
   roots.sort((left, right) => right.root.length - left.root.length);
   let result = String(text);
   for (const { root, label } of roots) {
@@ -2148,7 +2342,7 @@ export function stripReviewPaths(text, primaryWorktree, contexts = []) {
     const escaped = escapeRegex(root);
     result = result
       .replaceAll(new RegExp(`${escaped}/`, "g"), label ? `${label}/` : "")
-      .replaceAll(new RegExp(`${escaped}$`, "g"), label || ".");
+      .replaceAll(new RegExp(`${escaped}(?![A-Za-z0-9_-])`, "g"), label || ".");
   }
   return result;
 }
@@ -2397,21 +2591,35 @@ async function commandReview(argv, cwd) {
     if (dryRun) {
       const contextTarget = resolveTarget({ pr: `${ref.repo}#${ref.number}` }, [], cwd);
       const cached = readManifest().entries.find((item) => item.key === ref.key);
-      const context = cached ?? {
-        ...contextTarget,
-        repo: ref.repo,
-        title: "(not prepared yet)",
-        state: "UNPREPARED",
-        unprepared: true
-      };
-      contexts.push({
-        ...context,
-        snapshotWorktree:
-          context.state === "MERGED" ? context.landedWorktree : context.worktree,
-        snapshotSha:
-          context.state === "MERGED" ? context.mergeCommitSha : context.headSha,
-        snapshotKind: context.state === "MERGED" ? "landed" : "head"
-      });
+      const landedReady = Boolean(
+        cached?.landedWorktree && cached?.landedBranch && cached?.landedSha
+      );
+      // A merged PR prepared only as a primary has no landed checkout; claiming
+      // `landed tree … at undefined` would send Codex to a path that does not exist.
+      const unprepared = !cached || (cached.state === "MERGED" && !landedReady);
+      const context = unprepared
+        ? {
+            ...(cached ?? {
+              ...contextTarget,
+              repo: ref.repo,
+              title: "(not prepared yet)",
+              state: "UNPREPARED"
+            }),
+            unprepared: true
+          }
+        : cached;
+      contexts.push(
+        context.unprepared
+          ? context
+          : {
+              ...context,
+              snapshotWorktree:
+                context.state === "MERGED" ? context.landedWorktree : context.worktree,
+              snapshotSha:
+                context.state === "MERGED" ? context.mergeCommitSha : context.headSha,
+              snapshotKind: context.state === "MERGED" ? "landed" : "head"
+            }
+      );
       continue;
     }
 
@@ -3165,10 +3373,22 @@ function entryRemovalProblem(entry) {
     return `worktree ${entry.worktree} is not where one for ${entry.key} belongs (${expected})`;
   }
   if (entry.landedWorktree || entry.landedBranch || entry.landedSha) {
-    const landed = landedTarget(entry);
+    // Derive the landed path from the canonical cache location, not from
+    // `entry.worktree`: that field may be a symlink alias, and `${alias}-landed`
+    // can name an unrelated directory `removeEntry` would then delete.
+    const expectedLanded = `${expected}-landed`;
+    if (typeof entry.landedWorktree !== "string" || !entry.landedWorktree) {
+      return `landed worktree ${JSON.stringify(entry.landedWorktree)} is not a path`;
+    }
+    if (realPath(entry.landedWorktree) !== realPath(expectedLanded)) {
+      return `landed worktree ${entry.landedWorktree} is not where one for ${entry.key} belongs (${expectedLanded})`;
+    }
+    const cachePrefix = `${realPath(worktreesDir())}${path.sep}`;
+    if (!`${realPath(entry.landedWorktree)}${path.sep}`.startsWith(cachePrefix)) {
+      return `landed worktree ${entry.landedWorktree} is outside the worktree cache`;
+    }
     if (
-      entry.landedWorktree !== landed.worktree ||
-      entry.landedBranch !== landed.branch ||
+      entry.landedBranch !== `${entry.headBranch}-landed` ||
       entry.landedSha !== entry.mergeCommitSha
     ) {
       return `landed snapshot metadata for ${entry.key} is inconsistent`;
@@ -3511,7 +3731,9 @@ function commandClean(argv) {
         : `${plan
             .map(
               (item) =>
-                `${item.key}\n  worktree  ${item.worktree}\n  branches  ${item.branches.join(", ")}\n  in repo   ${item.repoDir}${
+                `${item.key}\n  worktree  ${item.worktree}${
+                  item.landedWorktree ? `\n  landed    ${item.landedWorktree}` : ""
+                }\n  branches  ${item.branches.join(", ")}\n  in repo   ${item.repoDir}${
                   item.reviews.length > 0
                     ? `\n  reviews   ${item.reviews.map((file) => path.basename(file)).join("\n            ")}`
                     : ""

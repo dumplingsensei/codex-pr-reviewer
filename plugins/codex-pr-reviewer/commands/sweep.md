@@ -68,7 +68,14 @@ Core constraint:
 
 7. **Produce the digest.** Lead with a table — `repo#number`, size, headline verdict, count of findings by severity, and coverage (`verified`, `limited`, or `failed`). Then, for each PR, the full Codex review verbatim under its own heading. Do not merge, re-rank, or reword findings across PRs; attribute each to its PR.
 
-   A review that exited non-zero or produced no output is a **failure**, not a clean verdict. A successful process with a `Verification limits` section is **coverage-limited**, not verified. Preserve that distinction rather than recording either case as "no findings."
+   Classify coverage from the saved artifact, not the wrapper's process exit. The wrapper exits 0 for any review that ran and was saved, so a Codex that failed, timed out, or overflowed the output cap still looks like success from outside. Inspect the first-line marker and any wrapper-authored note beside the body:
+   - `exit=<n>` on the first line is Codex's own status. A complete artifact reads exactly `exit=0`; read it as a string. `exit=null` and any other value mean it did not finish.
+   - Match wrapper notes as whole lines, not a search of the findings: `_… this review is cut short._`, `_Codex was stopped after … and did not finish._`, or an interruption note the wrapper wrote. A review whose subject is truncation quotes those phrases inside its own findings.
+   - Missing, empty, or `_Codex produced no review output._` artifacts are **failed**.
+
+   Only exact `exit=0` with a complete artifact — no cut-short, timeout, or interruption note — may be `verified` or `limited`. Truncated, timed-out, interrupted, null/nonzero exit, empty, or missing artifacts are **failed**, not a clean verdict, even when they contain findings or a `Verification limits` section.
+
+   `Verification limits` is coverage-limited only for a complete run. A complete process with that section is **coverage-limited**, not verified. Preserve the distinction rather than recording either case as "no findings."
 
 8. **Point at the artifacts.** Each review is saved under the cache directory; list the paths. Remind the user that `/codex-pr-reviewer:clean` removes the worktrees when they are done — and that under `--parallel` it holds back any PR whose review has not returned, since that worktree is still being read. Cleaning is a job for after the digest, not alongside it.
 
