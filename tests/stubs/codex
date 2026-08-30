@@ -26,6 +26,9 @@
 #   CPR_STUB_PROBE_ERR     stderr for a probe that fails instead of answering
 #   CPR_STUB_PROBE_EXIT    its exit status                        (default 0)
 #   CPR_STUB_PROBE_INSTRUCTIONS "no" to reject developer_instructions
+#   CPR_STUB_INSTRUCTION_ERR  stderr for an instruction-probe failure that is
+#                             not an unknown-key rejection
+#   CPR_STUB_INSTRUCTION_EXIT its exit status                     (default 70)
 #   CPR_STUB_SELF_UPDATE   "no" to list no `update` subcommand under `--help`
 #   CPR_STUB_RUN_HOOK      shell run before a review's output, for race tests
 #   CPR_STUB_RUN_BODY      what a review run prints on stdout
@@ -60,6 +63,17 @@ case "${1:-}" in
     # must fall through to the run behavior below.
     case " $* " in
       *" review --help "*)
+        case " $* " in
+          *" developer_instructions="*) ;;
+          *)
+            echo "codex stub: instruction probe is missing its config entry" >&2
+            exit 2
+            ;;
+        esac
+        if [ -n "${CPR_STUB_INSTRUCTION_ERR-}" ]; then
+          echo "$CPR_STUB_INSTRUCTION_ERR" >&2
+          exit "${CPR_STUB_INSTRUCTION_EXIT-70}"
+        fi
         if [ "${CPR_STUB_PROBE_INSTRUCTIONS-yes}" = "no" ]; then
           echo "unknown configuration key developer_instructions" >&2
           exit 1

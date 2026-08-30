@@ -148,7 +148,18 @@ contains "project documents are disabled for the review" "$out" "project_doc_max
 
 # Context PRs are repeatable, but each one must be qualified so approval cannot
 # silently bind to whichever repository happens to be the current directory.
-node "$SCRIPT" review o/r#7 \
+# Dry-run must not fetch or write: start from an empty cache and fail if `gh`
+# is invoked, so a context loop that prepares on the dry-run path cannot hide
+# behind a later cache wipe.
+mkdir -p "$SANDBOX/fail-gh"
+cat >"$SANDBOX/fail-gh/gh" <<'STUB'
+#!/bin/sh
+echo "gh stub: unexpected invocation: $*" >&2
+exit 1
+STUB
+chmod +x "$SANDBOX/fail-gh/gh"
+rm -rf "$CACHE"
+PATH="$SANDBOX/fail-gh:$PATH" node "$SCRIPT" review o/r#7 \
   --context-pr o/context#8 --context-pr x/dependency#9 \
   --dry-run --json >"$SANDBOX/context-dry.json" 2>/dev/null
 check "repeatable context refs reach the dry-run plan" \
@@ -159,6 +170,8 @@ contains "context policy uses developer instructions, not a positional prompt" \
 check "codex review still starts directly with --base" \
   "$(node -e 'const j=require(process.argv[1]); const i=j.command.indexOf("review"); console.log(j.command[i+1])' "$SANDBOX/context-dry.json")" \
   "--base"
+check "a context dry-run created nothing on disk" \
+  "$(find "$CACHE" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')" "0"
 out="$(node "$SCRIPT" review o/r#7 --context-pr 8 --dry-run 2>&1)"
 contains "a bare context PR is rejected" "$out" "has no repository"
 out="$(node "$SCRIPT" review o/r#7 --dry-run 2>&1)"
@@ -526,8 +539,19 @@ check "and does not send the user to reinstall" \
 # positional prompt older Codex versions reject beside --base.
 out="$(CPR_STUB_PROBE_INSTRUCTIONS=no \
   PATH="$SANDBOX/preflight:$STUBS:$PATH" node "$SCRIPT" doctor 2>&1)"
+instructions_status=$?
 contains "a codex without developer instructions is refused" "$out" "developer_instructions"
+check "unsupported developer instructions fail the preflight" "$instructions_status" "1"
 
+# An unrelated config parse error or crash is not "this Codex cannot take
+# developer instructions". The upgrade remedy cannot fix a broken user config.
+out="$(CPR_STUB_INSTRUCTION_ERR="error: invalid configuration at line 12" \
+  CPR_STUB_INSTRUCTION_EXIT=70 \
+  PATH="$SANDBOX/preflight:$STUBS:$PATH" node "$SCRIPT" doctor 2>&1)"
+contains "an instruction probe crash keeps its exit status" "$out" "exited 70"
+contains "and names the config error" "$out" "invalid configuration at line 12"
+check "an instruction-probe crash does not send the user to reinstall" \
+  "$(printf '%s' "$out" | grep -cE 'npm install -g @openai/codex|codex update')" "0"
 # The same stub, answering with --base. Asserted on doctor's exit status, not on
 # the absence of one message: "no complaint about --base" is also satisfied by a
 # doctor that fell over for some entirely unrelated reason.
@@ -1024,6 +1048,7 @@ git -C "$SYMUP" checkout --quiet -b feature
 # The payload: a link out of the worktree, committed by the pull request.
 ln -s /etc/passwd "$SYMUP/escape.txt"
 echo change >>"$SYMUP/f.txt"
+printf 'Implemented by acme/service#9.\n' >"$SYMUP/refs.md"
 git -C "$SYMUP" add -A && git -C "$SYMUP" commit --quiet -m "add a link out of the tree"
 git -C "$SYMUP" update-ref refs/pull/7/head refs/heads/feature
 git -C "$SYMUP" checkout --quiet main
@@ -1045,7 +1070,20 @@ cat >"$SANDBOX/ghstub/gh" <<'GHSTUB'
 case "${1:-}" in
   --version) echo "gh version 0.0.0 (stub)"; exit 0 ;;
   auth) echo "Logged in to github.com account stub"; exit 0 ;;
-  pr) cat "$CPR_PR_JSON"; exit 0 ;;
+  pr)
+    json_file="${CPR_PR_JSON-}"
+    if [ -n "${CPR_PR_JSON_NEXT-}" ]; then
+      count_file="${CPR_PR_VIEW_COUNT-}"
+      [ -n "$count_file" ] || count_file="${json_file}.view-count"
+      n=0
+      [ -f "$count_file" ] && n=$(cat "$count_file")
+      n=$((n + 1))
+      echo "$n" >"$count_file"
+      [ "$n" -ge 2 ] && json_file="$CPR_PR_JSON_NEXT"
+    fi
+    cat "$json_file"
+    exit 0
+    ;;
   repo)
     # gh repo clone <slug> <dir> -- <git args…>
     [ "${2:-}" = "clone" ] || { echo "gh stub: unsupported $*" >&2; exit 1; }
@@ -1083,6 +1121,23 @@ write_pr_json "$BASE_OID"
 out="$(prepare_sym)"
 SYMWT="$CACHE/worktrees/o__r/pr-7"
 check "prepare built the worktree" "$([[ -d "$SYMWT" ]] && echo yes || echo no)" "yes"
+hint_json="$(
+  cd "$SYMCWD" && env PATH="$SANDBOX/ghstub:$STUBS:$PATH" \
+    CPR_PR_JSON="$SANDBOX/pr.json" CPR_UPSTREAM="$SYMUP" \
+    node "$SCRIPT" prepare o/r#7 --json 2>"$SANDBOX/hint-prepare.log"
+)"
+check "prepare --json reports the added reference path" \
+  "$(printf '%s' "$hint_json" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(String(JSON.parse(s).referenceHints[0].path)))')" \
+  "refs.md"
+check "prepare --json reports the added reference line" \
+  "$(printf '%s' "$hint_json" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(String(JSON.parse(s).referenceHints[0].line)))')" \
+  "1"
+check "prepare --json reports the added reference text" \
+  "$(printf '%s' "$hint_json" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(String(JSON.parse(s).referenceHints[0].text)))')" \
+  "Implemented by acme/service#9."
+check "prepare --json says the hint list is complete" \
+  "$(printf '%s' "$hint_json" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(String(JSON.parse(s).referenceHintsTruncated)))')" \
+  "false"
 
 # Regression: `-s read-only` bounds what codex may write, not what it may read,
 # so a symlink committed in a pull request was a path out of the worktree and
@@ -1104,6 +1159,41 @@ check "the checkout is still clean" \
 check "the entry is still a symlink as far as the diff is concerned" \
   "$(symgit diff --raw codex-pr/o__r/7-base -- escape.txt | grep -c 120000)" "1"
 
+
+note "an open context uses the contributor head"
+git -C "$SYMUP" checkout --quiet -b open-feature main
+printf 'open context head\n' >"$SYMUP/open.txt"
+git -C "$SYMUP" add open.txt
+git -C "$SYMUP" commit --quiet -m "open context head"
+OPEN_HEAD="$(git -C "$SYMUP" rev-parse HEAD)"
+git -C "$SYMUP" update-ref refs/pull/11/head "$OPEN_HEAD"
+git -C "$SYMUP" checkout --quiet main
+cat >"$SANDBOX/open-pr.json" <<JSON
+{"number":11,"title":"open context","url":"https://github.com/o/open/pull/11",
+ "state":"OPEN","isDraft":false,"isCrossRepository":false,"baseRefName":"main",
+ "baseRefOid":"$BASE_OID","headRefOid":"$OPEN_HEAD",
+ "author":{"login":"someone"},"additions":1,"deletions":0,"changedFiles":1}
+JSON
+OPEN_HEAD_WT="$(printf '%s' "$CACHE/worktrees/o__open/pr-11" | tr -s /)"
+OPEN_LANDED_WT="$(printf '%s' "$CACHE/worktrees/o__open/pr-11-landed" | tr -s /)"
+open_json="$(
+  cd "$SYMCWD" && env PATH="$SANDBOX/ghstub:$STUBS:$PATH" \
+    CPR_PR_JSON="$SANDBOX/open-pr.json" CPR_UPSTREAM="$SYMUP" \
+    CPR_STUB_RUN_BODY="open context review" \
+    node "$SCRIPT" review o/r#7 --context-pr o/open#11 --no-prepare --json 2>"$SANDBOX/open-review.log"
+)"
+check "the open context review completed" "$?" "0"
+check "an open context snapshots its head" \
+  "$(printf '%s' "$open_json" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).contexts[0].snapshotKind))')" \
+  "head"
+check "the open snapshot is the advertised head" \
+  "$(printf '%s' "$open_json" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).contexts[0].snapshotSha))')" \
+  "$OPEN_HEAD"
+check "an open context has no landed checkout" \
+  "$([[ -e "$OPEN_LANDED_WT" ]] && echo present || echo gone)" "gone"
+check "the open head worktree holds the contributor tree" \
+  "$(cat "$OPEN_HEAD_WT/open.txt")" "open context head"
+cclean --pr o/open#11 >/dev/null 2>&1
 
 note "a merged cross-repository context uses the landed tree"
 git -C "$SYMUP" checkout --quiet -b context-feature main
@@ -1163,11 +1253,49 @@ contains "the saved review rewrites the landed path" \
 check "the saved review leaks no context cache path" \
   "$(printf '%s' "$context_review_body" | grep -c "$CONTEXT_HEAD_WT")" "0"
 
+note "a landed context cannot move to another host repository"
+CONTEXT_REPO="$(printf '%s' "$CACHE/repos/o__context" | tr -s /)"
+LOCAL_CTX="$SANDBOX/local-context"
+mkdir -p "$LOCAL_CTX"
+git -C "$LOCAL_CTX" init --quiet -b main
+git -C "$LOCAL_CTX" config user.email t@t
+git -C "$LOCAL_CTX" config user.name t
+git -C "$LOCAL_CTX" commit --quiet --allow-empty -m init
+git -C "$LOCAL_CTX" remote add origin "ssh://git@github.com/o/context"
+ownership_out="$(
+  cd "$LOCAL_CTX" && env PATH="$SANDBOX/ghstub:$STUBS:$PATH" GIT_SSH_COMMAND=false \
+    CPR_PR_JSON="$SANDBOX/context-pr.json" CPR_UPSTREAM="$SYMUP" \
+    node "$SCRIPT" prepare o/context#8 2>&1
+)"
+ownership_status=$?
+check "preparing a landed context from another repository exits nonzero" "$ownership_status" "1"
+check "the refusal is not a fetch failure" \
+  "$(printf '%s' "$ownership_out" | grep -cE 'Could not fetch|ssh://|GIT_SSH|Permission denied')" "0"
+contains "the original host repository is named" "$(printf '%s' "$ownership_out" | tr -s /)" "$CONTEXT_REPO"
+check "the original clone still hosts the entry" \
+  "$(node -e 'const m=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));
+    const e=m.entries.find((x)=>x.key==="o/context#8");
+    process.stdout.write(String(e && e.repoDir || ""));' "$CACHE/manifest.json" | tr -s /)" \
+  "$CONTEXT_REPO"
+check "the landed worktree is still in the original clone" \
+  "$([[ -d "$CONTEXT_LANDED_WT" ]] && echo present || echo gone)" "present"
+check "the landed branch remains in the original clone" \
+  "$(git -C "$CONTEXT_REPO" show-ref --verify --quiet refs/heads/codex-pr/o__context/8-landed && echo yes || echo no)" "yes"
+
 context_plan="$(node "$SCRIPT" clean --pr o/context#8 --dry-run --json 2>/dev/null)"
 contains "cleanup plans the landed worktree" "$context_plan" "$CONTEXT_LANDED_WT"
-cclean --pr o/context#8 >/dev/null 2>&1
+context_plain="$(node "$SCRIPT" clean --pr o/context#8 --dry-run 2>/dev/null)"
+contains "plain clean dry-run names the head worktree" "$context_plain" "$CONTEXT_HEAD_WT"
+contains "plain clean dry-run names the landed worktree" "$context_plain" "$CONTEXT_LANDED_WT"
+context_clean_out="$(cclean --pr o/context#8 2>&1)"
+context_clean_status=$?
+check "cleanup of a landed context exits zero" "$context_clean_status" "0"
 check "cleanup removes the landed worktree" \
   "$([[ -e "$CONTEXT_LANDED_WT" ]] && echo present || echo gone)" "gone"
+check "cleanup removes the landed branch" \
+  "$(git -C "$CONTEXT_REPO" show-ref --verify --quiet refs/heads/codex-pr/o__context/8-landed && echo yes || echo no)" "no"
+check "cleanup drops the context manifest entry" \
+  "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key": "o/context#8"')" "0"
 
 note "a merged primary with a deleted base does not need landed context"
 MERGEDUP="$SANDBOX/merged-upstream"
@@ -1200,12 +1328,166 @@ merged_prepare="$(
 )"
 check "the merged primary prepares without fetching its merge commit" "$?" "0"
 contains "the deleted-base fallback is recorded" "$merged_prepare" "branch deleted"
-out="$(
-  cd "$SYMCWD" && env PATH="$STUBS:$PATH" CPR_STUB_RUN_BODY="merged primary review" \
-    node "$SCRIPT" review o/merged#10 --no-prepare 2>&1
+merged_ctx_dry="$(
+  cd "$SYMCWD" && env PATH="$SANDBOX/fail-gh:$STUBS:$PATH" \
+    node "$SCRIPT" review o/r#7 --context-pr o/merged#10 --dry-run --json 2>/dev/null
 )"
-contains "the merged primary reaches codex without landed evidence" "$out" "merged primary review"
+check "a cached merged primary used as context is not stringified as undefined" \
+  "$(printf '%s' "$merged_ctx_dry" | grep -c undefined)" "0"
+contains "and says the evidence will be prepared" "$merged_ctx_dry" "will be prepared"
+merged_review_json="$(
+  cd "$SYMCWD" && env PATH="$STUBS:$PATH" CPR_STUB_RUN_BODY="merged primary review" \
+    node "$SCRIPT" review o/merged#10 --no-prepare --json 2>"$SANDBOX/merged-review.log"
+)"
+merged_review_status=$?
+check "the merged primary review exits zero" "$merged_review_status" "0"
+merged_review_path="$(
+  printf '%s' "$merged_review_json" |
+    node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).reviewPath || ""))'
+)"
+contains "the merged primary review is saved" "$(cat "$merged_review_path")" "merged primary review"
 cclean --pr o/merged#10 >/dev/null 2>&1
+
+note "context metadata cannot keep a head snapshot across a merge"
+RACEUP="$SANDBOX/race-upstream"
+mkdir -p "$RACEUP" && git -C "$RACEUP" init --quiet -b main
+git -C "$RACEUP" config user.email t@t && git -C "$RACEUP" config user.name t
+printf 'race base\n' >"$RACEUP/race.txt"
+git -C "$RACEUP" add race.txt
+git -C "$RACEUP" commit --quiet -m "race base"
+RACE_BASE="$(git -C "$RACEUP" rev-parse HEAD)"
+git -C "$RACEUP" checkout --quiet -b race-feature
+printf 'race head\n' >"$RACEUP/race.txt"
+git -C "$RACEUP" add race.txt
+git -C "$RACEUP" commit --quiet -m "race head"
+RACE_HEAD="$(git -C "$RACEUP" rev-parse HEAD)"
+git -C "$RACEUP" update-ref refs/pull/12/head "$RACE_HEAD"
+git -C "$RACEUP" checkout --quiet main
+git -C "$RACEUP" merge --quiet --squash race-feature
+printf 'race landed\n' >"$RACEUP/race.txt"
+git -C "$RACEUP" add race.txt
+git -C "$RACEUP" commit --quiet -m "race landed"
+RACE_MERGE="$(git -C "$RACEUP" rev-parse HEAD)"
+cat >"$SANDBOX/race-open.json" <<JSON
+{"number":12,"title":"race context","url":"https://github.com/o/race/pull/12",
+ "state":"OPEN","isDraft":false,"isCrossRepository":false,"baseRefName":"main",
+ "baseRefOid":"$RACE_BASE","headRefOid":"$RACE_HEAD",
+ "author":{"login":"someone"},"additions":1,"deletions":0,"changedFiles":1}
+JSON
+cat >"$SANDBOX/race-merged.json" <<JSON
+{"number":12,"title":"race context","url":"https://github.com/o/race/pull/12",
+ "state":"MERGED","isDraft":false,"isCrossRepository":false,"baseRefName":"main",
+ "baseRefOid":"$RACE_BASE","headRefOid":"$RACE_HEAD",
+ "mergeCommit":{"oid":"$RACE_MERGE"},"mergedAt":"2026-08-28T00:00:00Z",
+ "author":{"login":"someone"},"additions":1,"deletions":0,"changedFiles":1}
+JSON
+rm -f "$SANDBOX/race-view-count"
+race_json="$(
+  cd "$SYMCWD" && env PATH="$SANDBOX/ghstub:$STUBS:$PATH" \
+    CPR_PR_JSON="$SANDBOX/race-open.json" CPR_PR_JSON_NEXT="$SANDBOX/race-merged.json" \
+    CPR_PR_VIEW_COUNT="$SANDBOX/race-view-count" CPR_UPSTREAM="$RACEUP" \
+    CPR_STUB_RUN_BODY="race review" \
+    node "$SCRIPT" review o/r#7 --context-pr o/race#12 --no-prepare --json 2>"$SANDBOX/race-review.log"
+)"
+check "a merge during fetch cannot keep a head snapshot" \
+  "$(printf '%s' "$race_json" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{try{process.stdout.write(JSON.parse(s).contexts[0].snapshotKind)}catch{process.stdout.write("unparsed")}})')" \
+  "landed"
+check "the raced snapshot is GitHub's merge commit" \
+  "$(printf '%s' "$race_json" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{try{process.stdout.write(JSON.parse(s).contexts[0].snapshotSha)}catch{process.stdout.write("unparsed")}})')" \
+  "$RACE_MERGE"
+cclean --pr o/race#12 >/dev/null 2>&1
+
+note "a text addition larger than the spawn buffer still prepares"
+saved_xdg="$XDG_CACHE_HOME"
+saved_cache="$CACHE"
+export XDG_CACHE_HOME="$SANDBOX/large-xdg"
+CACHE="$XDG_CACHE_HOME/codex-pr-reviewer"
+LARGE_UP="$SANDBOX/large-up"
+mkdir -p "$LARGE_UP"
+git -C "$LARGE_UP" init --quiet -b main
+git -C "$LARGE_UP" config user.email t@t && git -C "$LARGE_UP" config user.name t
+printf 'base\n' >"$LARGE_UP/f.txt"
+git -C "$LARGE_UP" add f.txt
+git -C "$LARGE_UP" commit --quiet -m base
+git -C "$LARGE_UP" checkout --quiet -b feature
+node -e '
+  const fs = require("node:fs");
+  const fd = fs.openSync(process.argv[1], "w");
+  fs.writeSync(fd, "See o/other#1.\n");
+  const chunk = Buffer.alloc(1024 * 1024, 97);
+  for (let i = 0; i < 65; i++) fs.writeSync(fd, chunk);
+  fs.closeSync(fd);
+' "$LARGE_UP/big.txt"
+git -C "$LARGE_UP" add big.txt
+git -C "$LARGE_UP" commit --quiet -m "add a 65 MiB text file"
+git -C "$LARGE_UP" update-ref refs/pull/13/head refs/heads/feature
+git -C "$LARGE_UP" checkout --quiet main
+LARGE_HEAD="$(git -C "$LARGE_UP" rev-parse refs/pull/13/head)"
+LARGE_BASE="$(git -C "$LARGE_UP" rev-parse refs/heads/main)"
+cat >"$SANDBOX/large-pr.json" <<JSON
+{"number":13,"title":"large addition","url":"https://github.com/o/large/pull/13",
+ "state":"OPEN","isDraft":false,"isCrossRepository":false,"baseRefName":"main",
+ "baseRefOid":"$LARGE_BASE","headRefOid":"$LARGE_HEAD",
+ "author":{"login":"someone"},"additions":1,"deletions":0,"changedFiles":1}
+JSON
+LARGE_CWD="$SANDBOX/large-cwd"
+mkdir -p "$LARGE_CWD"
+large_json="$(
+  cd "$LARGE_CWD" && env PATH="$SANDBOX/ghstub:$STUBS:$PATH" \
+    CPR_PR_JSON="$SANDBOX/large-pr.json" CPR_UPSTREAM="$LARGE_UP" \
+    node "$SCRIPT" prepare o/large#13 --json 2>"$SANDBOX/large-prepare.log"
+)"
+large_status=$?
+check "a 65 MiB text addition prepares" "$large_status" "0"
+check "the large prepare did not hit ENOBUFS" \
+  "$( { printf '%s\n' "$large_json"; cat "$SANDBOX/large-prepare.log" 2>/dev/null; } | grep -c ENOBUFS | tr -d ' ' )" "0"
+check "the large prepare recorded a manifest entry" \
+  "$(node "$SCRIPT" list --json 2>/dev/null | grep -c '"key": "o/large#13"')" "1"
+check "the large prepare kept a usable reference scan" \
+  "$(printf '%s' "$large_json" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{try{process.stdout.write(String(JSON.parse(s).referenceHints[0].text))}catch{process.stdout.write("unparsed")}})')" \
+  "See o/other#1."
+large_again="$(
+  cd "$LARGE_CWD" && env PATH="$SANDBOX/ghstub:$STUBS:$PATH" \
+    CPR_PR_JSON="$SANDBOX/large-pr.json" CPR_UPSTREAM="$LARGE_UP" \
+    node "$SCRIPT" prepare o/large#13 --json 2>"$SANDBOX/large-prepare-again.log"
+)"
+check "a second large prepare is not blocked by orphaned state" "$?" "0"
+export XDG_CACHE_HOME="$saved_xdg"
+CACHE="$saved_cache"
+
+note "clean refuses a symlink-aliased landed path outside the cache"
+saved_xdg="$XDG_CACHE_HOME"
+saved_cache="$CACHE"
+export XDG_CACHE_HOME="$SANDBOX/alias-xdg"
+CACHE="$XDG_CACHE_HOME/codex-pr-reviewer"
+ALIAS_CANON="$CACHE/worktrees/o__alias/pr-44"
+mkdir -p "$ALIAS_CANON" "$SANDBOX/alias-root"
+ln -sfn "$ALIAS_CANON" "$SANDBOX/alias-root/pr-44"
+SENTINEL="$SANDBOX/alias-root/pr-44-landed"
+mkdir -p "$SENTINEL"
+printf 'do not delete me\n' >"$SENTINEL/keep.txt"
+ALIAS_WT="$SANDBOX/alias-root/pr-44"
+mkdir -p "$CACHE"
+cat >"$CACHE/manifest.json" <<JSON
+{"version":1,"entries":[
+ {"key":"o/alias#44","repo":"o/alias","number":44,"title":"t","url":"u","state":"MERGED","author":"a",
+  "worktree":"$ALIAS_WT","repoDir":"$SANDBOX/none","remote":"origin","mode":"clone",
+  "headBranch":"codex-pr/o__alias/44","baseBranch":"codex-pr/o__alias/44-base",
+  "landedWorktree":"$SENTINEL","landedBranch":"codex-pr/o__alias/44-landed",
+  "landedSha":"abc","mergeCommitSha":"abc",
+  "refs":["refs/codex-pr-reviewer/pr/44"],"headSha":"0","mergeBase":"0","baseRefName":"main",
+  "additions":1,"deletions":0,"changedFiles":1,"preparedAt":"2026-01-01T00:00:00.000Z"}
+]}
+JSON
+alias_out="$(cclean --all 2>&1)"
+alias_status=$?
+check "clean rejects the aliased landed entry" "$alias_status" "1"
+contains "a symlink-aliased landed path is refused" "$alias_out" "nothing was removed"
+check "the external landed sentinel is still there" \
+  "$([[ -f "$SENTINEL/keep.txt" ]] && echo kept || echo deleted)" "kept"
+export XDG_CACHE_HOME="$saved_xdg"
+CACHE="$saved_cache"
+
 note "identity: metadata and code have to be the same repository"
 # Regression: the head was checked against the API and the base was not, so the
 # review boundary could be computed from a history GitHub never described.

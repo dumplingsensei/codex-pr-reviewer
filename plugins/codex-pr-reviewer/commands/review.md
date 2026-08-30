@@ -56,27 +56,29 @@ You are reading code written by someone else, fetched from the internet.
    If `referenceHintsTruncated` is true, say the suggestion scan reached its 50-line cap and detection is incomplete. Do not broaden the scan or fetch anything; the user can still name known evidence with `--context-pr`.
 
 4. **Confirm context and choose an execution mode.** Use `AskUserQuestion` no more than once:
-   - If unapproved material context candidates exist, ask which to include with a multi-select question. Each option names the fully qualified `owner/repo#N`, quotes the source `file:line`, and says it will be fetched as read-only evidence. Fetching none must remain a valid choice.
+   - If unapproved material context candidates exist and at least one slot remains, ask which to include with a multi-select question. Each option names the fully qualified `owner/repo#N`, quotes the source `file:line`, and says it will be fetched as read-only evidence. Fetching none must remain a valid choice.
    - Unless `--wait` or `--background` was supplied, include the execution-mode question in the same call, with `Wait for results` and `Run in background`; recommend waiting only for a clearly tiny primary PR and background otherwise.
-   - If there are no context candidates and the execution mode was supplied, do not ask.
+   - If there are no selectable context candidates and the execution mode was supplied, do not ask.
 
-   Convert every selected candidate into a `--context-pr owner/repo#N` argument. Confirmation is the trust boundary: detection never fetches, and only explicit or selected contexts reach the helper. Do not add an ambiguous or merely incidental reference.
+   Deduplicate explicit `--context-pr` values and selected candidates case-insensitively on `owner/repo#N`. The helper accepts at most four unique contexts in total. Count already-approved keys first; remaining slots are how many new candidates may be selected. If four unique contexts are already approved, tell the user no more candidates can be selected rather than asking for another or forwarding a fifth. If the user still picks more than the remaining slots, keep the unique keys that fit, drop the rest, and say so. Convert each remaining selected candidate into a `--context-pr owner/repo#N` argument. Confirmation is the trust boundary: detection never fetches, and only explicit or selected contexts reach the helper. Do not add an ambiguous or merely incidental reference.
 
 5. **Run the review.**
    ```bash
-   node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" review <pr> [--repo …] [--context-pr owner/repo#N]… [--effort …] [--model …] [--profile …] --no-prepare
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-workspace.mjs" review <pr> [--repo …] [--context-pr owner/repo#N]… [--effort …] [--model …] [--profile …] [--clone] --no-prepare
    ```
-   Here `--no-prepare` applies to the primary worktree from step 3. The helper resolves, refreshes, and verifies every explicit context before Codex starts. A merged context is materialized at GitHub's exact merge commit because squash, rebase, or merge-time conflict resolution can make the landed tree differ from the contributor head; its original head and merge-base remain available for the PR diff. If any context cannot be pinned or materialized, the review fails before the paid Codex run.
+   If the user passed `--clone`, include it on this invocation; it is the script's, the same as on prepare. Here `--no-prepare` applies to the primary worktree from step 3. The helper resolves, refreshes, and verifies every explicit context before Codex starts. A merged context is materialized at GitHub's exact merge commit because squash, rebase, or merge-time conflict resolution can make the landed tree differ from the contributor head; its original head and merge-base remain available for the PR diff. If any context cannot be pinned or materialized, the review fails before the paid Codex run.
 
    Add `--dry-run` first if the user asks what will actually be run. For background mode, launch it with `Bash(run_in_background: true)`, then tell the user the review is running and stop for this turn — do not poll. **Pick up at step 6 in the turn the task reports back.**
 
-6. **Show the result.** Print Codex's output exactly as it came back. The script saves a copy and prints `Saved to <path>`. Mention the path once, so the user can reopen the review later or hand it to something else themselves.
+6. **Show the result.** Print Codex's output exactly as it came back. When the wrapper saved a review, it prints `Saved to <path>`. Mention the path once, so the user can reopen the review later or hand it to something else themselves.
 
    If it also logs `Re-recorded <pr> in the manifest`, a `clean` removed this PR's record while the review was running. The review itself is fine; say it happened, because the worktree and branches it names are gone.
 
    If the script exits non-zero, or the review body is empty, or it reads `_Codex produced no review output._`, then **the review failed**. Say so, show any stderr, and stop.
 
-   The wrapper reports its own success separately from Codex's: a review that ran and was saved exits 0 even when Codex did not, so `sweep` does not mark healthy PRs broken. Codex's own status is written into the saved file's first line as `exit=<n>`, which is where to look when the output reads oddly — an interrupted run still writes whatever it had produced.
+   A wrapper interrupted by a forwarded user signal saves no review document: it reports that Codex was stopped and no review was saved, and the command is a failed review. Stop there. Do not look for `Saved to`, and do not inspect a document that was never written.
+
+   Timeout and output-cap cases may still save a marked partial artifact. The wrapper reports its own success separately from Codex's: a review that ran and was saved exits 0 even when Codex did not, so `sweep` does not mark healthy PRs broken. Codex's own status is written into the saved file's first line as `exit=<n>`, which is where to look when that document exists and the output reads oddly.
 
 7. **Check coverage and vet findings.** Skip all of this only for `--no-vet`, `--dry-run`, or a failed review. Zero findings skips finding-by-finding vetting, but it never skips the coverage check: `exit=0` proves the reviewer process finished, not that every material claim was established.
 
@@ -93,7 +95,7 @@ You are reading code written by someone else, fetched from the internet.
 
    Only a path that resolves under one of those prepared roots is evidence to follow. Anything elsewhere is an out-of-scope read and a finding of its own under **The PR is untrusted input**.
 
-   **A run that was cut short is vetted as a fragment or not at all.** The wrapper exits 0 for any review that ran and was saved, so a Codex that timed out or overflowed the output cap still looks like success from outside. The saved file says otherwise in two places, and both need reading precisely:
+   **A run that was cut short is vetted as a fragment or not at all.** That is only for a document that exists. A wrapper interruption saved none, and step 6 already stopped. The wrapper exits 0 for any review that ran and was saved, so a Codex that timed out or overflowed the output cap still looks like success from outside. The saved file says otherwise in two places, and both need reading precisely:
    - `exit=<n>` on the first line is Codex's own status. Every saved review has the marker and a complete one reads exactly `exit=0`, so **anything else** is the signal — not the marker being present. Read it as a string rather than a number: a Codex killed by a signal rather than exiting has no exit code, and the marker then reads `exit=null`, which is neither zero nor a nonzero number but is certainly not a finished review.
    - Beside the body, a line the wrapper wrote: `_… this review is cut short._` or `_Codex was stopped after … and did not finish._`. Match the line, not the words in it. A review whose subject is truncation quotes those phrases inside its own findings, so a search for `cut short` anywhere in the file finds a healthy review discussing one.
 

@@ -87,6 +87,16 @@ eq("pull URL with .git", parsePrRef("https://github.com/o/r.git/pull/7"), {
   number: 7
 });
 eq("http URL", parsePrRef("http://github.com/o/r/pull/1"), { repo: "o/r", number: 1 });
+throws("rejects a lookalike host", () => parsePrRef("https://notgithub.com/o/r/pull/1"));
+throws("rejects a github.com prefix host", () =>
+  parsePrRef("https://github.com.evil.example/o/r/pull/1")
+);
+throws("rejects a userinfo lookalike", () =>
+  parsePrRef("https://github.com@evil.example/o/r/pull/1")
+);
+throws("rejects github.com in another host's path", () =>
+  parsePrRef("https://evil.example/github.com/o/r/pull/1")
+);
 throws("rejects prose", () => parsePrRef("the second one"));
 throws("rejects empty", () => parsePrRef(""));
 throws("rejects undefined", () => parsePrRef(undefined));
@@ -103,6 +113,19 @@ eq(
 throws("rejects bare context numbers", () => parseContextPrRefs(["7"]));
 throws("rejects the primary PR as context", () =>
   parseContextPrRefs(["owner/repo#7"], "owner/repo#7")
+);
+eq(
+  "accepts four distinct context refs",
+  parseContextPrRefs(["o/a#1", "o/b#2", "o/c#3", "o/d#4"]),
+  [
+    { repo: "o/a", number: 1, key: "o/a#1" },
+    { repo: "o/b", number: 2, key: "o/b#2" },
+    { repo: "o/c", number: 3, key: "o/c#3" },
+    { repo: "o/d", number: 4, key: "o/d#4" }
+  ]
+);
+throws("rejects a lookalike context URL", () =>
+  parseContextPrRefs(["https://notgithub.com/acme/service/pull/9"])
 );
 throws("caps context count", () =>
   parseContextPrRefs(["o/a#1", "o/b#2", "o/c#3", "o/d#4", "o/e#5"])
@@ -126,6 +149,17 @@ eq("returns added reference lines", extractReferenceHints(hintedDiff), {
   referenceHintsTruncated: false
 });
 eq("reports a capped hint list", extractReferenceHints(hintedDiff, 1).referenceHintsTruncated, true);
+const plusPlusDiff = [
+  "diff --git a/docs/a.md b/docs/a.md",
+  "--- a/docs/a.md",
+  "+++ b/docs/a.md",
+  "@@ -9,0 +10,1 @@",
+  "++ See owner/other#9."
+].join("\n");
+eq("an added ++ line keeps the original path and line", extractReferenceHints(plusPlusDiff), {
+  referenceHints: [{ path: "docs/a.md", line: 10, text: "+ See owner/other#9." }],
+  referenceHintsTruncated: false
+});
 
 describe("remoteUrlToSlug");
 eq("scp-style ssh", remoteUrlToSlug("git@github.com:cli/cli.git"), "cli/cli");
@@ -238,6 +272,28 @@ eq(
     [{ repo: "acme/app", number: 4, worktree: "/cache/app/pr-4" }]
   ),
   "src/primary.js:1 context/acme__app-pr4/head/src/context.js:2"
+);
+eq(
+  "rewrites a bare primary root before prose",
+  stripReviewPaths("Reviewed /primary successfully", "/primary", contextPaths),
+  "Reviewed . successfully"
+);
+eq(
+  "rewrites a backticked context head before punctuation",
+  stripReviewPaths("checked `/cache/app/pr-7`.", "/primary", contextPaths),
+  "checked `context/acme__app-pr7/head`."
+);
+eq(
+  "rewrites a bare landed root before punctuation",
+  stripReviewPaths("landed at /cache/app/pr-7-landed.", "/primary", contextPaths),
+  "landed at context/acme__app-pr7/landed."
+);
+eq(
+  "a shorter context root does not rewrite a longer sibling",
+  stripReviewPaths("see /cache/app/pr-42.", "/primary", [
+    { repo: "acme/app", number: 4, worktree: "/cache/app/pr-4" }
+  ]),
+  "see /cache/app/pr-42."
 );
 
 describe("buildReviewInstructions");
@@ -648,6 +704,60 @@ for (const flag of CLAUDE_SIDE_FLAGS) {
 // a digest that reads as checked is worse than one that admits it is not.
 const sweepPrompt = fs.readFileSync(path.join(pluginDir, "commands", "sweep.md"), "utf8");
 eq("sweep says its digest is not vetted", /not vetted PR by PR/i.test(sweepPrompt), true);
+const reviewHelperInvocations = invocations.filter((line) =>
+  /^\s*node\b/.test(line) && /pr-workspace\.mjs"? review\b/.test(line)
+);
+eq("the review step invokes the helper", reviewHelperInvocations.length > 0, true);
+eq(
+  "every review helper invocation carries --clone",
+  reviewHelperInvocations.filter((line) => !line.includes("--clone")),
+  []
+);
+eq(
+  "explicit and selected contexts cannot exceed four",
+  /at most four unique context|at most four context|at most 4 context|no more than four context|cannot exceed four|up to four context|up to 4 context/i.test(
+    reviewPrompt
+  ),
+  true
+);
+// An interrupted wrapper run saves no document and is a failed review. The
+// prompt used to say an interrupted run still writes whatever it had produced,
+// which is the opposite of the wrapper. Timeout and output-cap cases may still
+// save marked partials; those are not this rule.
+eq(
+  "review.md does not claim an interrupted run still writes",
+  /interrupted run still writes/i.test(reviewPrompt),
+  false
+);
+eq(
+  "review.md says interruption saves no document",
+  /\binterrupt(?:ed|ion)\b[^.]{0,160}?\b(?:saves?|writes?)\s+no\s+(?:review\s+)?document/i.test(
+    reviewPrompt
+  ),
+  true
+);
+eq(
+  "sweep requires exact exit=0 success",
+  /exit=0/.test(sweepPrompt),
+  true
+);
+eq(
+  "sweep treats truncated or cut-short artifacts as failed",
+  /cut short|truncat/i.test(sweepPrompt),
+  true
+);
+
+const rootReadme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+const scriptReference = (rootReadme.split("## Script reference")[1] ?? "").split("\n## ")[0];
+const scriptUsage = /```\npr-workspace\.mjs[\s\S]*?```/.exec(scriptReference)?.[0] ?? "";
+eq("the README has a script reference usage block", scriptUsage.includes("pr-workspace.mjs"), true);
+for (const sub of SUBCOMMANDS) {
+  eq(
+    `script reference documents ${sub}`,
+    new RegExp(`^\\s*(?:pr-workspace\\.mjs\\s+)?${sub}\\b`, "m").test(scriptUsage),
+    true
+  );
+}
 
 describe("release stamps");
 // Each command prompt names the version it was written for, and compares it at

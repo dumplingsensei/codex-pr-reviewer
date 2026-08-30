@@ -137,6 +137,7 @@ pr-workspace.mjs doctor  [--json]
                  review  <pr> [--repo …] [--context-pr owner/repo#N]…
                               [--model M] [--effort E] [--profile P]
                               [--no-prepare] [--dry-run] [--json]
+                 list    [--repo owner/repo] [--json]
                  clean   [--pr N | --repo owner/repo | --all | --older-than DAYS]
                          --confirm-plan <digest> [--purge-clones]
                          [--purge-reviews --confirm-reviews <digest>]
