@@ -5,6 +5,23 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.16
+
+A repository-wide audit hardens cross-repository review context around the
+failure modes found after its initial release. Pull request URLs now require the
+exact GitHub host, context metadata is stabilized across fetch-time state
+changes, and landed snapshots cannot silently move between repositories.
+
+Large diff hint scans are drained without the subprocess output cap or
+quadratic line parsing. Saved-review path redaction now covers embedded bare
+worktree roots, and cleanup validates landed worktrees against their canonical
+cache paths before deletion.
+
+The review and sweep prompts now preserve `--clone`, enforce the four-context
+limit, distinguish incomplete artifacts from coverage-limited reviews, and
+state correctly that a user-interrupted review saves no document. Regression
+coverage exercises the new race, cleanup, large-diff, and prompt contracts.
+
 ## 0.9.15
 
 Reviews can now verify cross-repository dependency claims against explicitly
