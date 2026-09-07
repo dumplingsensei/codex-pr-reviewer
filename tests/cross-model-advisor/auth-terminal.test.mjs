@@ -5,15 +5,32 @@
  */
 
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
 import { PassThrough } from "node:stream";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const modules = path.join(repo, "plugins", "cross-model-advisor", "dist", "modules");
 const { AuthError } = await import(pathToFileURL(path.join(modules, "auth.mjs")).href);
-const { runAuth } = await import(pathToFileURL(path.join(modules, "auth-control.mjs")).href);
+const { parseAuthArgv, runAuth } = await import(pathToFileURL(path.join(modules, "auth-control.mjs")).href);
+
+const scratchDirs = [];
+
+async function scratch(prefix) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  scratchDirs.push(dir);
+  return dir;
+}
+
+after(async () => {
+  for (const dir of scratchDirs) {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 
 function oauthConfig(slot = "codex", provider = "openai-codex") {
   return {
@@ -84,6 +101,60 @@ function loginOpts(overrides = {}) {
     ...overrides
   };
 }
+
+function mixedConfig() {
+  return {
+    version: 1,
+    providers: {
+      "xai-api": { kind: "api", provider: "xai", apiKeyEnv: "XAI_API_KEY" },
+      "xai-oauth": { kind: "oauth", provider: "xai" }
+    },
+    advisors: [
+      {
+        name: "api-reviewer",
+        provider: "xai-api",
+        model: "grok-3",
+        instructions: "SECRET_INSTRUCTIONS_MUST_NOT_LEAK"
+      },
+      {
+        name: "oauth-reviewer",
+        provider: "xai-oauth",
+        model: "grok-4",
+        instructions: "more-secret-instructions"
+      }
+    ]
+  };
+}
+
+function refuseAuth() {
+  return {
+    createCredentialStore() {
+      throw new Error("must not read credentials");
+    },
+    createBuiltinProvider: async () => {
+      throw new Error("must not authenticate");
+    },
+    createModels: async () => {
+      throw new Error("must not authenticate");
+    }
+  };
+}
+
+async function runList(overrides = {}) {
+  const stdout = collectStdout();
+  const stderr = collectStdout();
+  const code = await runAuth({
+    argv: ["list"],
+    env: { CLAUDE_CONFIG_DIR: "/tmp/cma-auth-list-unused", XAI_API_KEY: "sk-live-secret-must-not-leak" },
+    stdout,
+    stderr,
+    loadConfig: async () => mixedConfig(),
+    ...refuseAuth(),
+    ...overrides
+  });
+  return { code, stdout, stderr };
+}
+
 
 test("hidden prompts do not echo after a live readline prompt", async () => {
   const stdin = ttyStdin();
@@ -388,4 +459,122 @@ test("browser completion releases stdin after cancelling the manual-code prompt"
   }));
   assert.equal(stdin.isPaused(), true, "completed login must release terminal input");
   assert.equal(stdin.listenerCount("data"), 0, "manual input must not survive browser completion");
+});
+
+test("parseAuthArgv accepts only bare list and slotted login commands", () => {
+  assert.deepEqual(parseAuthArgv(["list"]), { command: "list" });
+  assert.deepEqual(parseAuthArgv(["login", "codex"]), { command: "login", slot: "codex" });
+  assert.deepEqual(parseAuthArgv(["login-command", "codex"]), { command: "login-command", slot: "codex" });
+  assert.deepEqual(parseAuthArgv(["logout", "codex"]), { command: "logout", slot: "codex" });
+  assert.deepEqual(parseAuthArgv(["status", "codex"]), { command: "status", slot: "codex" });
+  const usage = (error) => error instanceof AuthError && error.code === "usage";
+  assert.throws(() => parseAuthArgv(["list", "codex"]), usage);
+  assert.throws(() => parseAuthArgv([]), usage);
+  assert.throws(() => parseAuthArgv(["login"]), usage);
+  assert.throws(() => parseAuthArgv(["login-command"]), usage);
+  assert.throws(() => parseAuthArgv(["logout"]), usage);
+  assert.throws(() => parseAuthArgv(["status"]), usage);
+  assert.throws(() => parseAuthArgv(["login", "Codex"]), usage);
+  assert.throws(() => parseAuthArgv(["login", "codex", "extra"]), usage);
+});
+
+test("list prints configured slot metadata without secrets or authentication", async () => {
+  const { code, stdout, stderr } = await runList();
+  assert.equal(code, 0);
+  assert.equal(stderr.text, "");
+  const payload = JSON.parse(stdout.text);
+  assert.deepEqual(payload, {
+    slots: [
+      {
+        slot: "xai-api",
+        provider: "xai",
+        kind: "api",
+        advisors: [{ name: "api-reviewer", model: "grok-3" }]
+      },
+      {
+        slot: "xai-oauth",
+        provider: "xai",
+        kind: "oauth",
+        advisors: [{ name: "oauth-reviewer", model: "grok-4" }]
+      }
+    ]
+  });
+  assert.doesNotMatch(stdout.text, /apiKeyEnv|XAI_API_KEY|sk-live-secret-must-not-leak|SECRET_INSTRUCTIONS|instructions|accessToken|refresh/i);
+});
+
+test("list extra arguments are usage and load no config or credentials", async () => {
+  const stdout = collectStdout();
+  await assert.rejects(
+    () =>
+      runAuth({
+        argv: ["list", "codex"],
+        stdout,
+        loadConfig: async () => {
+          throw new Error("must not load config");
+        },
+        ...refuseAuth()
+      }),
+    (error) => error instanceof AuthError && error.code === "usage"
+  );
+  assert.equal(stdout.text, "");
+});
+
+test("list missing config directs to setup without leaking loader errors", async () => {
+  const stdout = collectStdout();
+  const dir = await scratch("cma-auth-list-missing-");
+  await assert.rejects(
+    () =>
+      runAuth({
+        argv: ["list"],
+        env: { CLAUDE_CONFIG_DIR: dir },
+        stdout,
+        ...refuseAuth()
+      }),
+    (error) =>
+      error instanceof AuthError &&
+      error.code === "setup" &&
+      error.message.includes("/cross-model-advisor:setup") &&
+      !error.message.includes(dir)
+  );
+  assert.equal(stdout.text, "");
+});
+
+test("list invalid config directs to setup without leaking validation text", async () => {
+  const stdout = collectStdout();
+  await assert.rejects(
+    () =>
+      runAuth({
+        argv: ["list"],
+        env: { CLAUDE_CONFIG_DIR: "/tmp/cma-auth-list-invalid" },
+        stdout,
+        loadConfig: async () => {
+          const error = new Error(`config file is not valid JSON token=sk-leaked-${"x".repeat(8)}`);
+          error.name = "ConfigError";
+          throw error;
+        },
+        ...refuseAuth()
+      }),
+    (error) =>
+      error instanceof AuthError &&
+      error.code === "setup" &&
+      error.message.includes("/cross-model-advisor:setup") &&
+      !error.message.includes("sk-leaked")
+  );
+  assert.equal(stdout.text, "");
+});
+
+test("login-command still prints a hint without listing or authenticating", async () => {
+  const stdout = collectStdout();
+  const code = await runAuth({
+    argv: ["login-command", "codex"],
+    env: { CLAUDE_CONFIG_DIR: "/tmp/cma-config-dir" },
+    stdout,
+    loadConfig: async () => {
+      throw new Error("must not load config");
+    },
+    ...refuseAuth()
+  });
+  assert.equal(code, 0);
+  assert.match(stdout.text, /auth-control\.mjs login codex/);
+  assert.match(stdout.text, /CLAUDE_CONFIG_DIR=\/tmp\/cma-config-dir/);
 });

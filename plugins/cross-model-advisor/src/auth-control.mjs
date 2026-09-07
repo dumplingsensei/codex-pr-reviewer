@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * Terminal-owned OAuth login, logout, and status. Interactive login is not
- * a hook or control-worker path; run it in the user's own terminal.
+ * Terminal-owned OAuth login, logout, status, and configured-slot listing.
+ * Interactive login is not a hook or control-worker path; run it in the
+ * user's own terminal.
  */
 
 import fs from "node:fs";
@@ -12,9 +13,9 @@ import { fileURLToPath } from "node:url";
 import { configFilePath, loadConfig as defaultLoadConfig, OAUTH_PROVIDERS } from "./config.mjs";
 import { AuthError, createCredentialStore as defaultCreateStore } from "./auth.mjs";
 
-const COMMANDS = new Set(["login", "login-command", "logout", "status"]);
+const COMMANDS = new Set(["list", "login", "login-command", "logout", "status"]);
 const LOGIN_TIMEOUT_MS = 15 * 60 * 1000;
-const USAGE = "usage: auth-control.mjs login|login-command|logout|status <configured-slot>";
+const USAGE = "usage: auth-control.mjs list | login|login-command|logout|status <configured-slot>";
 const HIDDEN_PROMPT_TYPES = new Set(["secret", "manual_code"]);
 const OAUTH_OVERRIDE_ENV = Object.freeze([
   "PI_OAUTH_CALLBACK_HOST",
@@ -45,6 +46,7 @@ const STATIC_ERRORS = Object.freeze({
     "Credential lock is stale. Remove it only after verifying no login, logout, or refresh is running.",
   provider: "OAuth credentials do not match this provider.",
   identifier: "Invalid configured slot.",
+  setup: "Missing or invalid configuration. Run /cross-model-advisor:setup.",
   auth: "authentication failed"
 });
 
@@ -74,6 +76,12 @@ function posixQuote(value) {
  */
 export function parseAuthArgv(argv) {
   const command = argv[0];
+  if (command === "list") {
+    if (argv.length !== 1) {
+      throw new AuthError("usage", USAGE);
+    }
+    return { command };
+  }
   const slot = argv[1];
   if (!COMMANDS.has(command) || typeof slot !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(slot) || argv.length !== 2) {
     throw new AuthError("usage", USAGE);
@@ -460,6 +468,33 @@ function resolveOAuthSlot(config, slot) {
 }
 
 /**
+ * Configured slot metadata for the login picker. Copies only slot ids,
+ * upstream provider ids, auth kind, and associated advisor names/models.
+ * @param {object} config
+ */
+function configuredSlotList(config) {
+  // loadConfig has already validated the complete configuration.
+  const slots = [];
+  for (const slot of Object.keys(config.providers)) {
+    const entry = config.providers[slot];
+    /** @type {{ name: string, model: string }[]} */
+    const associated = [];
+    for (const advisor of config.advisors) {
+      if (advisor.provider === slot) {
+        associated.push({ name: advisor.name, model: advisor.model });
+      }
+    }
+    slots.push({
+      slot,
+      provider: entry.provider,
+      kind: entry.kind,
+      advisors: associated
+    });
+  }
+  return { slots };
+}
+
+/**
  * @param {{
  *   argv?: string[],
  *   env?: NodeJS.ProcessEnv,
@@ -482,13 +517,25 @@ export async function runAuth(options = {}) {
   const stdout = options.stdout ?? process.stdout;
   const stderr = options.stderr ?? process.stderr;
   const argv = options.argv ?? [];
-  const { command, slot } = parseAuthArgv(argv);
+  const parsed = parseAuthArgv(argv);
   // This skill-safe command reads no configuration or credentials and cannot
   // initialize an OAuth flow. It pins the actual helper and configuration paths.
-  if (command === "login-command") {
-    stdout.write(`${loginHint(slot, env)}\n`);
+  if (parsed.command === "login-command") {
+    stdout.write(`${loginHint(parsed.slot, env)}\n`);
     return 0;
   }
+  if (parsed.command === "list") {
+    const loadConfigFn = options.loadConfig ?? defaultLoadConfig;
+    let config;
+    try {
+      config = await loadConfigFn({ env });
+    } catch {
+      throw new AuthError("setup", STATIC_ERRORS.setup);
+    }
+    stdout.write(`${JSON.stringify(configuredSlotList(config))}\n`);
+    return 0;
+  }
+  const { command, slot } = parsed;
   const loadConfigFn = options.loadConfig ?? defaultLoadConfig;
   const createStoreFn = options.createCredentialStore ?? defaultCreateStore;
   const config = await loadConfigFn({ env });

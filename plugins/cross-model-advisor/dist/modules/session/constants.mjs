@@ -6,6 +6,7 @@ var CONTROL_COMMANDS = Object.freeze([
   "cross-model-advisor:off",
   "cross-model-advisor:status",
   "cross-model-advisor:doctor",
+  "cross-model-advisor:setup",
   "cross-model-advisor:login",
   "cross-model-advisor:logout"
 ]);

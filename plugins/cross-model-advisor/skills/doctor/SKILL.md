@@ -15,7 +15,7 @@ This skill has no arguments. Do not append user text to the helper.
 node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" doctor
 ```
 
-The helper reads session identity from `CLAUDE_CODE_SESSION_ID`, the frozen project root from `"$CLAUDE_PROJECT_DIR"`, and plugin data from `"$CLAUDE_PLUGIN_DATA"`. Do not pass paths, session ids, or `$ARGUMENTS`.
+The helper reads session identity from `CLAUDE_CODE_SESSION_ID` (or `CLAUDE_SESSION_ID`) and plugin data from `CLAUDE_PLUGIN_DATA`. It reuses the stored session root. For a new session without stored state, it uses `CLAUDE_PROJECT_DIR` when available, otherwise the command's working directory. Do not pass paths, session ids, or `$ARGUMENTS`, or export replacement identity variables.
 
 ## Report
 
@@ -25,9 +25,14 @@ Show the helper's stdout. It should cover:
 - configuration file `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cross-model-advisor.json`
 - presence of named key variables (names only, never values)
 - configured providers: slot, upstream id, kind, availability, and a static error when unavailable
-- bundle completeness (`control.mjs`, `worker.mjs`, `auth-control.mjs`) and IPC access
+- bundle completeness (`control.mjs`, `worker.mjs`, `auth-control.mjs`, `setup-control.mjs`) and IPC access
 
 OAuth availability is offline credential status only. If a slot is unavailable, do not start login from this skill.
+
+Missing bundle entries make both `bundle.ok` and the overall `ok` false.
+Without `CLAUDE_PLUGIN_ROOT`, the worker resolves its plugin root from its own
+file location, not the project directory. After a plugin update, restart Claude
+to replace any already-running worker before diagnosing the updated bundle.
 
 Do **not**:
 

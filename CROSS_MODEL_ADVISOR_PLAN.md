@@ -1,5 +1,7 @@
 # Continuous cross-model advisors for Claude Code
 
+> Planning update: the terminal-settings replacement at the end of this document supersedes the conversational setup and reconfiguration design below for the next change. The original implementation plan is retained for context. The terminal replacement is planned, not implemented.
+
 ## Context
 
 Build a **new sibling plugin, `cross-model-advisor`**, in this marketplace. It should provide the useful combination from OMP's advisors: independent reviewers observe the ongoing primary session, investigate the project for themselves, and send concise findings back while Claude is working. This is not another pull-request reviewer or a Stop-hook completion gate.
@@ -25,7 +27,7 @@ Pin production dependencies to `@earendil-works/pi-ai@0.85.1` and `ignore@7.0.8`
 
 Keep `package.json`, `package-lock.json`, and the build script in **`tooling/cross-model-advisor/`**, outside the installable marketplace source. Claude automatically runs npm dependency installation for a cached plugin containing root package manifests; bundling alone does not suppress that. The build resolves dependencies from this tooling directory and emits into the plugin's `dist/`. Ship no root package manifest in the plugin. Tests exercise bundled modules/executables, not unbundled source imports that depend on a developer node_modules tree.
 
-Produce three executable entry points: lightweight hook/control, session worker, and explicit terminal-owned auth helper. Hooks must not eagerly load SDKs or launch login flows. Child workers use `process.execPath`. Include dependency licenses. Write a compact plugin-owned advisor prompt; credit OMP as design inspiration without copying its prompt corpus or agent framework.
+Produce four executable entry points: lightweight hook/control, session worker, explicit terminal-owned auth helper, and offline setup helper. Hooks must not eagerly load SDKs or launch login flows. Child workers use `process.execPath`. Include dependency licenses. Write a compact plugin-owned advisor prompt; credit OMP as design inspiration without copying its prompt corpus or agent framework.
 
 Add the marketplace entry pointing to `./plugins/cross-model-advisor`. Advance marketplace metadata from `0.9.16` to `0.9.17`, leaving the existing plugin entry and manifest at `0.9.16`. Update release checks so each marketplace plugin version matches its own manifest; marketplace metadata is independently versioned. Extend the version guard to enumerate marketplace source directories instead of hard-coding one plugin, retaining each plugin's own existing stamp checks. Do not introduce new duplicate version strings in skills.
 
@@ -33,15 +35,16 @@ Configuration and installation instructions belong in the plugin README and mark
 
 ### 2. Make activation explicit, session-bound, and configurable
 
-Ship six user-only skills with `disable-model-invocation: true` and no `context: fork`:
+Ship seven user-only skills with `disable-model-invocation: true` and no `context: fork`:
 - `/cross-model-advisor:on`: validate configuration and enable configured advisors; report provider/model names, root, limits, and external-provider disclosure. No advisor model call merely to run the command.
 - `/cross-model-advisor:off`: cancel running reviews, stop future reviews, and discard pending injection candidates. Retain accepted findings in the local inbox for inspection.
 - `/cross-model-advisor:status`: show enabled/paused/busy state per advisor, pending/emitted findings, usage when reported, and sanitized last errors. “Emitted” is locally acknowledged hook output, not confirmed receipt by Claude. This is also the human-visible inbox.
-- `/cross-model-advisor:doctor`: offline runtime/config/key-variable/stored-OAuth/model/bundle/IPC checks. No remote entitlement claim, token refresh, paid request, login, installation, or secrets in output.
-- `/cross-model-advisor:login <provider-slot>`: show the exact installed auth helper command for the user's own terminal. Browser/device authorization and manual callback input must not pass through Claude's transcript.
+- `/cross-model-advisor:doctor`: offline runtime/config/key-variable/stored-OAuth/model/bundle/IPC checks. Resolve the plugin root from the worker's source/bundle/module layout when its environment variable is absent; genuine bundle failures make the overall result fail. No remote entitlement claim, token refresh, paid request, login, installation, or secrets in output.
+- `/cross-model-advisor:setup`: choose providers, supported auth methods, offline-catalog models, and advisor instructions with AskUserQuestion. Preview and confirm before a revision-checked private atomic config save. Preserve unrelated settings and existing slot identities; never collect key values, run OAuth, or activate automatically. New API slots/key-variable names require a new Claude session so the worker inherits the selected variables.
+- `/cross-model-advisor:login [provider-slot]`: with no argument, list configured slots without reading credentials and use AskUserQuestion to choose an OAuth slot. Then show the exact installed auth helper command for the user's own terminal. Explicit validated slots remain supported. Browser/device authorization and manual callback input must not pass through Claude's transcript.
 - `/cross-model-advisor:logout <provider-slot>`: delete that slot's local credential under the same serialization lock used for refresh. Local logout does not revoke the upstream grant or cancel already authorized requests.
 
-Bind helpers to the current session using Claude's session identity (`${CLAUDE_SESSION_ID}` in skill metadata; `CLAUDE_CODE_SESSION_ID` in the Bash environment) and project/plugin-data environment variables. In executable command text, expand quoted shell environment variables such as `"$CLAUDE_PROJECT_DIR"` rather than interpolating path text into shell source through skill substitution. Do not identify a session by cwd, newest transcript, or a global current-session file. Use fixed helper commands with no raw `$ARGUMENTS`; these four commands have no free-form arguments. Limit skill pre-approval to its own control executable, not a general Bash grant.
+Bind session helpers to Claude's session identity (`CLAUDE_CODE_SESSION_ID` or `CLAUDE_SESSION_ID`) and `CLAUDE_PLUGIN_DATA`. Reuse the stored session root. When no state exists, use `CLAUDE_PROJECT_DIR`, otherwise hook payload `cwd` or a command's working directory. Cwd never selects the session, and later cwd changes never rebind its root. Do not select the newest transcript or a global current-session file. The four session-control skills have fixed argument-less helper commands. Auth helpers use a validated slot, with argument-less `list` for the login picker. Setup uses offline `catalog`, bounded `models`, and stdin `save`; auth/setup do not require session identity. Never interpolate raw `$ARGUMENTS`. Limit pre-approval to each skill's own helper operations.
 
 Use one trusted user configuration file: `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cross-model-advisor.json`. JSON schema version is `1`; reject unknown keys and malformed entries before enabling. Define:
 
@@ -84,7 +87,7 @@ OAuth provider IDs: `openai-codex`, `github-copilot`, `xai`, `kimi-coding`. Entr
 
 Anthropic remains API-key-only. Antigravity was considered, but its terms expressly prohibit third-party OAuth access; Gemini API (`google`) is supported and must not be labelled Antigravity subscription access. SDK support for other subscription flows does not establish vendor endorsement or remove account/organization restrictions.
 
-At activation, freeze the canonical project root from the session's `CLAUDE_PROJECT_DIR`. Refuse `/`, the home directory, or a missing root. A later cwd/worktree move does not broaden it: when a hook reports a cwd outside the root, pause observation/review and require explicit `off`, followed by a new session rooted there. Added directories do not grant advisor access.
+At activation, freeze the canonical project root established for the session. Resolve it from stored state first; a new session uses `CLAUDE_PROJECT_DIR`, hook `cwd`, or the command's initial working directory. Refuse `/`, the home directory, or a missing root. A later cwd/worktree move does not broaden it: when a hook reports a cwd outside the root, pause observation/review and require explicit `off`, followed by a new session rooted there. Added directories do not grant advisor access.
 
 Optional project customization is limited to `WATCHDOG.md` (review priorities, at most 8 KiB) and `.cross-model-advisorignore` (additional excluded paths). Project files cannot select providers, endpoints, credentials, binaries, budgets, or auto-enable the plugin. Treat project guidance as untrusted data, below the advisor's system instructions and tool policy.
 
@@ -98,7 +101,7 @@ A hook/control client reads bounded JSON stdin, validates identity, contacts the
 
 Coordinate cold starts with atomic directory creation plus a ready handshake containing a new worker generation and capability; never reuse a stale PID as authority. The worker serializes event ingestion, queue claims, and state transitions. It owns provider cancellation, so ordinary hooks never signal arbitrary stored PIDs. If the worker dies, a later hook can replace it under the startup lock; interrupted reviews are marked interrupted, not replayed automatically.
 
-Classify control turns before draining, task replacement, or scheduling. Recognize all six exact namespaced commands; `off` immediately disables/cancels. Defer other slash prompts until UserPromptExpansion resolves attribution. Login/logout helper/reporting turns are control-only and cannot become advisor observations, drain findings, or replace the real task. Preserve explicit inbox display via status and ordinary observation of other slash commands.
+Classify control turns before draining, task replacement, or scheduling. Recognize all seven exact namespaced commands; `off` immediately disables/cancels. Defer other slash prompts until UserPromptExpansion resolves attribution. Setup/login/logout helper, question, and reporting turns are control-only and cannot become advisor observations, drain findings, or replace the real task. Preserve explicit inbox display via status and ordinary observation of other slash commands.
 
 Hook actions:
 
@@ -174,7 +177,7 @@ Track actual token usage/cost when the SDK reports it; missing pricing is `unkno
 
 ### 6. Own explicit OAuth login, storage, and refresh
 
-Use the selected SDK provider's OAuth implementation, not installed tools or a copied OMP auth database. The standalone `auth-control.mjs login|logout|status <provider-slot>` helper loads the trusted user config. Login requires the user's terminal; print authorization URLs/device codes, never credential payloads. Manual callback/secret input is terminal-owned. Handle cancellation and callback port conflicts without broadening redirect destinations. Hooks and doctor must not initiate interactive work.
+Use the selected SDK provider's OAuth implementation, not installed tools or a copied OMP auth database. The standalone `auth-control.mjs login|logout|status <provider-slot>` helper loads the trusted user config. `list` returns configured slot/provider/auth/advisor metadata without reading credentials. `login-command <provider-slot>` only formats the terminal command. Login requires the user's terminal; print authorization URLs/device codes, never credential payloads. Manual callback/secret input is terminal-owned. Handle cancellation and callback port conflicts without broadening redirect destinations. Hooks, setup, and doctor must not initiate interactive authorization.
 
 Store credentials under `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cross-model-advisor/credentials`, keyed by validated configured slot and bound to the upstream provider ID. Use private 0700 directories, 0600 files, bounded envelope validation, symlink refusal, atomic writes, and cross-process serialization. Refresh reads the current token under the lock; never double-refresh a rotated token or resurrect a logout. Live lock ownership must not be stolen merely because a timeout elapsed. Abortable lock waits remain bounded by operation deadlines.
 
@@ -270,3 +273,211 @@ The authenticated Claude smoke proves host injection semantics; offline fixtures
 - [Pi AI 0.85.1 package](https://www.npmjs.com/package/@earendil-works/pi-ai/v/0.85.1) and [source](https://github.com/earendil-works/pi/tree/v0.85.1/packages/ai): provider registry, explicit auth, Context/tool execution, Node requirement.
 - [Anthropic authentication restrictions](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use): no third-party Claude.ai subscription login.
 - [Antigravity terms](https://antigravity.google/terms/) and [FAQ](https://antigravity.google/docs/faq/#why-cant-i-use-third-party-software-eg-claude-code-openclaw-opencode-with-my-antigravity-login): third-party OAuth prohibition and Gemini API alternative.
+
+## Terminal settings menu — next implementation plan
+
+### Approved direction and scope
+
+Replace Claude-driven setup with a plugin-owned terminal menu. The user is comfortable opening that menu in their own terminal. This section is the implementation plan for that approved direction; it does not authorize or claim implementation.
+
+- Keep `/cross-model-advisor:setup` as a thin launcher that prints the exact installed command.
+- All navigation, search, editing, saving, and local session controls run deterministically in Node, without Claude or advisor inference.
+- Opening the slash skill can still cost a Claude turn. Reusing the printed terminal command does not. Existing advisors can independently incur normal review costs while their Claude session is working.
+- Use OMP-style searchable lists and direct settings actions, not an embedded OMP agent, web application, or new server.
+- Support advisor add/edit/enable/disable/remove, provider/auth selection, model selection, model-specific reasoning effort, and literal instructions.
+- Keep persistent user defaults separate from the snapshot active in a particular Claude session.
+- Preserve existing provider slots, authentication, exclusions, limits, and unrelated sessions unless an explicit action changes them.
+- Keep `/status` and `/doctor` as diagnostics, not steps required for every model change.
+- Do not change the main Claude model or the existing PR-reviewer plugin.
+
+### Grounded starting point
+
+The current implementation already supplies most non-UI primitives:
+
+| Existing code | Reuse / required change |
+|---|---|
+| `src/setup-control.mjs`: `runSetup`, `listModels`, revision/lock/atomic-save helpers | Reuse offline catalogs and the single config writer; expose shared operations for the menu rather than reconstructing JSON through Claude or subprocess stdout. |
+| `src/auth-control.mjs`: `runAuth`, terminal interaction, `loginHint` | Reuse explicit OAuth and terminal cleanup. Extract shared command quoting only where both launchers need it; do not copy a second auth implementation. |
+| `src/config.mjs` and `config/schema.json` | Currently reject `enabled` and empty advisor/provider collections; require a deliberate schema update. |
+| `src/control.mjs`: identity resolution, worker startup, hook stdout/ack | Reuse exact-session identity and private IPC. Add an explicit settings client and a safe publication boundary. |
+| `src/worker.mjs`: `handleOn`, cancellation, `publicationAllowed` | Current `on` reloads activation without cancelling old reviews or fencing their findings. It is not safe to call unchanged as terminal Apply. |
+| `src/session/state.mjs`, `src/session/findings.mjs` | Persist settings revisions and advisor epochs; fence pending findings and outstanding hook deliveries. |
+| `tooling/cross-model-advisor/build.mjs` | Already bundles four executables, including setup and auth. Keep four; no installation-time dependency bootstrap. |
+| `src/backends/api.mjs` and pinned SDK reasoning helpers | Current reviews call provider-specific `models.complete` without reasoning options. Reuse `getSupportedThinkingLevels`, model mappings, and SDK transport translation; adding a generic field to the current call is not sufficient. |
+
+Planning-time runtime evidence: `node plugins/cross-model-advisor/dist/setup-control.mjs models openai-codex --q luna` returned exactly `gpt-5.6-luna` / `GPT-5.6 Luna`. This verifies the existing offline picker source, not a terminal menu or remote model entitlement.
+
+### User interaction
+
+The home screen shows:
+
+```text
+Cross-model advisors
+Defaults: <config path>                 Saved / Unsaved changes
+Target: <session id> · <frozen root>     Running / Off / Unavailable
+
+Enabled  Advisor        Provider slot       Model
+[x]      architecture   codex-login         gpt-5.6-luna
+[x]      correctness    openai-api          <configured model>
+
+Add advisor   Provider accounts   Save defaults   Save & Apply   Quit
+```
+
+The values above illustrate layout; they are not new defaults.
+
+- Enter an advisor to change its model, provider slot, instructions, or name. Space toggles its configured enabled state. Removal is explicit and confirmed.
+- Model selection is searchable by ID and display name, highlights the current model, and preserves the current choice on Escape. No provider/auth wizard for a model-only edit.
+- A typical switch is: open advisor → search/select model → Save & Apply. The final action names the target session; no conversational confirmation or full-config questionnaire.
+- Provider setup supports selecting multiple upstream providers, then only the required per-slot auth/model fields. Reusing a slot preserves its identity; adding another account creates a separate explicit slot.
+- Dual-auth providers show API versus OAuth explicitly. API configuration collects variable names, never key values. Compatible endpoints require their existing explicit URL and model metadata; never invent catalog entries.
+- Instructions use a bounded multiline terminal editor, stored literally. They are not shell commands, templates, or model-generated prompts.
+- Leave `exclude` and `limits` unchanged; a general policy editor is outside this change.
+- Escape returns to the parent view. Leaving a dirty menu offers Discard or Return. No config write occurs until Save or Save & Apply.
+- A revision conflict preserves the draft for inspection but refuses overwrite. Offer reload/discard, not automatic merge or a force-save.
+- Require a real input/output TTY. Handle resize, narrow screens, scrolling, Unicode, paste, Ctrl-C, EOF, and SIGTERM. Restore raw mode, cursor, listeners, and any alternate screen on every exit.
+- Treat provider names and user text as display data: terminal control sequences must not execute. Display sanitization must not silently modify saved instructions.
+
+Use a small dedicated terminal module with Node readline/key events and ANSI rendering. Keep it separate from config/auth/session logic, with no new UI framework initially. Exercise real terminal width and input behavior before committing to renderer details; do not assume JavaScript string length equals terminal columns.
+
+### Provider- and model-specific reasoning effort
+
+Add **Reasoning effort** beside Model in each advisor's editor and show its saved/active value in the menu and status. Effort belongs to the advisor, not the shared credential slot: two advisors can use the same model/account with different efforts.
+
+- Persist `advisors[].reasoningEffort` in schema v2: `default`, `off`, or a pinned SDK thinking level. Version-1 migration uses `default`, preserving the current request behavior rather than enabling reasoning or choosing a higher effort.
+- **Default and Off are distinct.** Default leaves the existing provider request behavior unchanged; it does not promise reasoning is disabled. Offer Off only where the exact model/transport supports disabling, and verify the actual wire behavior.
+- Derive selectable levels from the resolved offline model using the pinned SDK's `getSupportedThinkingLevels(model)` and `thinkingLevelMap`, with the owning API/auth route and compatibility metadata. Do not infer support from a provider name or `model.reasoning` alone, and do not offer a universal low/medium/high list.
+- SDK levels are normalized settings, not universal provider parameter names or values. Show aliases explicitly, such as `Minimal — sent as Low`, and show the effective native level/budget where determinable. Do not label a mapped value as a distinct native effort.
+- On a provider/model switch, retain the setting only if it is still supported. If unsupported, require an explicit replacement or Default before Save & Apply. If its native mapping changes, display that change in the preview. Never silently clamp, drop, or upgrade a user's effort.
+- Non-reasoning models show `Not configurable` and preserve Default semantics. Unknown compatible endpoints offer only Default until explicit, validated capability/format metadata establishes supported controls. Their existing boolean `reasoning` metadata is insufficient; do not add arbitrary request-field overrides.
+- Opening the picker and resolving capabilities remain offline. Catalog metadata is not proof of remote entitlement or a server accepting an undocumented effort.
+
+**Translation boundary:** extend the backend's common request-option resolution for both API and OAuth advisors. The pinned SDK distinguishes provider-specific `complete` options from normalized `completeSimple` reasoning options. Use its supported normalized adapter for explicit levels where it preserves the plugin's contracts; preserve the current raw-option behavior for Default. Verify explicit Off separately rather than assuming an omitted option disables thinking. Keep provider syntax translation in the SDK, not in menu code or a second hand-maintained provider table.
+
+Examples of the distinct SDK option families, not a universal wire schema:
+
+| Model/API family | Provider-specific control |
+|---|---|
+| OpenAI Responses / Codex / Chat Completions | Reasoning effort, with model-specific values; Responses and Chat Completions serialize differently. |
+| Anthropic | Adaptive-thinking effort for supported models; enabled thinking plus a token budget for budget-based models. |
+| Google | Thinking configuration with a supported level or token budget, depending on the model. |
+| OpenRouter and other compatible adapters | Model/route-specific compatibility format; for example nested reasoning effort or thinking enable/type controls, not necessarily OpenAI's `reasoning_effort`. |
+
+Planning-time offline SDK probe confirmed: `gpt-5.6-luna` exposes normalized Off/Minimal/Low/Medium/High/XHigh/Max but maps Minimal to native Low; `kimi-coding/k3` exposes only Low/High/Max; `xai/grok-4.3` exposes Off/Low/Medium/High and maps Off to `none`. These are evidence from pinned SDK 0.85.1, not hard-coded UI lists or live-provider verification.
+
+Budget-based reasoning requires explicit care: inspect SDK budget conversion and any automatic response-token expansion. Preserve configured token/context/time limits; do not silently increase the review ceiling to accommodate thinking. Reject an incompatible effort/budget with an actionable explanation. Verify enough permitted answer space remains and expose bounded/effective budget behavior rather than implying qualitative efforts consume identical resources across providers.
+
+Apply effort consistently across every model call in the review/tool loop. Include it in the active snapshot, settings comparison, and per-advisor epoch: an effort-only change cancels/fences affected old work just like a model change, preserves credentials and session usage limits, and leaves unrelated advisors running. No reasoning text is added to menu/status/logs or persisted as a consequence of this setting.
+
+### Entry points and ownership
+
+Reuse `dist/setup-control.mjs`:
+
+- `menu-command`: format a safely quoted command for the user's terminal, following the existing login-command pattern. Capture the installed helper path and the applicable config directory. If invoked in Claude, include validated session identity and plugin-data location, never the private IPC capability or a credential value.
+- `menu`: open the terminal UI. Without explicit session context, operate as a defaults editor with Apply unavailable; never infer a session from cwd, newest transcript, or directory timestamps.
+- Keep the existing offline `catalog`, `models`, and revision-checked `save` operations as thin callers of the same shared service, not a second config implementation.
+- Replace the setup skill's AskUserQuestion workflow and its catalog/models/save tool grants with the single launcher operation. It must not run the interactive menu in Claude's captured Bash tool.
+- Session communication belongs in the control client, not UI rendering or direct state-file mutation. UI code consumes sanitized results; the worker remains the only owner of runtime activation.
+
+Suggested source split: retain `setup-control.mjs` for CLI dispatch, extract the existing config/catalog operations into `setup-store.mjs`, and put terminal views/input handling in `setup-menu.mjs`. These are planned modules, not additional executable entry points.
+
+### Configuration and authentication
+
+Use config schema version **2**, rather than silently changing the meaning of strict version 1:
+
+- Add boolean `advisors[].enabled`. Version-1 input normalizes once with all existing advisors enabled. Version-2 saves include the explicit field.
+- Add advisor-level `reasoningEffort` with Default migration and model/transport-aware semantic validation as specified above. Extend compatible-model capability metadata only with the validated fields needed for supported reasoning formats.
+- Permit empty advisors and providers when references remain valid. An empty configuration is a valid disabled setup, not a corrupt file.
+- Continue rejecting unknown keys, invalid provider references, unsupported auth combinations, duplicate names, oversized documents, and malformed compatible metadata.
+- Read existing version-1 configs without writing during menu open. On explicit Save, write normalized version 2 through the existing revision-checked, private atomic writer.
+- Update the runtime validator, JSON schema, example, and snapshot handling together. An older plugin cannot read version 2; document the upgrade boundary instead of adding a compatibility shim.
+- Removing an advisor does not delete its provider slot or OAuth credentials. Removing a shared slot requires resolving every advisor reference first. Logout is a separate explicit credential action.
+- Preserve enabled-but-unavailable versus intentionally disabled as distinct visible states; disabled advisors remain editable in the menu/status.
+
+OAuth login runs only after an explicit terminal action, using the existing auth helper. Suspend and fully release menu input while the auth process owns the terminal, then restore the menu. Login for a new/changed slot requires saving that slot first; explain that discarding later UI edits does not undo a completed login/logout.
+
+Model-only edits reuse existing slot credentials. Provider/auth changes do not transfer grants between upstream providers or silently borrow credentials. Catalog navigation and Apply do not refresh OAuth or make paid probes; explicit login may perform the normal authorization network flow.
+
+**API environment boundary:** keep the current security model. A live worker cannot acquire newly exported variables from another terminal. Model changes using its existing available key variables can apply in place; new/missing API key-variable names or changed values require a fresh Claude session with those variables exported. Show this before claiming a successful live change. Do not introduce API-key transport over IPC, persist key values, or restart a worker under a different terminal environment as an implicit workaround.
+
+### Save and session-scoped Apply
+
+Save changes only user defaults. Other active sessions retain their snapshots; future explicit activation can read the new defaults.
+
+Save & Apply is two explicit operations, not a falsely advertised cross-process transaction:
+
+1. Save with the draft's expected file revision.
+2. Apply that exact saved revision to the displayed session, guarded by its worker identity and expected settings revision.
+3. Report `Saved and applied`, `Saved; not applied`, or `Not saved`. If Apply fails, do not undo a global save that another editor/session may already have observed.
+
+The bound session must have a live, compatible worker and a matching frozen root/config location. A missing/ended target is not permission to resurrect it, create a new session, or redirect elsewhere. Defaults editing remains available. An idle-expired worker can become available after ordinary Claude activity; the menu then explicitly refreshes that same target.
+
+Worker replacement or conflicting on/off/settings changes invalidate the captured target revision. Refresh and show the changed target state before another Apply; do not silently retry against a replacement. A normal task prompt is not itself a settings conflict.
+
+Proposed private Apply request contains the expected worker generation, expected settings revision, and saved config revision. The worker reads and validates the corresponding config, checks identity/root/runtime, and returns the resulting revision and per-advisor availability. No credentials, observations, or findings travel in the menu's Apply result.
+
+Apply preserves the session's on/off state. For an off session, offer a separately labelled explicit Enable action; never enable as a side effect of selecting a model or saving. Reuse the same transition implementation for `/on` and terminal activation so the safety fix is not menu-only. Disabled-all/empty configurations start no reviews.
+
+Prepare and validate before mutating activation. Invalid config, stale revision, unsafe target, or an unresolved publication barrier leaves the active snapshot unchanged. Preview/report unavailable enabled advisors explicitly; never continue the previous model while displaying the newly selected one as active. Retain the existing per-advisor availability policy rather than silently substituting providers.
+
+Applying settings does not replay the last task, generate a synthetic observation, drain findings into the terminal, wake Claude, or start a provider call solely to test the choice. New reviews start at subsequent ordinary observation boundaries.
+
+### Safe model transitions and the hook-output race
+
+Introduce a persisted settings revision plus per-advisor configuration epochs, separate from the existing compaction generation. Increment an affected advisor's epoch on model/provider/reasoning-effort/instructions/enable changes, removal, and re-addition. Switching A → B → A must not make the first A's work current again.
+
+On successful Apply:
+
+- Cancel affected reviews and clear their queued/coalesced work. Clear affected provider conversation history, but do not reset session usage/review budgets through model toggles.
+- Preserve unrelated advisors' reviews/history and every other session. Shared tool-policy changes, if supplied by an external config editor, affect all relevant advisors.
+- Check the reserved advisor epoch at tool/publication/completion boundaries. A late callback must not publish, restore old history, clear a replacement review, or schedule an old specification.
+- Make pending old-epoch findings non-deliverable while retaining already-emitted history. Finding selection must check epoch eligibility; cancellation alone is insufficient.
+- Persist the active snapshot and epoch metadata so worker replacement cannot re-enable old pending findings.
+
+There is an additional cross-process race: `control.mjs` currently receives hook stdout, writes it, then acknowledges the claim. The worker can process Apply between those steps. Incrementing a generation or deleting a claim cannot retract bytes already held by that hook client.
+
+**Required publication barrier:** a successful Apply must not precede emission of an affected old-epoch envelope still held by a hook client. Track issued deliveries until stdout completion is acknowledged or the issuing client is proven unable to emit. Return bounded `busy` from Apply while such a delivery is unresolved; allow ack processing to continue rather than waiting inside the serialized worker handler.
+
+- Lease expiry alone is not proof that the client stopped holding stdout. Do not use the existing two-second lease as a safe-to-apply timer.
+- Include sufficient client/epoch metadata in the claim protocol and persist unresolved delivery ownership across worker replacement. An ambiguous client remains a barrier, not permission to force success.
+- Acknowledge completed stdout writes, not merely a call to `stdout.write`.
+- After the barrier clears, atomically serialize the epoch/snapshot transition with new claims. Delayed old review completions still fail their epoch check.
+- Older workers/claims lacking the required protocol metadata cannot promise safe live Apply. Require a compatible fresh Claude session, not a fallback to the old `on`.
+- Findings emitted before the successful Apply boundary may already be in Claude's context and cannot be removed. Never describe those as retracted.
+
+Prove this protocol with a paused hook client before investing in menu polish. If the proposed ownership/ack barrier cannot establish that boundary under crash/restart, resolve the protocol first; do not weaken the guarantee to “wait for lease expiry.”
+
+### Implementation order and parallel ownership
+
+1. **Configuration foundation:** schema-v2 normalization, enabled/empty semantics, and extraction of the existing catalog/save service. Own `src/config.mjs`, `src/setup-store.mjs`, `src/setup-control.mjs`, `config/schema.json`, and `config/example.json`.
+2. **Safe transition protocol:** settings/epoch metadata, delivery ownership barrier, cancellation, pending-finding fences, and shared activation logic. Own `src/worker.mjs`, `src/session/state.mjs`, `src/session/findings.mjs`, and `src/session/constants.mjs`.
+3. **Explicit terminal session client:** launcher-bound identity, guarded Apply request, completed-write acknowledgement, safe target refresh, and sanitized results. Own `src/control.mjs`, `src/session/ipc.mjs`, and `src/session/paths.mjs`; coordinate the protocol with step 2 before editing.
+4. **Terminal menu and auth handoff:** searchable views, draft lifecycle, model/effort shortcuts, multiline instructions, Save/Apply states, and existing OAuth terminal handoff. Own `src/setup-menu.mjs`, `src/setup-control.mjs`, and `src/auth-control.mjs` after step 1 releases setup-control.
+5. **Reasoning capability and transport integration:** offline model-specific choices, explicit alias/default/off semantics, SDK request mapping, and token-budget enforcement. Own `src/backends/api.mjs`, `src/providers.mjs`, and the relevant provider transport tests. Agree the normalized effort/capability contract with config, menu, and worker owners first; no competing translation table.
+6. **Skill/distribution integration:** replace conversational setup, update settings/status documentation and changelog, advance only the advisor/marketplace versions as appropriate, and rebuild the same four entry points. Keep the old reviewer unchanged.
+7. **Behavioral verification:** integrate focused regressions with real PTY and cold-installed-bundle smoke; run shared repository gates once after writers finish.
+
+Steps 1 and 2 can start concurrently with agreed normalized-config and epoch contracts. Step 3 can proceed alongside them after the IPC contract is fixed. Steps 4 and 5 depend on agreed config/capability interfaces and can proceed alongside session work with disjoint ownership. One integration owner resolves shared files and release artifacts. Parallel writers skip builds/tests/formatters; the integration owner runs verification after their edits settle.
+
+### Acceptance criteria
+
+The implementation is complete only when all of these hold:
+
+1. In a real terminal, change an existing Codex advisor to `gpt-5.6-luna`, save/apply, and observe that exact active model without a Claude questionnaire, manual JSON, or another login.
+2. Navigate/filter/edit/save/cancel with provider inference disabled. No menu operation invokes Claude, an advisor completion, remote model discovery, or an entitlement probe.
+3. Add multiple providers/advisors, choose supported auth explicitly, edit multiline instructions, toggle advisors, and remove the last advisor. Unrelated slots, credentials, exclusions, and limits remain intact.
+4. A model-only OAuth change leaves the existing credential untouched. Explicit login hands off/restores the real terminal and never exposes codes/tokens to Claude or config output.
+5. Existing v1 config opens without mutation; explicit save yields valid v2. Empty/disabled-only configs run no advisors; malformed/unknown fields still fail safely.
+6. Two menus editing the same revision cannot overwrite each other. Cancel, non-TTY invocation, interrupted input, and failed saves leave disk/runtime unchanged as applicable.
+7. Save alone changes no active session. Save & Apply affects only the named session; wrong root, missing identity, stale worker, ended target, and conflicting settings are visible failures, not retargeting.
+8. A saved-but-rejected Apply is clearly distinguished from success. New API-variable requirements are reported truthfully; no environment/credential leakage or implicit worker replacement.
+9. With two running advisors, switch one during a delayed review. Its old review, queued work, history callbacks, and pending findings cannot become current; the other advisor continues unaffected. Repeat A → B → A and remove/re-add.
+10. Pause a hook after it receives an old-model envelope but before stdout. Apply cannot report success ahead of that emission. Repeat beyond lease expiry, on ack failure, client death, and worker restart; already-emitted history stays labelled honestly.
+11. Stop/compaction/off/SessionEnd races preserve existing no-wake and confinement rules. Applying settings while idle/off does not schedule a paid review by itself.
+12. Real PTY smoke covers narrow/resize/Unicode/paste, Escape/Ctrl-C/EOF/SIGTERM, auth handoff, and terminal restoration. Do not substitute source-text assertions for terminal behavior.
+13. A cold installed plugin-only copy opens the menu and runs local scripted review/apply scenarios without source/node_modules/npm bootstrap. Paths containing spaces/quotes work; capabilities/credentials never appear in the launcher.
+14. Existing relevant config/auth/IPC/lifecycle tests, shared reviewer checks, strict manifests, version guard, and deterministic bundle comparison pass after integration. Keep permanent tests for the transition/conflict/privacy failures, not incidental wording or renderer implementation.
+15. The real terminal effort picker changes with the exact model/provider route, distinguishes Default from supported Off, exposes aliases, and refuses unsupported selections without a silent downgrade. An effort-only Save & Apply updates only the intended advisor/session and fences its old work.
+16. Using actual bundled SDK transports with scripted HTTP/fetch and dummy credentials, verify outgoing reasoning fields/values for OpenAI/Codex, adaptive and budget-based Anthropic, level/budget-based Google, OpenRouter, and the selected compatible-format families. Include a non-reasoning model, unsupported/mandatory-thinking Off, aliased levels, and Default preserving the prior request. Assert provider-observable bodies, not mock echoes of generic options.
+17. Verify thinking budgets cannot silently enlarge configured token ceilings or violate context/answer constraints; incompatible settings fail visibly before a paid call. Effort survives save/reload/worker replacement, applies on follow-up tool-loop calls, and neither leaks reasoning text nor resets review/usage budgets.
+
+Report live provider authorization separately from local/scripted proof; no production credentials or paid probes are needed for implementation verification. After smoke proof, update affected docs/examples/changelog, remove throwaway scripts and processes, and leave unrelated user work intact. No commit, push, or release is part of this planning request.

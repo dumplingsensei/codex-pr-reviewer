@@ -280,7 +280,7 @@ test("/off does not drain advice and discards injection candidates", async (t) =
   assert.equal(status.inbox.every((item) => item.status === "discarded"), true);
 });
 
-test("/status /doctor /login /logout never replace the task or start reviews", async (t) => {
+test("/status /doctor /setup /login /logout never replace the task or start reviews", async (t) => {
   const { rpc, started, worker } = await harness(t);
   await rpc("on");
   await rpc("hook", {
@@ -300,6 +300,16 @@ test("/status /doctor /login /logout never replace the task or start reviews", a
   });
   await rpc("hook", {
     payload: hook("UserPromptSubmit", { prompt: "/cross-model-advisor:logout", prompt_id: "logout-cmd" })
+  });
+  await rpc("hook", {
+    payload: hook("UserPromptSubmit", { prompt: "/cross-model-advisor:setup", prompt_id: "setup-cmd" })
+  });
+  await rpc("hook", {
+    payload: hook("PreToolUse", {
+      prompt_id: "setup-cmd",
+      tool_name: "AskUserQuestion",
+      tool_use_id: "toolu_setup"
+    })
   });
   await rpc("hook", {
     payload: hook("PreToolUse", {

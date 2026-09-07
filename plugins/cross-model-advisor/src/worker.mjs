@@ -173,14 +173,15 @@ function credentialDirFromEnv(env, configFilePathFn) {
 
 function pluginRootFromHere() {
   const here = path.dirname(fileURLToPath(import.meta.url));
-  if (path.basename(here) === "modules") return path.dirname(here);
-  if (path.basename(here) === "src") return path.dirname(here);
+  const dir = path.basename(here);
+  if (dir === "src" || dir === "dist") return path.dirname(here);
+  if (dir === "modules") return path.dirname(path.dirname(here));
   return here;
 }
 
 function bundleStatus(pluginRoot) {
   const dist = path.join(pluginRoot, "dist");
-  const need = ["control.mjs", "worker.mjs", "auth-control.mjs"];
+  const need = ["control.mjs", "worker.mjs", "auth-control.mjs", "setup-control.mjs"];
   const missing = need.filter((name) => !fsSync.existsSync(path.join(dist, name)));
   return { ok: missing.length === 0, missing };
 }
@@ -1293,8 +1294,9 @@ export async function startWorker(options) {
       });
     }
     const pluginRoot = env.CLAUDE_PLUGIN_ROOT || pluginRootFromHere();
+    const bundle = bundleStatus(pluginRoot);
     return {
-      ok: runtime.length === 0 && configOk && rootOk,
+      ok: runtime.length === 0 && configOk && rootOk && bundle.ok,
       runtime: {
         node: { ok: !runtime.some((item) => /node/i.test(item)), version: process.versions.node },
         os: { ok: !runtime.some((item) => /os|platform|darwin|linux/i.test(item)), platform: process.platform },
@@ -1304,7 +1306,7 @@ export async function startWorker(options) {
       root: { ok: rootOk, error: rootError },
       keys,
       providers: providerDiagnostics,
-      bundle: bundleStatus(pluginRoot),
+      bundle,
       ipc: { ok: Boolean(server?.listening), socketPath: socket.socketPath }
     };
   };

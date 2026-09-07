@@ -4,6 +4,7 @@
  */
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
@@ -66,20 +67,27 @@ function makeTools(calls) {
 }
 
 async function start(t, extra = {}) {
+  const { env: extraEnv, ...rest } = extra;
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cma-ipc-root-"));
   const data = await fs.mkdtemp(path.join(os.tmpdir(), "cma-ipc-data-"));
   const sessionId = extra.sessionId ?? `ipc-${Math.random().toString(16).slice(2)}`;
   const calls = [];
+  const env = {
+    OPENAI_API_KEY: "sk-test-secret-value",
+    CLAUDE_PLUGIN_DATA: data,
+    CLAUDE_PROJECT_DIR: root,
+    CLAUDE_CODE_SESSION_ID: sessionId,
+    ...extraEnv
+  };
+  delete env.CLAUDE_PLUGIN_ROOT;
+  if (typeof extraEnv?.CLAUDE_PLUGIN_ROOT === "string" && extraEnv.CLAUDE_PLUGIN_ROOT) {
+    env.CLAUDE_PLUGIN_ROOT = extraEnv.CLAUDE_PLUGIN_ROOT;
+  }
   const worker = await startWorker({
     sessionId,
     projectRoot: root,
     pluginData: data,
-    env: {
-      OPENAI_API_KEY: "sk-test-secret-value",
-      CLAUDE_PLUGIN_DATA: data,
-      CLAUDE_PROJECT_DIR: root,
-      CLAUDE_CODE_SESSION_ID: sessionId
-    },
+    env,
     exitOnIdle: false,
     idleMs: Number.POSITIVE_INFINITY,
     debounceMs: 0,
@@ -90,7 +98,7 @@ async function start(t, extra = {}) {
     validateApi: async () => ({ available: true }),
     reviewApi: extra.reviewApi ?? (async () => ({ usage: { costUsd: "unknown" }, history: [] })),
     advisorSystemPrompt: "inspect",
-    ...extra
+    ...rest
   });
   t.after(async () => {
     await worker.stop({ reason: "test" });
@@ -100,6 +108,20 @@ async function start(t, extra = {}) {
   const rpc = (body, timeoutMs = 2000) =>
     requestIpc(worker.socketPath, body, { timeoutMs });
   return { root, data, sessionId, worker, rpc, calls };
+}
+
+const REQUIRED_BUNDLE = ["control.mjs", "worker.mjs", "auth-control.mjs", "setup-control.mjs"];
+
+async function pluginRootFixture(t, names) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cma-bundle-root-"));
+  t.after(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  await fs.mkdir(path.join(dir, "dist"), { recursive: true });
+  for (const name of names) {
+    await fs.writeFile(path.join(dir, "dist", name), "");
+  }
+  return dir;
 }
 
 function collectWriter() {
@@ -265,6 +287,42 @@ test("control stdout for on/status/doctor is JSON without secrets", async (t) =>
   assert.equal(doctor.result.ipc.ok, true);
 });
 
+test("doctor reports a healthy bundle from dist/modules without plugin root env", async (t) => {
+  const { worker, rpc } = await start(t);
+  const doctor = await rpc({ capability: worker.controlCapability, op: "doctor" });
+  assert.equal(doctor.result.ok, true);
+  assert.equal(doctor.result.bundle.ok, true);
+  assert.deepEqual(doctor.result.bundle.missing, []);
+  assert.equal(doctor.result.config.ok, true);
+  assert.equal(doctor.result.root.ok, true);
+  assert.equal(doctor.result.ipc.ok, true);
+});
+
+test("doctor honors CLAUDE_PLUGIN_ROOT and reports a missing required entry", async (t) => {
+  const complete = await pluginRootFixture(t, REQUIRED_BUNDLE);
+  const { worker: healthyWorker, rpc: healthyRpc } = await start(t, {
+    env: { CLAUDE_PLUGIN_ROOT: complete }
+  });
+  const healthy = await healthyRpc({ capability: healthyWorker.controlCapability, op: "doctor" });
+  assert.equal(healthy.result.ok, true);
+  assert.equal(healthy.result.bundle.ok, true);
+  assert.deepEqual(healthy.result.bundle.missing, []);
+
+  const incomplete = await pluginRootFixture(
+    t,
+    REQUIRED_BUNDLE.filter((name) => name !== "setup-control.mjs")
+  );
+  const { worker, rpc } = await start(t, {
+    env: { CLAUDE_PLUGIN_ROOT: incomplete }
+  });
+  const doctor = await rpc({ capability: worker.controlCapability, op: "doctor" });
+  assert.equal(doctor.result.bundle.ok, false);
+  assert.deepEqual(doctor.result.bundle.missing, ["setup-control.mjs"]);
+  assert.equal(doctor.result.ok, false);
+  assert.equal(doctor.result.config.ok, true);
+  assert.equal(doctor.result.root.ok, true);
+});
+
 test("unauthorized capability cannot call control; secrets stay out of error frames", async (t) => {
   const { rpc } = await start(t);
   await rpc({ capability: "nope", op: "on" });
@@ -377,4 +435,40 @@ fs.writeFileSync(path.join(dataDir, "probe-env.json"), JSON.stringify(process.en
   assert.equal(spawned.KIMI_CODE_OAUTH_HOST, undefined);
   assert.equal(spawned.KIMI_OAUTH_HOST, undefined);
   assert.equal(spawned.OPENAI_API_KEY, "sk-configured");
+});
+
+test("command identity failures are visible while hook failures stay silent", () => {
+  const helper = path.join(repo, "plugins/cross-model-advisor/dist/control.mjs");
+  const env = { PATH: process.env.PATH, CLAUDE_CODE_SESSION_ID: "diagnostic-session" };
+  const doctor = spawnSync(process.execPath, [helper, "doctor"], {
+    env, encoding: "utf8", timeout: 5000
+  });
+  assert.equal(doctor.status, 1);
+  assert.equal(doctor.stdout, "");
+  assert.match(doctor.stderr, /identity:.*CLAUDE_PLUGIN_DATA/);
+  const hook = spawnSync(process.execPath, [helper, "hook"], {
+    env, input: "{}", encoding: "utf8", timeout: 5000
+  });
+  assert.equal(hook.status, 0);
+  assert.equal(hook.stdout, "");
+  assert.equal(hook.stderr, "");
+});
+
+test("command diagnostics never echo sensitive filesystem error paths", () => {
+  const secret = "PRIVATE_VALUE_MUST_NOT_APPEAR";
+  const result = spawnSync(process.execPath, [
+    path.join(repo, "plugins/cross-model-advisor/dist/control.mjs"), "doctor"
+  ], {
+    env: {
+      PATH: process.env.PATH,
+      CLAUDE_CODE_SESSION_ID: "private-diagnostic",
+      CLAUDE_PLUGIN_DATA: `/dev/null/${secret}`
+    },
+    encoding: "utf8",
+    timeout: 5000
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /cross-model-advisor: control:/);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr.includes(secret), false);
 });
