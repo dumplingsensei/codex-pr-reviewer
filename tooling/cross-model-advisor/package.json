@@ -1,0 +1,20 @@
+{
+  "name": "cross-model-advisor-tooling",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Build tooling for the cross-model-advisor plugin. Not published; not part of the installable marketplace source.",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.85.1",
+    "ignore": "7.0.8"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

@@ -18,6 +18,23 @@ them. Three things follow from that, and they are what this policy is about:
 
 Reports about any of those are wanted.
 
+### cross-model-advisor
+
+The sibling advisor sends main-session observations and explicitly read project
+files to external model providers selected in trusted user configuration. Its
+model-visible tools are read-only and project-confined; prompt text is untrusted
+data, not authority to broaden that access. Confinement bypasses, unauthorized
+finding injection, and credential leakage are in scope.
+
+OAuth tokens are stored under the Claude configuration directory with private
+permissions and serialized atomic updates. These files are not encrypted against the OS user;
+same-user code execution is outside the isolation boundary. Login is explicit
+and terminal-owned; the plugin does not import Claude, OMP, or advisor CLI
+credentials. External provider retention and secrets intentionally included in
+user prompts are not prevented by project-file exclusions. See the
+[advisor security disclosure](plugins/cross-model-advisor/README.md#security-and-disclosure)
+for its separate credential and finding retention contract.
+
 ## Reporting a vulnerability
 
 Use **[private vulnerability reporting](https://github.com/dumplingsensei/codex-pr-reviewer/security/advisories/new)**

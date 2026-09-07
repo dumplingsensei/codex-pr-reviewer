@@ -12,6 +12,10 @@ on:
       pr:
         description: "pull request number for the integration suite"
         default: "13899"
+      advisor_host_smoke:
+        description: "Run the authenticated Claude host smoke for cross-model-advisor"
+        type: boolean
+        default: false
   schedule:
     # The integration suite is the only thing that proves the worktree diff is
     # GitHub's diff, and it needs the network. Weekly, so that assertion does
@@ -41,7 +45,9 @@ jobs:
       # removes the trust.
       #
       # setup-node's automatic package-manager caching, added in v5, stays inert
-      # here because the repo has no package.json — adding one switches it on.
+      # here because there is no package.json at the repository root — the
+      # advisor tooling manifest lives under tooling/ and is cached only in
+      # that job.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The version guard below diffs against a base commit, which a
@@ -94,6 +100,72 @@ jobs:
           npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" >/dev/null
           claude plugin validate --strict .
           claude plugin validate --strict plugins/codex-pr-reviewer
+          claude plugin validate --strict plugins/cross-model-advisor
+
+
+  advisor:
+    # Independent of the reviewer matrix. Node 22.19 is this plugin's floor,
+    # not a raise of the reviewer's Node 18 support. npm ci, the bundle, the
+    # focused Node tests (including cold-bundle smoke), and a rebuild-vs-dist
+    # comparison all live here so a reviewer-only change does not pay for them
+    # and an advisor change cannot hide behind Node 18.
+    name: advisor · node 22.19 · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.19.0"
+          cache: npm
+          cache-dependency-path: tooling/cross-model-advisor/package-lock.json
+      - name: Install build dependencies
+        working-directory: tooling/cross-model-advisor
+        run: npm ci
+      - name: Build plugin bundle
+        working-directory: tooling/cross-model-advisor
+        run: npm run build
+      # Runtime baseline for marketplace add/install in the cold-bundle smoke.
+      # Does not raise the reviewer validator pin (2.1.241) on the offline job.
+      - name: Install Claude Code
+        env:
+          CLAUDE_CODE_VERSION: 2.1.252
+        run: npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" >/dev/null
+      - name: Focused tests and cold-bundle smoke
+        run: node --test tests/cross-model-advisor/*.test.mjs
+      - name: Committed dist matches a clean rebuild
+        working-directory: tooling/cross-model-advisor
+        run: |
+          out="$(mktemp -d)"
+          npm run build -- --outdir "$out"
+          diff -qr "$out" ../../plugins/cross-model-advisor/dist
+
+  advisor-host-smoke:
+    # Authenticated Claude host only. Never part of push/PR; HostSmoke exits 2
+    # unless CROSS_MODEL_ADVISOR_HOST_SMOKE=1 and --run are both set.
+    name: advisor · authenticated host smoke
+    if: github.event_name == 'workflow_dispatch' && inputs.advisor_host_smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.19.0"
+          cache: npm
+          cache-dependency-path: tooling/cross-model-advisor/package-lock.json
+      - name: Install build dependencies
+        working-directory: tooling/cross-model-advisor
+        run: npm ci
+      - name: Build plugin bundle
+        working-directory: tooling/cross-model-advisor
+        run: npm run build
+      - name: Authenticated Claude host smoke
+        env:
+          CROSS_MODEL_ADVISOR_HOST_SMOKE: "1"
+        run: node tests/cross-model-advisor/fixtures/claude-host-smoke.mjs --run
 
   packaging-drift:
     # The other half of pinning the validator: something still has to notice
@@ -118,6 +190,7 @@ jobs:
           echo "validating with $(claude --version)"
           claude plugin validate --strict .
           claude plugin validate --strict plugins/codex-pr-reviewer
+          claude plugin validate --strict plugins/cross-model-advisor
 
   integration:
     # Real git and gh against a public PR; never invokes Codex. Scheduled and

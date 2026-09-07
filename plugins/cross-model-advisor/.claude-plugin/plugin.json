@@ -1,0 +1,22 @@
+{
+  "name": "cross-model-advisor",
+  "version": "1.0.0",
+  "description": "Independent external-model advisors observe the current Claude Code session, inspect the project through read-only tools, and inject evidence-backed findings at user and tool boundaries without waking a stopped session.",
+  "author": {
+    "name": "dumplingsensei"
+  },
+  "license": "MIT",
+  "keywords": [
+    "advisor",
+    "code-review",
+    "openai",
+    "anthropic",
+    "gemini",
+    "codex",
+    "oauth",
+    "github-copilot",
+    "zai",
+    "xai",
+    "kimi"
+  ]
+}

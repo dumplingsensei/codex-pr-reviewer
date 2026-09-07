@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dumplingsensei/codex-pr-reviewer/plugins/cross-model-advisor/config/schema.json",
+  "title": "cross-model-advisor user configuration",
+  "description": "Trusted user config at ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cross-model-advisor.json. Schema version 1. Choose real model ids; this schema is not a runnable default and does not use Claude credentials.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "providers", "advisors"],
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "JSON schema version. Must be 1."
+    },
+    "providers": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "patternProperties": {
+        "^[a-z][a-z0-9-]{0,63}$": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "provider", "apiKeyEnv"],
+              "properties": {
+                "kind": { "const": "api" },
+                "provider": {
+                  "type": "string",
+                  "enum": ["openai", "anthropic", "google", "openrouter", "zai", "xai", "moonshotai", "kimi-coding"]
+                },
+                "apiKeyEnv": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                  "description": "Environment variable NAME only. Never persist the key value."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "provider", "apiKeyEnv", "baseUrl", "models"],
+              "properties": {
+                "kind": { "const": "api" },
+                "provider": { "const": "openai-compatible" },
+                "apiKeyEnv": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                },
+                "baseUrl": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "HTTPS required except explicit localhost/loopback HTTP. OpenAI Chat Completions wire protocol."
+                },
+                "models": {
+                  "type": "object",
+                  "minProperties": 1,
+                  "additionalProperties": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["contextWindow", "maxTokens", "reasoning", "input"],
+                    "properties": {
+                      "contextWindow": { "type": "integer", "minimum": 1 },
+                      "maxTokens": { "type": "integer", "minimum": 1 },
+                      "reasoning": { "type": "boolean" },
+                      "input": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "type": "string", "enum": ["text", "image"] }
+                      },
+                      "pricing": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "prompt": { "type": "number", "minimum": 0 },
+                          "completion": { "type": "number", "minimum": 0 }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "provider"],
+              "properties": {
+                "kind": { "const": "oauth" },
+                "provider": {
+                  "type": "string",
+                  "enum": ["openai-codex", "github-copilot", "xai", "kimi-coding"],
+                  "description": "Upstream SDK id. Distinct from the configured slot name. No Anthropic, Antigravity, or OpenRouter OAuth."
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "advisors": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "provider", "model", "instructions"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,63}$",
+            "description": "Unique restricted identifier."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Key of an entry in providers."
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "User-selected model id. For openai-compatible providers this must be a key in that provider's models map."
+          },
+          "instructions": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "description": "Literal review focus from the trusted user config. Not a command."
+          }
+        }
+      }
+    },
+    "exclude": {
+      "type": "array",
+      "default": [],
+      "maxItems": 256,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512,
+        "description": "gitignore-style patterns that may only narrow access. Negation with ! is rejected."
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxConcurrentAdvisors": { "type": "integer", "minimum": 1, "maximum": 16, "default": 2 },
+        "reviewTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 600, "default": 90 },
+        "maxToolCallsPerReview": { "type": "integer", "minimum": 1, "maximum": 100, "default": 8 },
+        "maxOutputTokens": { "type": "integer", "minimum": 1, "maximum": 100000, "default": 1500 },
+        "maxReviewsPerAdvisorPerSession": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 40 }
+      }
+    }
+  }
+}

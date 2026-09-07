@@ -1,0 +1,137 @@
+{
+  "description": "Observe the main Claude session and drain advisor findings at permitted boundaries. Fail-open: parse, startup, and IPC errors print nothing.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/control.mjs\" hook",
+            "timeout": 2,
+            "statusMessage": "Registering cross-model advisor session"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/control.mjs\" hook",
+            "timeout": 2,
+            "statusMessage": "Recording prompt for cross-model advisors"
+          }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/control.mjs\" hook",
+            "timeout": 2,
+            "statusMessage": "Classifying expanded command for cross-model advisors"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/control.mjs\" hook",
+            "timeout": 2,
+            "statusMessage": "Recording tool intent for cross-model advisors"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/control.mjs\" hook",
+            "timeout": 2,
+            "statusMessage": "Recording tool result for cross-model advisors"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/control.mjs\" hook",
+            "timeout": 2,
+            "statusMessage": "Recording tool failure for cross-model advisors"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/control.mjs\" hook",
+            "timeout": 2,
+            "statusMessage": "Marking session idle for cross-model advisors"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/control.mjs\" hook",
+            "timeout": 2,
+            "statusMessage": "Recording stop failure for cross-model advisors"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/control.mjs\" hook",
+            "timeout": 2,
+            "statusMessage": "Suspending cross-model advisors for compaction"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/control.mjs\" hook",
+            "timeout": 2,
+            "statusMessage": "Resuming cross-model advisors after compaction"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/control.mjs\" hook",
+            "timeout": 1,
+            "statusMessage": "Shutting down cross-model advisor worker"
+          }
+        ]
+      }
+    ]
+  }
+}
