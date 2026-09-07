@@ -1,6 +1,6 @@
 /**
  * Classify control turns before drainage, task replacement, or scheduling.
- * Namespaced on/off/status/doctor/login/logout are control-only.
+ * Namespaced on/off/status/doctor/setup/login/logout are control-only.
  */
 
 import { CONTROL_COMMANDS } from "./constants.mjs";
@@ -60,6 +60,6 @@ export function classifyExpansion(payload) {
 export function looksLikeControlTraffic(text) {
   const sample = String(text ?? "");
   if (CONTROL_COMMANDS.some((name) => sample.includes(`/${name}`))) return true;
-  if (/cross-model-advisor:(?:on|off|status|doctor|login|logout)\b/.test(sample)) return true;
+  if (/cross-model-advisor:(?:on|off|status|doctor|setup|login|logout)\b/.test(sample)) return true;
   return false;
 }

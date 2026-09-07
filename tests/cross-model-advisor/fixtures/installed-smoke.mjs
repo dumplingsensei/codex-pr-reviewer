@@ -26,7 +26,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
 const pluginSource = path.join(repoRoot, "plugins", "cross-model-advisor");
 
-const EXECUTABLES = ["control.mjs", "worker.mjs", "auth-control.mjs"];
+const EXECUTABLES = ["control.mjs", "worker.mjs", "auth-control.mjs", "setup-control.mjs"];
 const SKIP_COPY = new Set([
   "src",
   "node_modules",
@@ -211,7 +211,6 @@ export async function runColdBundleSmoke() {
       CLAUDE_SESSION_ID: sessionId,
       CLAUDE_PROJECT_DIR: projectDir,
       CLAUDE_PLUGIN_DATA: pluginData,
-      CLAUDE_PLUGIN_ROOT: pluginDir,
       CLAUDE_CONFIG_DIR: configDir,
       HOME: homeDir,
       [apiKeyEnv]: "sk-smoke-not-a-real-key"
@@ -222,6 +221,7 @@ export async function runColdBundleSmoke() {
     const doctor = await runControl(pluginDir, env, ["doctor"], { timeoutMs: 8_000 });
     assert.equal(doctor.status, 0, `doctor failed:\n${doctor.stderr}\n${doctor.stdout}`);
     const doctorJson = parseJsonOutput(doctor.stdout);
+    assertDoctorBundleHealthy(doctorJson, doctor.stderr);
     assert.equal(doctorJson?.config?.ok, true, `doctor config:\n${fmt(doctorJson)}\n${doctor.stderr}`);
     assert.equal(doctorJson?.ipc?.ok, true, `doctor ipc:\n${fmt(doctorJson)}\n${doctor.stderr}`);
     const doctorKey = (doctorJson?.keys ?? []).find((item) => item?.name === apiKeyEnv);
@@ -494,6 +494,10 @@ function claudeIsolatedEnv(overrides) {
 function isolatedPluginEnv(overrides) {
   const env = claudeIsolatedEnv(overrides);
   env.PATH = process.env.PATH ?? "";
+  delete env.CLAUDE_PLUGIN_ROOT;
+  if (typeof overrides?.CLAUDE_PLUGIN_ROOT === "string" && overrides.CLAUDE_PLUGIN_ROOT) {
+    env.CLAUDE_PLUGIN_ROOT = overrides.CLAUDE_PLUGIN_ROOT;
+  }
   return env;
 }
 
@@ -551,15 +555,14 @@ async function assertExecutablesResolve(pluginDir, world) {
   );
   const env = isolatedPluginEnv({
     CLAUDE_CODE_SESSION_ID: "cma-market-doctor",
-    CLAUDE_PROJECT_DIR: projectDir,
     CLAUDE_PLUGIN_DATA: pluginData,
-    CLAUDE_PLUGIN_ROOT: pluginDir,
     CLAUDE_CONFIG_DIR: configDir,
     HOME: homeDir,
     CMA_SMOKE_API_KEY: "sk-smoke-not-a-real-key"
   });
+  delete env.CLAUDE_PROJECT_DIR;
   world.defer(() => shutdownSession(pluginDir, env));
-  const result = await runControl(pluginDir, env, ["doctor"], { timeoutMs: 8_000 });
+  const result = await runControl(pluginDir, env, ["doctor"], { cwd: projectDir, timeoutMs: 8_000 });
   const combined = `${result.stdout}\n${result.stderr}`;
   assert.doesNotMatch(
     combined,
@@ -567,7 +570,22 @@ async function assertExecutablesResolve(pluginDir, world) {
     `marketplace-installed doctor could not resolve runtime imports:\n${combined}`
   );
   assert.equal(result.status, 0, combined);
+  assertDoctorBundleHealthy(parseJsonOutput(result.stdout), result.stderr);
+  const status = await runControl(pluginDir, env, ["status"], { cwd: homeDir });
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(JSON.parse(status.stdout).projectRoot, fs.realpathSync(projectDir),
+    "changing Bash cwd must not rebind the existing session root");
   const authControl = path.join(pluginDir, "dist", "auth-control.mjs");
+  const listed = await runProcess(process.execPath, [authControl, "list"], {
+    env, cwd: projectDir, timeoutMs: 8_000
+  });
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.equal(JSON.parse(listed.stdout).slots.find((slot) => slot.slot === "copilot")?.kind, "oauth");
+  const catalog = await runProcess(process.execPath, [path.join(pluginDir, "dist", "setup-control.mjs"), "catalog"], {
+    env, cwd: projectDir, timeoutMs: 8_000
+  });
+  assert.equal(catalog.status, 0, catalog.stderr);
+  assert.deepEqual(JSON.parse(catalog.stdout).providers.find((provider) => provider.id === "openai-codex")?.auth, ["oauth"]);
   for (const command of ["status", "logout", "status"]) {
     const auth = await runProcess(process.execPath, [authControl, command, "copilot"], {
       env, cwd: projectDir, timeoutMs: 8_000
@@ -901,11 +919,17 @@ function parseJsonOutput(stdout) {
   }
 }
 
-async function runControl(pluginDir, env, args, { stdin, timeoutMs = 5_000 } = {}) {
+function assertDoctorBundleHealthy(doctorJson, stderr = "") {
+  assert.equal(doctorJson?.ok, true, `doctor ok:\n${fmt(doctorJson)}\n${stderr}`);
+  assert.equal(doctorJson?.bundle?.ok, true, `doctor bundle:\n${fmt(doctorJson?.bundle)}\n${stderr}`);
+  assert.deepEqual(doctorJson?.bundle?.missing, [], `doctor missing:\n${fmt(doctorJson?.bundle)}`);
+}
+
+async function runControl(pluginDir, env, args, { stdin, timeoutMs = 5_000, cwd = env.CLAUDE_PROJECT_DIR } = {}) {
   const control = path.join(pluginDir, "dist", "control.mjs");
   return runProcess(process.execPath, [control, ...args], {
     env,
-    cwd: env.CLAUDE_PROJECT_DIR,
+    cwd,
     timeoutMs,
     stdin: stdin == null ? undefined : `${JSON.stringify(stdin)}\n`,
     label: `control ${args.join(" ")}`

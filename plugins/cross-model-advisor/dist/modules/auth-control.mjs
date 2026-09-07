@@ -17812,9 +17812,9 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { configFilePath, loadConfig as defaultLoadConfig, OAUTH_PROVIDERS } from "./config.mjs";
 import { AuthError, createCredentialStore as defaultCreateStore } from "./auth.mjs";
-var COMMANDS = /* @__PURE__ */ new Set(["login", "login-command", "logout", "status"]);
+var COMMANDS = /* @__PURE__ */ new Set(["list", "login", "login-command", "logout", "status"]);
 var LOGIN_TIMEOUT_MS = 15 * 60 * 1e3;
-var USAGE = "usage: auth-control.mjs login|login-command|logout|status <configured-slot>";
+var USAGE = "usage: auth-control.mjs list | login|login-command|logout|status <configured-slot>";
 var HIDDEN_PROMPT_TYPES = /* @__PURE__ */ new Set(["secret", "manual_code"]);
 var OAUTH_OVERRIDE_ENV = Object.freeze([
   "PI_OAUTH_CALLBACK_HOST",
@@ -17841,6 +17841,7 @@ var STATIC_ERRORS = Object.freeze({
   "stale-lock": "Credential lock is stale. Remove it only after verifying no login, logout, or refresh is running.",
   provider: "OAuth credentials do not match this provider.",
   identifier: "Invalid configured slot.",
+  setup: "Missing or invalid configuration. Run /cross-model-advisor:setup.",
   auth: "authentication failed"
 });
 function resolvedPath(value) {
@@ -17858,6 +17859,12 @@ function posixQuote(value) {
 }
 function parseAuthArgv(argv) {
   const command = argv[0];
+  if (command === "list") {
+    if (argv.length !== 1) {
+      throw new AuthError("usage", USAGE);
+    }
+    return { command };
+  }
   const slot = argv[1];
   if (!COMMANDS.has(command) || typeof slot !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(slot) || argv.length !== 2) {
     throw new AuthError("usage", USAGE);
@@ -18174,18 +18181,50 @@ function resolveOAuthSlot(config, slot) {
   }
   return entry;
 }
+function configuredSlotList(config) {
+  const slots = [];
+  for (const slot of Object.keys(config.providers)) {
+    const entry = config.providers[slot];
+    const associated = [];
+    for (const advisor of config.advisors) {
+      if (advisor.provider === slot) {
+        associated.push({ name: advisor.name, model: advisor.model });
+      }
+    }
+    slots.push({
+      slot,
+      provider: entry.provider,
+      kind: entry.kind,
+      advisors: associated
+    });
+  }
+  return { slots };
+}
 async function runAuth(options = {}) {
   const env = options.env ?? process.env;
   const stdin = options.stdin ?? process.stdin;
   const stdout = options.stdout ?? process.stdout;
   const stderr = options.stderr ?? process.stderr;
   const argv = options.argv ?? [];
-  const { command, slot } = parseAuthArgv(argv);
-  if (command === "login-command") {
-    stdout.write(`${loginHint(slot, env)}
+  const parsed = parseAuthArgv(argv);
+  if (parsed.command === "login-command") {
+    stdout.write(`${loginHint(parsed.slot, env)}
 `);
     return 0;
   }
+  if (parsed.command === "list") {
+    const loadConfigFn2 = options.loadConfig ?? defaultLoadConfig;
+    let config2;
+    try {
+      config2 = await loadConfigFn2({ env });
+    } catch {
+      throw new AuthError("setup", STATIC_ERRORS.setup);
+    }
+    stdout.write(`${JSON.stringify(configuredSlotList(config2))}
+`);
+    return 0;
+  }
+  const { command, slot } = parsed;
   const loadConfigFn = options.loadConfig ?? defaultLoadConfig;
   const createStoreFn = options.createCredentialStore ?? defaultCreateStore;
   const config = await loadConfigFn({ env });

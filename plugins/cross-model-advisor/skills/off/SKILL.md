@@ -15,7 +15,7 @@ This skill has no arguments. Do not append user text to the helper.
 node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" off
 ```
 
-The helper reads session identity from `CLAUDE_CODE_SESSION_ID`, the frozen project root from `"$CLAUDE_PROJECT_DIR"`, and plugin data from `"$CLAUDE_PLUGIN_DATA"`. Do not pass paths, session ids, or `$ARGUMENTS`.
+The helper reads session identity from `CLAUDE_CODE_SESSION_ID` (or `CLAUDE_SESSION_ID`) and plugin data from `CLAUDE_PLUGIN_DATA`. It reuses the stored session root. For a new session without stored state, it uses `CLAUDE_PROJECT_DIR` when available, otherwise the command's working directory. Do not pass paths, session ids, or `$ARGUMENTS`, or export replacement identity variables.
 
 ## Report
 

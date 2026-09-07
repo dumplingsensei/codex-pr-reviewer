@@ -13,7 +13,7 @@ Claude Code plugins. Install the marketplace once, then each plugin separately:
 | [cross-model-advisor](#cross-model-advisor) | Independent advisors observe the current Claude session, inspect the project themselves, and send findings back while you work. |
 | [codex-pr-reviewer](#codex-pr-reviewer) | Fetch a GitHub PR into an isolated worktree and review it with Codex. |
 
-Versions are independent: marketplace metadata is 0.9.17, `codex-pr-reviewer` stays 0.9.16, `cross-model-advisor` starts at 1.0.0. A change to one plugin does not move the other.
+Each plugin's manifest defines its version; marketplace metadata is versioned separately. Changing one plugin does not move the other.
 
 ## Status
 
@@ -50,7 +50,8 @@ claude --plugin-dir ./plugins/cross-model-advisor
 | `/cross-model-advisor:off` | Cancel running reviews, stop future reviews, and discard pending injection candidates. Accepted findings stay in the local inbox. |
 | `/cross-model-advisor:status` | Show enabled/paused/busy state per advisor, pending/emitted findings, usage when reported, and sanitized last errors. “Emitted” is locally acknowledged hook output, not confirmed receipt by Claude. |
 | `/cross-model-advisor:doctor` | Check runtime versions, configuration, key-variable presence, local OAuth availability, bundle completeness, and IPC access. No model request, token refresh, login flow, installation, or key printing. |
-| `/cross-model-advisor:login <provider-slot>` | Show the terminal command for a provider-scoped OAuth login. Complete authorization in your terminal, not in Claude's transcript. |
+| `/cross-model-advisor:setup` | Choose providers, authentication, models, and advisor instructions interactively; preview and save configuration. |
+| `/cross-model-advisor:login [provider-slot]` | Choose a configured OAuth provider, or name its slot directly, then get the terminal login command. Complete authorization in your terminal, not in Claude's transcript. |
 | `/cross-model-advisor:logout <provider-slot>` | Delete that slot's local OAuth credential. |
 
 The four session commands run this helper by full path:
@@ -63,6 +64,8 @@ node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" doctor
 ```
 
 ## Configuration and provider selection
+
+Start with `/cross-model-advisor:setup` for the provider and model pickers; manual JSON configuration remains supported. Setup preserves unrelated settings and requires confirmation before saving. It neither activates advisors nor starts OAuth. When adding API slots or changing key-variable names, export the keys in your own terminal and start a new Claude session before `/cross-model-advisor:on`; the existing worker may not have inherited the new variables.
 
 One trusted user file: `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cross-model-advisor.json`. Schema version is `1`; unknown keys are rejected. There is no silent default provider or model, and the plugin never uses Claude's current credentials. `/on` snapshots the file; edits take effect on the next explicit `on`.
 

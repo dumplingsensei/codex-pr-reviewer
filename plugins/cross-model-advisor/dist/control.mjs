@@ -15,6 +15,7 @@ var CONTROL_COMMANDS = Object.freeze([
   "cross-model-advisor:off",
   "cross-model-advisor:status",
   "cross-model-advisor:doctor",
+  "cross-model-advisor:setup",
   "cross-model-advisor:login",
   "cross-model-advisor:logout"
 ]);
@@ -336,20 +337,63 @@ async function ensureWorker(identity, options = {}) {
   }
   return { locator, cold: true };
 }
-function identityFrom(env, payload) {
+var IdentityError = class extends Error {
+  code = "identity";
+};
+function identityFrom(env, payload, op) {
   const identity = readIdentity(env, payload);
-  if (!identity.sessionId || !identity.projectRoot || !identity.pluginData) {
-    const error = new Error("missing session identity");
-    error.code = "identity";
-    throw error;
+  if (!identity.sessionId) {
+    throw new IdentityError("Missing CLAUDE_CODE_SESSION_ID or CLAUDE_SESSION_ID. Run this command inside Claude Code.");
   }
-  identity.sessionId = validateSessionId(identity.sessionId);
+  if (!identity.pluginData) {
+    throw new IdentityError("Missing CLAUDE_PLUGIN_DATA. Load the plugin in Claude Code before running this command.");
+  }
+  try {
+    identity.sessionId = validateSessionId(identity.sessionId);
+  } catch {
+    throw new IdentityError("Invalid Claude session id. Start a new Claude Code session.");
+  }
   if (payload?.session_id && payload.session_id !== identity.sessionId) {
-    const error = new Error("session mismatch");
-    error.code = "identity";
-    throw error;
+    throw new IdentityError("Hook session id does not match the Claude session environment.");
+  }
+  let saved;
+  try {
+    saved = JSON.parse(fs3.readFileSync(statePath(sessionDir(identity.pluginData, identity.sessionId)), "utf8"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      if (error instanceof SyntaxError) {
+        throw new IdentityError("Stored session identity is unreadable. Start a new Claude Code session.");
+      }
+      throw error;
+    }
+  }
+  if (saved !== void 0) {
+    if (!saved || typeof saved.projectRoot !== "string" || !path2.isAbsolute(saved.projectRoot)) {
+      throw new IdentityError("Stored session project root is invalid. Start a new Claude Code session.");
+    }
+    identity.projectRoot = saved.projectRoot;
+  } else if (!identity.projectRoot) {
+    identity.projectRoot = op === "hook" ? typeof payload.cwd === "string" ? payload.cwd : "" : process.cwd();
+  }
+  if (!identity.projectRoot || !path2.isAbsolute(identity.projectRoot)) {
+    throw new IdentityError("Missing or invalid project root. Hooks require cwd; commands must run from the project directory.");
   }
   return identity;
+}
+function commandFailure(error) {
+  if (error instanceof IdentityError) return `identity: ${error.message}`;
+  const messages = {
+    startup: "Worker could not start. Check Node 22.19.0+, the built plugin bundle, and plugin-data permissions.",
+    EACCES: "Access denied. Check permissions on the plugin-data and configuration directories.",
+    EPERM: "Operation not permitted. Check plugin-data permissions and local process restrictions.",
+    ENOSPC: "No space left to write plugin state. Free disk space and retry.",
+    ENOENT: "A required path is missing. Check the project directory and plugin installation.",
+    ECONNREFUSED: "Worker connection refused. Retry the command to restart the session worker.",
+    ECONNRESET: "Worker connection closed. Retry the command.",
+    ETIMEDOUT: "Worker communication timed out. Retry the command."
+  };
+  const code = typeof error?.code === "string" && Object.hasOwn(messages, error.code) ? error.code : "control";
+  return `${code}: ${messages[code] ?? "Command failed. Check the runtime, plugin bundle, and plugin-data access."}`;
 }
 async function runControl(options = {}) {
   const env = options.env ?? process.env;
@@ -363,7 +407,7 @@ async function runControl(options = {}) {
       const raw = await readBoundedStdin(options.stdin ?? process.stdin);
       if (raw.trim()) payload = JSON.parse(raw);
     }
-    const identity = identityFrom(env, payload);
+    const identity = identityFrom(env, payload, op);
     await fsPromises.mkdir(sessionDir(identity.pluginData, identity.sessionId), {
       recursive: true,
       mode: 448
@@ -432,11 +476,13 @@ async function main(argv = process.argv.slice(2), env = process.env) {
       return;
     }
     await runControl({ argv, env });
-  } catch {
+  } catch (error) {
     if (op === "hook") {
       process.exitCode = 0;
       return;
     }
+    process.stderr.write(`cross-model-advisor: ${commandFailure(error)}
+`);
     process.exitCode = 1;
   }
 }

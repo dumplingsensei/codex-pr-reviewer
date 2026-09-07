@@ -15,7 +15,8 @@ corpus or vendor its agent framework.
 | `/cross-model-advisor:off` | Cancel running reviews, stop future reviews, and discard pending injection candidates. Accepted findings stay in the local inbox. |
 | `/cross-model-advisor:status` | Show enabled/paused/busy state per advisor, pending/emitted findings, usage when reported, and sanitized last errors. This is the human-visible inbox. |
 | `/cross-model-advisor:doctor` | Check runtime versions, configuration, key-variable presence, stored OAuth availability, bundle completeness, and IPC access. No model request, token refresh, login flow, installation, or key printing. |
-| `/cross-model-advisor:login <provider-slot>` | Show the terminal command for an explicit provider OAuth login. Complete login in your own terminal, never by pasting tokens or callback URLs into Claude. |
+| `/cross-model-advisor:setup` | Choose one or more providers, supported authentication methods, models, and advisor instructions. Preview and confirm before saving configuration. |
+| `/cross-model-advisor:login [provider-slot]` | Choose a configured OAuth slot when no argument is supplied, or name one directly. Get its terminal login command; never paste tokens or callback URLs into Claude. |
 | `/cross-model-advisor:logout <provider-slot>` | Remove that configured provider slot's local OAuth credential. This does not revoke the provider-side grant or cancel an already authorized request. |
 
 The four session commands run this plugin's control helper by full path:
@@ -26,6 +27,12 @@ node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" off
 node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" status
 node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" doctor
 ```
+
+Doctor checks the four required executables in the plugin's `dist/`, using
+`CLAUDE_PLUGIN_ROOT` when supplied or the executing worker's location otherwise.
+This is independent of the project directory and Git tracking. Missing entries
+make both `bundle.ok` and the overall `ok` false. Restart Claude after updating
+the plugin so an already-running worker loads the new code.
 
 Requires **Claude Code 2.1.252 or newer**, **Node 22.19.0 or newer**, and
 **macOS or Linux**. Unsupported Node/host/OS is a `doctor` error; ordinary hooks
@@ -43,6 +50,34 @@ network bootstrap at install time. From a local checkout,
 `claude --plugin-dir ./plugins/cross-model-advisor` loads it without the cache.
 
 ## Configuration
+
+Run `/cross-model-advisor:setup` to configure advisors through Claude's question
+UI instead of hand-editing JSON. Provider selection supports multiple services;
+large provider/model lists are paginated. Models come from the pinned SDK's
+offline catalog, not a remote entitlement check. Compatible endpoints require
+explicit endpoint and model metadata.
+
+Setup keeps existing slots, advisors, exclusions, and limits unless you
+explicitly replace or remove them. It previews the complete configuration,
+requires save confirmation, writes a private `0600` file atomically, and rejects
+stale revisions rather than overwriting a detected intervening edit. No API key
+values or OAuth credentials are collected, and no advisors activate automatically.
+
+For OAuth, run `/cross-model-advisor:login` in Claude to select a configured slot,
+then run the printed login command in your own terminal. For new API slots or
+changed key-variable names, export the named keys in your terminal and start a
+**new Claude session** before `/cross-model-advisor:on`. This is required even
+when the variables were already exported: an existing worker may have started
+before those names were configured. OAuth-only changes can use `on` in the
+current session after authorization.
+
+The offline helper also exposes `setup-control.mjs catalog`,
+`setup-control.mjs models <provider-id> [--q QUERY] [--offset N] [--limit N]`,
+and `setup-control.mjs save` with stdin `{ "revision": "...", "config": { ... } }`.
+Use the catalog's revision (`null` for a missing file); never submit key values.
+An interrupted save may leave `cross-model-advisor.json.lock` in the Claude
+config directory. Remove that directory only after verifying no setup save is
+running; setup never steals an existing lock.
 
 One trusted user file:
 
@@ -172,8 +207,10 @@ credentials, binaries, budgets, or auto-enable the plugin:
 - `.cross-model-advisorignore` — additional excluded paths. Negation is
   rejected; these entries may only narrow access.
 
-The frozen project root is `CLAUDE_PROJECT_DIR` at activation. `/`, the home
-directory, and a missing root are refused. A later cwd/worktree move outside
+The session root is recovered from stored state; for a new session it comes from
+`CLAUDE_PROJECT_DIR`, the hook's `cwd`, or a command's initial working directory.
+Activation freezes its canonical path. `/`, the home directory, and a missing
+root are refused. A later cwd/worktree move outside
 that root pauses observation until `off` and a new session rooted there.
 
 ## How advice is delivered

@@ -58,6 +58,7 @@ var init_constants = __esm({
       "cross-model-advisor:off",
       "cross-model-advisor:status",
       "cross-model-advisor:doctor",
+      "cross-model-advisor:setup",
       "cross-model-advisor:login",
       "cross-model-advisor:logout"
     ]);
@@ -96300,7 +96301,7 @@ function classifyExpansion(payload) {
 function looksLikeControlTraffic(text) {
   const sample = String(text ?? "");
   if (CONTROL_COMMANDS.some((name) => sample.includes(`/${name}`))) return true;
-  if (/cross-model-advisor:(?:on|off|status|doctor|login|logout)\b/.test(sample)) return true;
+  if (/cross-model-advisor:(?:on|off|status|doctor|setup|login|logout)\b/.test(sample)) return true;
   return false;
 }
 
@@ -96730,13 +96731,14 @@ function credentialDirFromEnv(env, configFilePathFn) {
 }
 function pluginRootFromHere() {
   const here = path11.dirname(fileURLToPath(import.meta.url));
-  if (path11.basename(here) === "modules") return path11.dirname(here);
-  if (path11.basename(here) === "src") return path11.dirname(here);
+  const dir = path11.basename(here);
+  if (dir === "src" || dir === "dist") return path11.dirname(here);
+  if (dir === "modules") return path11.dirname(path11.dirname(here));
   return here;
 }
 function bundleStatus(pluginRoot) {
   const dist = path11.join(pluginRoot, "dist");
-  const need = ["control.mjs", "worker.mjs", "auth-control.mjs"];
+  const need = ["control.mjs", "worker.mjs", "auth-control.mjs", "setup-control.mjs"];
   const missing = need.filter((name) => !fsSync2.existsSync(path11.join(dist, name)));
   return { ok: missing.length === 0, missing };
 }
@@ -97752,8 +97754,9 @@ ${advisorSpec.instructions ?? ""}`.trim();
       });
     }
     const pluginRoot = env.CLAUDE_PLUGIN_ROOT || pluginRootFromHere();
+    const bundle = bundleStatus(pluginRoot);
     return {
-      ok: runtime.length === 0 && configOk && rootOk,
+      ok: runtime.length === 0 && configOk && rootOk && bundle.ok,
       runtime: {
         node: { ok: !runtime.some((item) => /node/i.test(item)), version: process.versions.node },
         os: { ok: !runtime.some((item) => /os|platform|darwin|linux/i.test(item)), platform: process.platform },
@@ -97763,7 +97766,7 @@ ${advisorSpec.instructions ?? ""}`.trim();
       root: { ok: rootOk, error: rootError },
       keys,
       providers: providerDiagnostics,
-      bundle: bundleStatus(pluginRoot),
+      bundle,
       ipc: { ok: Boolean(server?.listening), socketPath: socket.socketPath }
     };
   };
