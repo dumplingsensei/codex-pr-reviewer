@@ -1,15 +1,18 @@
-# Action majors are the only recurring maintenance this repository has: the
-# pins in .github/workflows/ go stale on GitHub's schedule, not on ours, and a
-# runtime deprecation lands as a warning on every job before it lands as a
-# failure. Dependabot turns that into a pull request, which is the difference
-# between maintenance that is rare and maintenance that is a surprise.
+# Recurring maintenance this repository actually has:
+# the action pins in .github/workflows/, and the production/build dependencies
+# under tooling/cross-model-advisor. Dependabot turns both into pull requests,
+# which is the difference between maintenance that is rare and maintenance that
+# is a surprise.
 #
 # Monthly, because majors are infrequent and a weekly check would open nothing
-# most weeks. Only github-actions: there is no package.json here, and no
-# third-party code to update.
+# most weeks.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
+    schedule:
+      interval: "monthly"
+  - package-ecosystem: "npm"
+    directory: "/tooling/cross-model-advisor"
     schedule:
       interval: "monthly"

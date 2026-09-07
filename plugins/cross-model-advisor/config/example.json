@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "providers": {
+    "openai-api": {
+      "kind": "api",
+      "provider": "openai",
+      "apiKeyEnv": "OPENAI_API_KEY"
+    },
+    "codex-login": {
+      "kind": "oauth",
+      "provider": "openai-codex"
+    }
+  },
+  "advisors": [
+    {
+      "name": "correctness",
+      "provider": "openai-api",
+      "model": "YOUR_MODEL_ID",
+      "instructions": "Look for observable correctness failures and missed edge cases."
+    },
+    {
+      "name": "architecture",
+      "provider": "codex-login",
+      "model": "YOUR_MODEL_ID",
+      "instructions": "Look for avoidable complexity and violations of existing project conventions."
+    }
+  ],
+  "exclude": [],
+  "limits": {
+    "maxConcurrentAdvisors": 2,
+    "reviewTimeoutSeconds": 90,
+    "maxToolCallsPerReview": 8,
+    "maxOutputTokens": 1500,
+    "maxReviewsPerAdvisorPerSession": 40
+  }
+}

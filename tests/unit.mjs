@@ -13,6 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
@@ -760,17 +761,43 @@ for (const sub of SUBCOMMANDS) {
 }
 
 describe("release stamps");
-// Each command prompt names the version it was written for, and compares it at
-// runtime against the version `doctor` reports. A stamp left behind at release
-// time silently disables the only signal a session gets that its prompts are
-// older than the plugin they are driving.
+// Each reviewer command prompt names the version it was written for, and
+// compares it at runtime against the version `doctor` reports. A stamp left
+// behind at release time silently disables the only signal a session gets that
+// its prompts are older than the plugin they are driving.
+//
+// Marketplace metadata is independently versioned. Each marketplace plugin
+// entry is checked against its own manifest, not against a single repo version.
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
-const version = readJson(path.join(pluginDir, ".claude-plugin", "plugin.json")).version;
 const marketplace = readJson(path.join(root, ".claude-plugin", "marketplace.json"));
-
-eq("marketplace metadata version", marketplace.metadata.version, version);
 eq(
-  "marketplace entry version",
+  "marketplace metadata version is a semver",
+  /^\d+\.\d+\.\d+$/.test(marketplace.metadata.version),
+  true
+);
+eq(
+  "marketplace lists codex-pr-reviewer",
+  marketplace.plugins.some((plugin) => plugin.name === "codex-pr-reviewer"),
+  true
+);
+eq(
+  "marketplace lists cross-model-advisor",
+  marketplace.plugins.some((plugin) => plugin.name === "cross-model-advisor"),
+  true
+);
+
+for (const entry of marketplace.plugins) {
+  eq(`${entry.name} source is a relative path`, entry.source.startsWith("./"), true);
+  const manifestPath = path.join(root, entry.source, ".claude-plugin", "plugin.json");
+  eq(`${entry.name} has a plugin manifest`, fs.existsSync(manifestPath), true);
+  const manifest = readJson(manifestPath);
+  eq(`${entry.name} marketplace version matches plugin.json`, entry.version, manifest.version);
+  eq(`${entry.name} plugin.json name`, manifest.name, entry.name);
+}
+
+const version = readJson(path.join(pluginDir, ".claude-plugin", "plugin.json")).version;
+eq(
+  "codex-pr-reviewer marketplace entry version",
   marketplace.plugins.find((plugin) => plugin.name === "codex-pr-reviewer").version,
   version
 );
@@ -818,38 +845,198 @@ eq(
 );
 
 describe("packaging");
-// marketplace.json ships `./plugins/codex-pr-reviewer`, so anything left at the
-// repository root is not in what a user installs. The licence has to be inside
-// the packaged directory to reach them, and identical to the root copy or the
-// two say different things about the same code.
+// marketplace.json ships each plugin from its own source directory, so anything
+// left at the repository root is not in what a user installs. The licence has
+// to be inside each packaged directory to reach them, and identical to the root
+// copy or the two say different things about the same code.
 const rootLicense = path.join(root, "LICENSE");
-const pluginLicense = path.join(pluginDir, "LICENSE");
-eq("the plugin directory carries a LICENSE", fs.existsSync(pluginLicense), true);
-eq(
-  "it is byte-identical to the root one",
-  fs.existsSync(pluginLicense) && fs.readFileSync(pluginLicense, "utf8"),
-  fs.readFileSync(rootLicense, "utf8")
-);
-// SECURITY.md lives at the repository root and is not packaged, so the only
-// route an installed copy can offer is a link. Without one, a user who installs
-// the plugin gets the short Safety section and no way to report privately.
-const shippedReadme = fs.readFileSync(path.join(pluginDir, "README.md"), "utf8");
-eq(
-  "the shipped README routes to the security policy",
-  shippedReadme.includes("SECURITY.md"),
-  true
-);
-eq(
-  "and to the private reporting path",
-  shippedReadme.includes("security/advisories/new"),
-  true
-);
+for (const entry of marketplace.plugins) {
+  const dir = path.join(root, entry.source);
+  const pluginLicense = path.join(dir, "LICENSE");
+  eq(`${entry.name} directory carries a LICENSE`, fs.existsSync(pluginLicense), true);
+  eq(
+    `${entry.name} LICENSE is byte-identical to the root one`,
+    fs.existsSync(pluginLicense) && fs.readFileSync(pluginLicense, "utf8"),
+    fs.readFileSync(rootLicense, "utf8")
+  );
+  eq(
+    `${entry.name} plugin.json declares the licence it ships`,
+    readJson(path.join(dir, ".claude-plugin", "plugin.json")).license,
+    "MIT"
+  );
+  // SECURITY.md lives at the repository root and is not packaged, so the only
+  // route an installed copy can offer is a link. Without one, a user who
+  // installs the plugin gets the short Safety section and no way to report
+  // privately.
+  const shippedReadme = fs.readFileSync(path.join(dir, "README.md"), "utf8");
+  eq(
+    `${entry.name} shipped README routes to the security policy`,
+    shippedReadme.includes("SECURITY.md"),
+    true
+  );
+  eq(
+    `${entry.name} shipped README routes to private reporting`,
+    shippedReadme.includes("security/advisories/new"),
+    true
+  );
+}
 
-eq(
-  "plugin.json declares the licence it ships",
-  readJson(path.join(pluginDir, ".claude-plugin", "plugin.json")).license,
-  "MIT"
-);
+describe("version guard");
+// The guard enumerates marketplace source directories rather than assuming a
+// single plugin, and --worktree compares the working tree to base so an
+// uncommitted checkout can be verified the same way CI verifies HEAD.
+const guardScript = path.join(root, "tests", "version-guard.sh");
+const runGuard = (cwd, args) =>
+  spawnSync("bash", [guardScript, ...args], { cwd, encoding: "utf8" });
+
+const writeJson = (file, value) => {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+};
+
+const initGuardRepo = () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cma-guard-"));
+  const git = (...args) => {
+    const result = spawnSync("git", args, {
+      cwd: dir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_NOSYSTEM: "1"
+      }
+    });
+    if (result.status !== 0) {
+      throw new Error(result.stderr || result.stdout || args.join(" "));
+    }
+    return result;
+  };
+  git("init", "-q");
+  const writePlugin = (name, version, body = `${name} readme\n`) => {
+    writeJson(path.join(dir, "plugins", name, ".claude-plugin", "plugin.json"), {
+      name,
+      version,
+      license: "MIT"
+    });
+    fs.writeFileSync(path.join(dir, "plugins", name, "README.md"), body);
+  };
+  const writeMarket = (plugins, meta = "9.0.0") => {
+    writeJson(path.join(dir, ".claude-plugin", "marketplace.json"), {
+      name: "test-market",
+      metadata: { version: meta },
+      plugins: plugins.map((plugin) => ({
+        name: plugin.name,
+        version: plugin.version,
+        source: `./plugins/${plugin.name}`
+      }))
+    });
+  };
+  const commit = (message) => {
+    git("add", "-A");
+    git(
+      "-c",
+      "user.email=t@t.test",
+      "-c",
+      "user.name=t",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "-q",
+      "-m",
+      message
+    );
+  };
+  const rev = (ref) => git("rev-parse", ref).stdout.trim();
+  return { dir, writePlugin, writeMarket, commit, rev };
+};
+
+{
+  const { dir, writePlugin, writeMarket, commit, rev } = initGuardRepo();
+  writePlugin("alpha", "1.0.0");
+  writePlugin("beta", "2.0.0");
+  writeMarket([
+    { name: "alpha", version: "1.0.0" },
+    { name: "beta", version: "2.0.0" }
+  ]);
+  commit("base");
+  const base = rev("HEAD");
+
+  writePlugin("alpha", "1.1.0", "alpha changed\n");
+  writeMarket([
+    { name: "alpha", version: "1.1.0" },
+    { name: "beta", version: "2.0.0" }
+  ]);
+  commit("bump alpha only");
+  const independent = runGuard(dir, [base]);
+  eq("independent plugin bump passes", independent.status, 0);
+  eq(
+    "independent bump names the plugin that moved",
+    independent.stdout.includes("alpha") && independent.stdout.includes("1.0.0") &&
+      independent.stdout.includes("1.1.0"),
+    true
+  );
+
+  writePlugin("beta", "2.0.0", "beta changed without a bump\n");
+  commit("beta content, same version");
+  const stuck = runGuard(dir, [base]);
+  eq("content change without that plugin's bump fails", stuck.status, 1);
+  eq("failure names the unchanged plugin", stuck.stdout.includes("beta"), true);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  const { dir, writePlugin, writeMarket, commit, rev } = initGuardRepo();
+  writePlugin("alpha", "1.0.0");
+  writeMarket([{ name: "alpha", version: "1.0.0" }]);
+  commit("base");
+  const base = rev("HEAD");
+  writeMarket([{ name: "alpha", version: "1.0.1" }]);
+  commit("marketplace entry drifted");
+  const drifted = runGuard(dir, [base]);
+  eq("marketplace entry must match plugin.json", drifted.status, 1);
+  eq("drift names the plugin", /marketplace entry alpha is 1\.0\.1/.test(drifted.stdout), true);
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  const { dir, writePlugin, writeMarket, commit, rev } = initGuardRepo();
+  writePlugin("alpha", "1.0.0");
+  writeMarket([{ name: "alpha", version: "1.0.0" }]);
+  commit("base");
+  const base = rev("HEAD");
+  fs.writeFileSync(path.join(dir, "plugins", "alpha", "README.md"), "dirty\n");
+  const committed = runGuard(dir, [base]);
+  eq("CI mode ignores an uncommitted edit", committed.status, 0);
+  const worktree = runGuard(dir, [base, "--worktree"]);
+  eq("worktree mode sees an uncommitted edit", worktree.status, 1);
+  eq(
+    "worktree failure names the dirty plugin",
+    worktree.stdout.includes("alpha"),
+    true
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  const { dir, writePlugin, writeMarket, commit, rev } = initGuardRepo();
+  writePlugin("alpha", "1.0.0");
+  writeMarket([{ name: "alpha", version: "1.0.0" }]);
+  commit("base");
+  const base = rev("HEAD");
+  writePlugin("beta", "1.0.0");
+  writeMarket([
+    { name: "alpha", version: "1.0.0" },
+    { name: "beta", version: "1.0.0" }
+  ]);
+  commit("add sibling plugin");
+  const added = runGuard(dir, [base]);
+  eq("a new marketplace plugin at 1.0.0 passes", added.status, 0);
+  const skip = runGuard(dir, ["0000000000000000000000000000000000000000"]);
+  eq("an all-zero base is skipped", skip.status, 0);
+  eq("the skip is labelled", skip.stdout.includes("SKIP"), true);
+  fs.rmSync(dir, { recursive: true, force: true });
+}
 
 console.log(failures === 0 ? "\nAll unit tests passed." : `\n${failures} test(s) failed.`);
 process.exitCode = failures === 0 ? 0 : 1;

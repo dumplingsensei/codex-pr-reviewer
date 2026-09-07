@@ -1,3 +1,92 @@
+# dumplingsensei-plugins
+
+Claude Code plugins. Install the marketplace once, then each plugin separately:
+
+```
+/plugin marketplace add dumplingsensei/codex-pr-reviewer
+/plugin install codex-pr-reviewer@dumplingsensei-plugins
+/plugin install cross-model-advisor@dumplingsensei-plugins
+```
+
+| Plugin | What it does |
+|---|---|
+| [cross-model-advisor](#cross-model-advisor) | Independent advisors observe the current Claude session, inspect the project themselves, and send findings back while you work. |
+| [codex-pr-reviewer](#codex-pr-reviewer) | Fetch a GitHub PR into an isolated worktree and review it with Codex. |
+
+Versions are independent: marketplace metadata is 0.9.17, `codex-pr-reviewer` stays 0.9.16, `cross-model-advisor` starts at 1.0.0. A change to one plugin does not move the other.
+
+## Status
+
+Written for my own use, published in case it is useful. It is tested and it works. It is not maintained on a schedule, and I am not promising that it will be.
+
+- **Bug reports are welcome and may not get fixed.** File one anyway with a reproduction — it tells the next person what to expect, whether or not I act on it.
+- **Pull requests are welcome and may not get merged.** If something matters to you and I am slow, fork it; that is what the MIT license is for.
+- **Security reports are the exception.** Those get a reply — see [SECURITY.md](SECURITY.md).
+- A quiet stretch means I have not had time, not that this is abandoned. If it ever is, this section will say so.
+
+# cross-model-advisor
+
+Independent advisors observe the ongoing primary Claude session, investigate the project for themselves through read-only tools, and send concise findings back while Claude is working. This is not another pull-request reviewer and not a Stop-hook completion gate.
+
+The useful combination is from Oh My Pi's advisors: session-bound reviewers with their own inspection, not a forwarded transcript and not a general shell. This plugin does not copy OMP's prompt corpus or vendor its agent framework.
+
+Shipped documentation, including configuration examples: [plugins/cross-model-advisor/README.md](plugins/cross-model-advisor/README.md). Changelog: [plugins/cross-model-advisor/CHANGELOG.md](plugins/cross-model-advisor/CHANGELOG.md).
+
+## Runtime
+
+**Claude Code 2.1.252 or newer; Node 22.19.0 or newer; macOS and Linux.** Unsupported Node/host/OS is a `doctor` error; ordinary hooks stay fail-open and do not start providers. Windows is not tested and not supported.
+
+Users install the bundled plugin without `npm install`, a build, or network bootstrap. From a local checkout:
+
+```
+claude --plugin-dir ./plugins/cross-model-advisor
+```
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `/cross-model-advisor:on` | Validate configuration and enable configured advisors for this session. Reports provider/model names, project root, limits, and external-provider disclosure. Does not call an advisor model just to run the command. |
+| `/cross-model-advisor:off` | Cancel running reviews, stop future reviews, and discard pending injection candidates. Accepted findings stay in the local inbox. |
+| `/cross-model-advisor:status` | Show enabled/paused/busy state per advisor, pending/emitted findings, usage when reported, and sanitized last errors. “Emitted” is locally acknowledged hook output, not confirmed receipt by Claude. |
+| `/cross-model-advisor:doctor` | Check runtime versions, configuration, key-variable presence, local OAuth availability, bundle completeness, and IPC access. No model request, token refresh, login flow, installation, or key printing. |
+| `/cross-model-advisor:login <provider-slot>` | Show the terminal command for a provider-scoped OAuth login. Complete authorization in your terminal, not in Claude's transcript. |
+| `/cross-model-advisor:logout <provider-slot>` | Delete that slot's local OAuth credential. |
+
+The four session commands run this helper by full path:
+
+```
+node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" on
+node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" off
+node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" status
+node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" doctor
+```
+
+## Configuration and provider selection
+
+One trusted user file: `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cross-model-advisor.json`. Schema version is `1`; unknown keys are rejected. There is no silent default provider or model, and the plugin never uses Claude's current credentials. `/on` snapshots the file; edits take effect on the next explicit `on`.
+
+Choose providers yourself:
+
+- **API key** (`kind: "api"`): `openai`, `anthropic`, `google`, `openrouter`, `zai`, `xai`, `moonshotai`, `kimi-coding`, or `openai-compatible`. Each requires `apiKeyEnv` as an environment-variable name, never a key value. `openai-compatible` also requires `baseUrl` (HTTPS except localhost/loopback) and per-model `contextWindow`, `maxTokens`, `reasoning`, `input`, and optional `pricing`.
+- **OAuth** (`kind: "oauth"`): `openai-codex`, `github-copilot`, `xai`, or `kimi-coding`. Explicit login, private slot-scoped credential storage, serialized refresh, and no API-key fallback. No advisor CLI installation or subprocess transport.
+
+Kimi API (`moonshotai`) and Kimi Coding are separate services. `google` is the Gemini API, not Antigravity subscription access. Anthropic and Antigravity subscription OAuth are not offered because their providers prohibit third-party use. See the [provider matrix and authentication guidance](plugins/cross-model-advisor/README.md#configuration).
+
+Advisors name a configured provider, a user-chosen model id, and literal instructions. Example and schema: `plugins/cross-model-advisor/config/`. `WATCHDOG.md` and `.cross-model-advisorignore` in a project may narrow review focus and tool access; they cannot select providers, credentials, binaries, or auto-enable the plugin.
+
+## Security, credentials, no-wake, receipt
+
+Observations and source the advisor tools read go to the **external provider you configured**. Exclusions block tool access to `.git`, `.env` / `.env.*`, keys, `.claude` / `.codex` / `.gemini`, `node_modules`, and ignore files. They do not strip secrets from prose in a prompt or from an allowed file.
+
+The worker and bundled SDK are trusted local code under the same OS user. Model-visible investigation is restricted to `read` / `list` / `search` / `advise`; no native advisor shell or MCP bridge is exposed.
+
+OAuth credentials live under `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cross-model-advisor/credentials` (normally outside the project), with private directory/file permissions and atomic serialized writes. They are not encrypted against your OS user and are never copied from Claude, OMP, or other tools. Provider conversation context stays in memory; the plugin inbox has seven-day retention. External providers have their own retention policies.
+
+**No-wake.** A stopped session is never restarted. Advice that finishes after Stop is kept for the next real user prompt or tool boundary. Stop always prints nothing.
+
+**Best-effort receipt.** The host has no receipt protocol. `status` “emitted” means locally written and acknowledged, not that Claude confirmed seeing it. A crash can duplicate an emission; a host timeout after acknowledgement can drop it while the inbox still holds the finding. Not exactly-once, not at-least-once.
+
 # codex-pr-reviewer
 
 A Claude Code plugin that reviews **other people's GitHub pull requests** with Codex.
@@ -169,9 +258,10 @@ codex --strict-config -C <cache>/worktrees/cli__cli/pr-14057 -s read-only \
 ## Tests
 
 ```
-node tests/unit.mjs          # pure helpers, no network
+node tests/unit.mjs          # reviewer helpers, marketplace versions, version-guard
 ./tests/regression.sh        # synthetic repos + stub codex, no network
 ./tests/integration.sh       # real git/gh plumbing, never calls Codex
+node --test tests/cross-model-advisor/*.test.mjs   # advisor focused suites and cold-bundle smoke
 ```
 
 Both suites and the CI workflow share one Codex stub, `tests/stubs/codex`; `unit.mjs` fails the build if a second copy appears.
@@ -184,8 +274,8 @@ Both suites and the CI workflow share one Codex stub, `tests/stubs/codex`; `unit
 ./tests/integration.sh cli/cli 13899
 ```
 
-CI runs the offline suites on every pull request and push to `main`, across Node 18 — the documented floor — and 22, on Linux and macOS. One leg runs `tests/version-guard.sh`, which fails the build when shipped plugin content changed without the version moving: Claude Code resolves an install by version and caches it, so a fixed prompt keeping the old number reaches nobody who already has the plugin. The integration suite runs weekly and on demand, needing the network and an upstream PR that still exists.
+CI runs the reviewer offline suites on every pull request and push to `main`, across Node 18 — the documented floor — and 22, on Linux and macOS. A separate job on Node 22.19.0, Linux and macOS, runs `npm ci` and `npm run build` in `tooling/cross-model-advisor`, then `node --test tests/cross-model-advisor/*.test.mjs` (focused suites including cold-bundle smoke) and diffs a clean `--outdir` rebuild against committed `dist/`. One reviewer leg runs `tests/version-guard.sh`, which enumerates every marketplace plugin and fails when that plugin's shipped content changed without its own version moving. Pass a base ref for CI's committed comparison; add `--worktree` to compare the current checkout, including untracked files. The integration suite runs weekly and on demand, needing the network and an upstream PR that still exists.
 
 ## Security, changelog, license
 
-Reporting a vulnerability, scope, and known-and-accepted issues: [SECURITY.md](SECURITY.md). Release notes: [CHANGELOG.md](CHANGELOG.md), each release tagged `v<version>`. Licensed [MIT](LICENSE).
+Reporting a vulnerability, scope, and known-and-accepted issues: [SECURITY.md](SECURITY.md). Release notes: [CHANGELOG.md](CHANGELOG.md) for `codex-pr-reviewer`, [plugins/cross-model-advisor/CHANGELOG.md](plugins/cross-model-advisor/CHANGELOG.md) for `cross-model-advisor`. Licensed [MIT](LICENSE).
