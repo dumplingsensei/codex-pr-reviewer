@@ -14,19 +14,32 @@ import {
   SESSION_END_TIMEOUT_MS,
   WARM_IPC_MS
 } from "./session/constants.mjs";
-import { requestIpc, socketExists } from "./session/ipc.mjs";
+import { createClientMeta, PROTOCOL_VERSION, requestIpc, socketExists, writeCompleted } from "./session/ipc.mjs";
 import {
   locatorPath,
   pidIsLive,
   readIdentity,
+  explicitPluginData,
   readLocator,
+  readSessionProjectRoot,
   sessionDir,
   statePath,
+  userConfigPath,
   validateSessionId
 } from "./session/paths.mjs";
 var CONTROL_COMMANDS = /* @__PURE__ */ new Set(["on", "off", "status", "doctor", "hook"]);
 var CONTROL_COMMAND_MS = 9e4;
 var STATUS_OFF_MS = 5e3;
+var SETTINGS_ERROR_CODES = /* @__PURE__ */ new Set([
+  "identity",
+  "no-live",
+  "protocol",
+  "stale",
+  "busy",
+  "root",
+  "config",
+  "unavailable"
+]);
 var WORKER_ENV_ALLOW = [
   "PATH",
   "Path",
@@ -94,12 +107,21 @@ function workerExecutablePath(metaUrl = import.meta.url) {
 }
 function parseControlArgv(argv) {
   const op = argv[0];
-  if (!CONTROL_COMMANDS.has(op)) {
-    const error = new Error("usage: control.mjs hook|on|off|status|doctor");
+  const usage = () => {
+    const error = new Error("usage: control.mjs hook | on|off|status|doctor [--plugin-data <path>]");
     error.code = "usage";
-    throw error;
+    return error;
+  };
+  if (!CONTROL_COMMANDS.has(op)) throw usage();
+  if (argv.length === 1) return { op, pluginData: null };
+  if (op === "hook" || argv.length !== 3 || argv[1] !== "--plugin-data") throw usage();
+  try {
+    return { op, pluginData: explicitPluginData(argv[2]) };
+  } catch {
+    throw new IdentityError(
+      "Invalid --plugin-data. Run this command through the plugin's skill so Claude Code substitutes the path."
+    );
   }
-  return { op };
 }
 async function readBoundedStdin(stream, max = MAX_STDIN_BYTES) {
   const chunks = [];
@@ -133,12 +155,17 @@ function spawnWorkerProcess(identity, { env = process.env, workerPath, spawnImpl
   child.unref();
   return child;
 }
+function locatorReachable(locator) {
+  return Boolean(
+    locator?.socketPath && locator?.controlCapability && pidIsLive(locator.pid) && socketExists(locator.socketPath)
+  );
+}
 async function waitForLocator(identity, deadlineMs, { isDead } = {}) {
   const started = Date.now();
   while (Date.now() - started < deadlineMs) {
     if (typeof isDead === "function" && isDead()) return null;
     const locator = await readLocator(identity.pluginData, identity.sessionId);
-    if (locator?.socketPath && locator?.controlCapability && pidIsLive(locator.pid) && socketExists(locator.socketPath)) {
+    if (locatorReachable(locator)) {
       return locator;
     }
     await sleep(20);
@@ -148,7 +175,7 @@ async function waitForLocator(identity, deadlineMs, { isDead } = {}) {
 async function ensureWorker(identity, options = {}) {
   const request = options.request ?? requestIpc;
   let locator = await readLocator(identity.pluginData, identity.sessionId);
-  if (locator?.socketPath && locator?.controlCapability && pidIsLive(locator.pid) && socketExists(locator.socketPath)) {
+  if (locatorReachable(locator)) {
     try {
       const ping = await request(
         locator.socketPath,
@@ -250,11 +277,222 @@ function commandFailure(error) {
   const code = typeof error?.code === "string" && Object.hasOwn(messages, error.code) ? error.code : "control";
   return `${code}: ${messages[code] ?? "Command failed. Check the runtime, plugin bundle, and plugin-data access."}`;
 }
+function settingsFailure(code) {
+  return { ok: false, error: SETTINGS_ERROR_CODES.has(code) ? code : "protocol" };
+}
+function pathsMatch(left, right) {
+  if (typeof left !== "string" || typeof right !== "string" || !left || !right) return false;
+  const a = path.resolve(left);
+  const b = path.resolve(right);
+  if (a === b) return true;
+  try {
+    return fs.realpathSync(a) === fs.realpathSync(b);
+  } catch {
+    return false;
+  }
+}
+function sanitizeAdvisor(row) {
+  if (!row || typeof row !== "object" || typeof row.name !== "string") return null;
+  const out = { name: row.name };
+  if (typeof row.enabled === "boolean") out.enabled = row.enabled;
+  if (typeof row.available === "boolean") out.available = row.available;
+  if (typeof row.provider === "string") out.provider = row.provider;
+  if (typeof row.model === "string") out.model = row.model;
+  if (typeof row.kind === "string") out.kind = row.kind;
+  if (typeof row.reasoningEffort === "string") out.reasoningEffort = row.reasoningEffort;
+  if (typeof row.error === "string") out.error = row.error;
+  return out;
+}
+function sanitizeSnapshot(value) {
+  if (!value || typeof value !== "object") return null;
+  if (value.protocolVersion !== PROTOCOL_VERSION) return null;
+  if (typeof value.sessionId !== "string" || !value.sessionId) return null;
+  if (typeof value.projectRoot !== "string" || !path.isAbsolute(value.projectRoot)) return null;
+  if (typeof value.configPath !== "string" || !value.configPath) return null;
+  if (!Number.isInteger(value.workerGeneration) || !Number.isInteger(value.settingsRevision)) return null;
+  if (typeof value.enabled !== "boolean" || typeof value.paused !== "boolean") return null;
+  if (!Array.isArray(value.advisors)) return null;
+  return {
+    ok: true,
+    protocolVersion: PROTOCOL_VERSION,
+    sessionId: value.sessionId,
+    projectRoot: value.projectRoot,
+    configPath: value.configPath,
+    workerGeneration: value.workerGeneration,
+    settingsRevision: value.settingsRevision,
+    enabled: value.enabled,
+    paused: value.paused,
+    advisors: value.advisors.map(sanitizeAdvisor).filter(Boolean)
+  };
+}
+function mapResultCode(result) {
+  if (result && typeof result.code === "string" && SETTINGS_ERROR_CODES.has(result.code)) return result.code;
+  const error = typeof result?.error === "string" ? result.error : "";
+  if (SETTINGS_ERROR_CODES.has(error)) return error;
+  if (error === "protocol mismatch") return "protocol";
+  if (error === "root mismatch") return "root";
+  if (error === "stale worker generation" || error === "stale settings revision") return "stale";
+  if (error === "api environment unavailable") return "unavailable";
+  if (error === "missing worker generation" || error === "missing settings revision" || error === "missing config revision" || error === "config revision mismatch" || error === "config unavailable" || error === "invalid config") {
+    return "config";
+  }
+  return null;
+}
+function interpretTransportError(error) {
+  if (error === "unknown op" || error === "unauthorized" || error === "protocol mismatch") return "protocol";
+  if (typeof error === "string" && SETTINGS_ERROR_CODES.has(error)) return error;
+  return "no-live";
+}
+function interpretSettingsIpc(response, fallback) {
+  if (!response) return settingsFailure(fallback);
+  if (response.ok !== true) {
+    return settingsFailure(interpretTransportError(response.error) === "protocol" ? "protocol" : SETTINGS_ERROR_CODES.has(response.error) ? response.error : fallback);
+  }
+  const result = response.result;
+  if (!result || typeof result !== "object") return settingsFailure("protocol");
+  if (result.ok === false) {
+    return settingsFailure(mapResultCode(result) ?? fallback);
+  }
+  const snapshot = sanitizeSnapshot(result);
+  if (!snapshot) return settingsFailure("protocol");
+  return snapshot;
+}
+function settingsIdentity(env) {
+  const identity = readIdentity(env, {});
+  if (!identity.sessionId || !identity.pluginData) return settingsFailure("identity");
+  try {
+    identity.sessionId = validateSessionId(identity.sessionId);
+  } catch {
+    return settingsFailure("identity");
+  }
+  identity.configPath = userConfigPath(env);
+  return { ok: true, identity };
+}
+async function readLiveLocator(identity) {
+  let locator;
+  try {
+    locator = await readLocator(identity.pluginData, identity.sessionId);
+  } catch {
+    return settingsFailure("no-live");
+  }
+  if (!locatorReachable(locator)) return settingsFailure("no-live");
+  return { ok: true, locator };
+}
+function verifySnapshotIdentity(snapshot, identity, frozenRoot, targetRoot) {
+  if (snapshot.sessionId !== identity.sessionId) return settingsFailure("identity");
+  if (!pathsMatch(snapshot.configPath, identity.configPath)) return settingsFailure("config");
+  if (frozenRoot && !pathsMatch(snapshot.projectRoot, frozenRoot)) return settingsFailure("root");
+  if (identity.projectRoot && !pathsMatch(snapshot.projectRoot, identity.projectRoot)) {
+    return settingsFailure("root");
+  }
+  if (targetRoot && !pathsMatch(snapshot.projectRoot, targetRoot)) return settingsFailure("root");
+  return snapshot;
+}
+async function getSessionSettings({ env = process.env, request = requestIpc } = {}) {
+  const parsed = settingsIdentity(env);
+  if (!parsed.ok) return parsed;
+  const { identity } = parsed;
+  const live = await readLiveLocator(identity);
+  if (!live.ok) return live;
+  let response;
+  try {
+    response = await request(
+      live.locator.socketPath,
+      {
+        capability: live.locator.controlCapability,
+        op: "settings",
+        protocolVersion: PROTOCOL_VERSION
+      },
+      { timeoutMs: STATUS_OFF_MS }
+    );
+  } catch {
+    return settingsFailure("no-live");
+  }
+  const interpreted = interpretSettingsIpc(response, "no-live");
+  if (!interpreted.ok) return interpreted;
+  const frozenRoot = await readSessionProjectRoot(identity.pluginData, identity.sessionId);
+  return verifySnapshotIdentity(interpreted, identity, frozenRoot);
+}
+async function applySessionSettings({
+  env = process.env,
+  target,
+  configRevision,
+  enable,
+  request = requestIpc
+} = {}) {
+  const parsed = settingsIdentity(env);
+  if (!parsed.ok) return parsed;
+  const { identity } = parsed;
+  if (!target || typeof target !== "object") return settingsFailure("stale");
+  if (target.protocolVersion !== PROTOCOL_VERSION) return settingsFailure("protocol");
+  if (typeof target.sessionId !== "string" || target.sessionId !== identity.sessionId) {
+    return settingsFailure("identity");
+  }
+  if (typeof target.projectRoot !== "string" || !path.isAbsolute(target.projectRoot)) {
+    return settingsFailure("root");
+  }
+  if (typeof target.configPath !== "string" || !pathsMatch(target.configPath, identity.configPath)) {
+    return settingsFailure("config");
+  }
+  if (!Number.isInteger(target.workerGeneration) || !Number.isInteger(target.settingsRevision)) {
+    return settingsFailure("stale");
+  }
+  if (configRevision === void 0) return settingsFailure("config");
+  const frozenRoot = await readSessionProjectRoot(identity.pluginData, identity.sessionId);
+  if (frozenRoot && !pathsMatch(frozenRoot, target.projectRoot)) return settingsFailure("root");
+  if (identity.projectRoot && !pathsMatch(identity.projectRoot, target.projectRoot)) {
+    return settingsFailure("root");
+  }
+  const live = await readLiveLocator(identity);
+  if (!live.ok) return live;
+  let ping;
+  try {
+    ping = await request(
+      live.locator.socketPath,
+      { capability: live.locator.controlCapability, op: "ping" },
+      { timeoutMs: WARM_IPC_MS }
+    );
+  } catch {
+    return settingsFailure("no-live");
+  }
+  if (!ping || ping.ok !== true) {
+    return settingsFailure(interpretTransportError(ping?.error));
+  }
+  const pingBody = ping.result;
+  if (!pingBody || pingBody.protocolVersion !== PROTOCOL_VERSION) return settingsFailure("protocol");
+  if (pingBody.sessionId !== identity.sessionId) return settingsFailure("identity");
+  if (!pathsMatch(pingBody.projectRoot, target.projectRoot)) return settingsFailure("root");
+  if (!pathsMatch(pingBody.configPath, identity.configPath) || !pathsMatch(pingBody.configPath, target.configPath)) {
+    return settingsFailure("config");
+  }
+  if (pingBody.workerGeneration !== target.workerGeneration || pingBody.settingsRevision !== target.settingsRevision) {
+    return settingsFailure("stale");
+  }
+  const applyReq = {
+    capability: live.locator.controlCapability,
+    op: "apply",
+    protocolVersion: PROTOCOL_VERSION,
+    workerGeneration: target.workerGeneration,
+    settingsRevision: target.settingsRevision,
+    configRevision
+  };
+  if (enable === true) applyReq.enable = true;
+  let response;
+  try {
+    response = await request(live.locator.socketPath, applyReq, { timeoutMs: CONTROL_COMMAND_MS });
+  } catch {
+    return settingsFailure("no-live");
+  }
+  const interpreted = interpretSettingsIpc(response, "stale");
+  if (!interpreted.ok) return interpreted;
+  return verifySnapshotIdentity(interpreted, identity, frozenRoot, target.projectRoot);
+}
 async function runControl(options = {}) {
-  const env = options.env ?? process.env;
   const stdout = options.stdout ?? process.stdout;
   const argv = options.argv ?? process.argv.slice(2);
-  const { op } = parseControlArgv(argv);
+  const { op, pluginData } = parseControlArgv(argv);
+  const baseEnv = options.env ?? process.env;
+  const env = pluginData ? { ...baseEnv, CLAUDE_PLUGIN_DATA: pluginData } : baseEnv;
   const request = options.request ?? requestIpc;
   try {
     let payload = {};
@@ -281,12 +519,14 @@ async function runControl(options = {}) {
     } else {
       ipcTimeout = STATUS_OFF_MS;
     }
+    const client = op === "hook" ? createClientMeta() : void 0;
     const response = await request(
       locator.socketPath,
       {
         capability: locator.controlCapability,
         op,
-        payload: op === "hook" ? payload : void 0
+        payload: op === "hook" ? payload : void 0,
+        client
       },
       { timeoutMs: ipcTimeout }
     );
@@ -298,14 +538,20 @@ async function runControl(options = {}) {
       return { exitCode: 0, stdout: body2 };
     }
     if (op === "hook") {
-      const text = response.result?.stdout ?? "";
-      if (text) stdout.write(text);
+      const text = typeof response.result?.stdout === "string" ? response.result.stdout : "";
       const claimId = response.result?.claimId;
-      if (claimId) {
+      if (text) {
+        try {
+          await writeCompleted(stdout, text);
+        } catch {
+          return { exitCode: 0, stdout: text };
+        }
+      }
+      if (text && claimId && client) {
         try {
           await request(
             locator.socketPath,
-            { capability: locator.controlCapability, op: "ack", claimId },
+            { capability: locator.controlCapability, op: "ack", claimId, client },
             { timeoutMs: WARM_IPC_MS }
           );
         } catch {
@@ -326,7 +572,7 @@ async function main(argv = process.argv.slice(2), env = process.env) {
   const op = argv[0];
   try {
     if (!CONTROL_COMMANDS.has(op)) {
-      process.stderr.write("usage: control.mjs hook|on|off|status|doctor\n");
+      process.stderr.write("usage: control.mjs hook | on|off|status|doctor [--plugin-data <path>]\n");
       process.exitCode = 1;
       return;
     }
@@ -348,14 +594,16 @@ var realPath = (value) => {
     return path.resolve(value);
   }
 };
-var invokedDirectly = process.argv[1] && realPath(process.argv[1]) === realPath(fileURLToPath(import.meta.url));
+var invokedDirectly = process.argv[1] && path.basename(fileURLToPath(import.meta.url)) === "control.mjs" && realPath(process.argv[1]) === realPath(fileURLToPath(import.meta.url));
 if (invokedDirectly) {
   main().catch(() => {
     process.exitCode = process.argv[2] === "hook" ? 0 : 1;
   });
 }
 export {
+  applySessionSettings,
   ensureWorker,
+  getSessionSettings,
   main,
   parseControlArgv,
   readBoundedStdin,

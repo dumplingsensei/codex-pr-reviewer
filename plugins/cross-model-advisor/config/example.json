@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "providers": {
     "openai-api": {
       "kind": "api",
@@ -16,13 +16,17 @@
       "name": "correctness",
       "provider": "openai-api",
       "model": "YOUR_MODEL_ID",
-      "instructions": "Look for observable correctness failures and missed edge cases."
+      "instructions": "Look for observable correctness failures and missed edge cases.",
+      "enabled": true,
+      "reasoningEffort": "default"
     },
     {
       "name": "architecture",
       "provider": "codex-login",
       "model": "YOUR_MODEL_ID",
-      "instructions": "Look for avoidable complexity and violations of existing project conventions."
+      "instructions": "Look for avoidable complexity and violations of existing project conventions.",
+      "enabled": true,
+      "reasoningEffort": "default"
     }
   ],
   "exclude": [],

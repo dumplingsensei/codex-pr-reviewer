@@ -3,7 +3,7 @@ import { createRequire as __cmaCreateRequire } from "node:module"; const require
 // ../../plugins/cross-model-advisor/src/session/state.mjs
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
-import { STATE_VERSION } from "./constants.mjs";
+import { PROTOCOL_VERSION, STATE_VERSION } from "./constants.mjs";
 import { atomicWriteJson, statePath } from "./paths.mjs";
 function emptyState(overrides = {}) {
   return {
@@ -13,7 +13,12 @@ function emptyState(overrides = {}) {
     pauseReason: null,
     generation: 1,
     workerGeneration: 0,
+    settingsRevision: 0,
     projectRoot: null,
+    rootIdent: null,
+    deliveryProtocolVersion: PROTOCOL_VERSION,
+    issuanceUnrecoverable: false,
+    ended: false,
     transcriptPath: null,
     activation: null,
     activationFingerprint: null,
@@ -30,6 +35,7 @@ function emptyState(overrides = {}) {
     errors: {},
     advisors: {},
     inbox: [],
+    issuance: [],
     controlPromptIds: [],
     ...overrides
   };
@@ -42,10 +48,45 @@ async function loadState(dir) {
     const raw = await fs.readFile(statePath(dir), "utf8");
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return emptyState();
-    return { ...emptyState(), ...parsed, version: STATE_VERSION };
+    const missingIssuance = !Object.prototype.hasOwnProperty.call(parsed, "issuance") || !Array.isArray(parsed.issuance);
+    const state = normalizeState({ ...emptyState(), ...parsed, version: STATE_VERSION });
+    state.issuanceUnrecoverable = Boolean(parsed.issuanceUnrecoverable) || missingIssuance;
+    return state;
   } catch {
     return emptyState();
   }
+}
+function normalizeState(state) {
+  state.settingsRevision = Number(state.settingsRevision) || 0;
+  if (!Array.isArray(state.issuance)) state.issuance = [];
+  state.deliveryProtocolVersion = Number(state.deliveryProtocolVersion) || PROTOCOL_VERSION;
+  state.issuanceUnrecoverable = Boolean(state.issuanceUnrecoverable);
+  state.ended = Boolean(state.ended);
+  const advisors = {};
+  for (const [name, rec] of Object.entries(state.advisors ?? {})) {
+    if (!rec || typeof rec !== "object") continue;
+    advisors[name] = {
+      ...rec,
+      name: rec.name ?? name,
+      epoch: Number(rec.epoch) > 0 ? Number(rec.epoch) : 1,
+      tombstone: Boolean(rec.tombstone),
+      identity: typeof rec.identity === "string" ? rec.identity : null,
+      enabled: rec.enabled !== false,
+      reasoningEffort: typeof rec.reasoningEffort === "string" ? rec.reasoningEffort : "default"
+    };
+  }
+  state.advisors = advisors;
+  if (Array.isArray(state.inbox)) {
+    for (const item of state.inbox) {
+      if (!item || typeof item !== "object") continue;
+      if (item.deliverable == null) {
+        item.deliverable = item.status !== "discarded" && item.status !== "stale";
+      }
+    }
+  } else {
+    state.inbox = [];
+  }
+  return state;
 }
 async function saveState(dir, state) {
   const durable = persistable(state);
@@ -60,6 +101,11 @@ function persistable(state) {
       provider: advisor.provider,
       model: advisor.model,
       kind: advisor.kind,
+      enabled: advisor.enabled !== false,
+      reasoningEffort: advisor.reasoningEffort ?? "default",
+      epoch: Number(advisor.epoch) > 0 ? Number(advisor.epoch) : 1,
+      tombstone: Boolean(advisor.tombstone),
+      identity: typeof advisor.identity === "string" ? advisor.identity : null,
       reviews: advisor.reviews ?? 0,
       consecutiveFailures: advisor.consecutiveFailures ?? 0,
       paused: advisor.paused ?? false,
@@ -77,6 +123,10 @@ function persistable(state) {
     pauseReason: state.pauseReason ?? null,
     generation: Number(state.generation) || 1,
     workerGeneration: Number(state.workerGeneration) || 0,
+    settingsRevision: Number(state.settingsRevision) || 0,
+    deliveryProtocolVersion: PROTOCOL_VERSION,
+    issuanceUnrecoverable: Boolean(state.issuanceUnrecoverable),
+    ended: Boolean(state.ended),
     projectRoot: state.projectRoot ?? null,
     rootIdent: state.rootIdent ?? null,
     transcriptPath: state.transcriptPath ?? null,
@@ -94,6 +144,7 @@ function persistable(state) {
     errors: state.errors ?? {},
     advisors,
     inbox: Array.isArray(state.inbox) ? state.inbox : [],
+    issuance: Array.isArray(state.issuance) ? state.issuance : [],
     controlPromptIds: Array.isArray(state.controlPromptIds) ? state.controlPromptIds.slice(-512) : []
   };
 }
@@ -112,6 +163,7 @@ export {
   emptyState,
   fingerprintSnapshot,
   loadState,
+  normalizeState,
   persistable,
   saveState
 };

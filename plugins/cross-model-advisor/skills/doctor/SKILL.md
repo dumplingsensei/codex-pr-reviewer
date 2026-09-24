@@ -2,7 +2,7 @@
 name: doctor
 description: Check runtime, configuration, provider availability, bundle, and IPC without calling paid models.
 disable-model-invocation: true
-allowed-tools: Bash(node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" doctor)
+allowed-tools: Bash(node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" doctor --plugin-data "${CLAUDE_PLUGIN_DATA}")
 ---
 
 Diagnose whether cross-model advisors can run in **this session** (`${CLAUDE_SESSION_ID}`).
@@ -12,10 +12,10 @@ This skill has no arguments. Do not append user text to the helper.
 ## Run
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" doctor
+node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" doctor --plugin-data "${CLAUDE_PLUGIN_DATA}"
 ```
 
-The helper reads session identity from `CLAUDE_CODE_SESSION_ID` (or `CLAUDE_SESSION_ID`) and plugin data from `CLAUDE_PLUGIN_DATA`. It reuses the stored session root. For a new session without stored state, it uses `CLAUDE_PROJECT_DIR` when available, otherwise the command's working directory. Do not pass paths, session ids, or `$ARGUMENTS`, or export replacement identity variables.
+The helper reads session identity from `CLAUDE_CODE_SESSION_ID` (or `CLAUDE_SESSION_ID`). Plugin data comes only from the `--plugin-data` path Claude Code substituted above: the Bash tool does not export this plugin's `CLAUDE_PLUGIN_DATA`, and another plugin may have exported its own. It reuses the stored session root. For a new session without stored state, it uses `CLAUDE_PROJECT_DIR` when available, otherwise the command's working directory. Run the command exactly as written. Do not pass other paths, session ids, or `$ARGUMENTS`, or export replacement identity variables.
 
 ## Report
 

@@ -5,10 +5,11 @@
  * Two proofs, both against trees that have no `src/` and no `node_modules`:
  *   1. Isolated `claude plugin marketplace add/install` with an npm/bun/yarn
  *      trap on PATH — Claude must not bootstrap dependencies, and the cached
- *      copy must ship LICENSE plus the three dist executables.
+ *      copy must ship LICENSE plus the four dist executables.
  *   2. Doctor/control IPC, a loopback OpenAI-compatible read→advise review,
  *      Stop with empty stdout while that review is still in flight, drain on
- *      the next real prompt, plus cold resolution of provider/auth modules.
+ *      the next real prompt, cold resolution of provider/auth/menu modules,
+ *      and opening the real bundled menu in a PTY.
  *
  * Invoked by tests/cross-model-advisor/installed.test.mjs or directly:
  *   node tests/cross-model-advisor/fixtures/installed-smoke.mjs
@@ -21,6 +22,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { assertTermiosRestored, openAndQuitMenu } from "./terminal-smoke.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
@@ -368,6 +370,15 @@ export async function runColdBundleSmoke() {
     );
 
     await assertModulesResolve(pluginDir);
+    const configBefore = fs.readFileSync(path.join(configDir, "cross-model-advisor.json"), "utf8");
+    const opened = await openAndQuitMenu({ pluginDir, env, cwd: projectDir });
+    assertTermiosRestored(opened.termios);
+    assert.match(opened.screen || opened.transcript, /Cross-model advisors/);
+    assert.equal(
+      fs.readFileSync(path.join(configDir, "cross-model-advisor.json"), "utf8"),
+      configBefore,
+      "opening the cold menu must not write config"
+    );
     assert.equal(typeof locator.controlCapability, "string");
     assert.ok(locator.controlCapability.length > 0);
   } finally {
@@ -607,13 +618,22 @@ async function assertExecutablesResolve(pluginDir, world) {
 }
 
 async function assertModulesResolve(pluginDir) {
-  const candidates = [
-    path.join(pluginDir, "dist", "modules", "src", "session", "constants.mjs"),
-    path.join(pluginDir, "dist", "modules", "session", "constants.mjs")
+  const dir = path.join(pluginDir, "dist", "modules");
+  const names = [
+    "session/constants.mjs",
+    "setup-menu.mjs",
+    "terminal-ui.mjs",
+    "terminal-command.mjs",
+    "reasoning.mjs",
+    "setup-store.mjs"
   ];
-  const file = candidates.find((candidate) => fs.existsSync(candidate));
-  if (!file) return;
-  await import(pathToFileURL(file).href);
+  for (const name of names) {
+    const file = path.join(dir, name);
+    const nested = path.join(pluginDir, "dist", "modules", "src", name);
+    const resolved = fs.existsSync(file) ? file : nested;
+    assert.ok(fs.existsSync(resolved), `cold plugin missing ${name} under ${dir}`);
+    await import(pathToFileURL(resolved).href);
+  }
 }
 
 function findInstalledPlugin(roots) {

@@ -1,10 +1,11 @@
 /**
  * IPC regressions: capability gating, newline framing, fail-open control,
- * and Stop no-wake stdout.
+ * Stop no-wake stdout, protocol 2 settings, and completed-write ack.
  */
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
@@ -68,8 +69,8 @@ function makeTools(calls) {
 
 async function start(t, extra = {}) {
   const { env: extraEnv, ...rest } = extra;
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cma-ipc-root-"));
-  const data = await fs.mkdtemp(path.join(os.tmpdir(), "cma-ipc-data-"));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cma-ipc-root-")));
+  const data = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cma-ipc-data-")));
   const sessionId = extra.sessionId ?? `ipc-${Math.random().toString(16).slice(2)}`;
   const calls = [];
   const env = {
@@ -105,9 +106,25 @@ async function start(t, extra = {}) {
     await fs.rm(root, { recursive: true, force: true });
     await fs.rm(data, { recursive: true, force: true });
   });
-  const rpc = (body, timeoutMs = 2000) =>
-    requestIpc(worker.socketPath, body, { timeoutMs });
-  return { root, data, sessionId, worker, rpc, calls };
+  const rpc = (body, timeoutMs = 2000) => {
+    const req = { ...body };
+    if (req.op === "hook" && req.client === undefined) {
+      req.client = { pid: process.pid, id: randomUUID(), protocolVersion: 2 };
+    }
+    return requestIpc(worker.socketPath, req, { timeoutMs });
+  };
+  return { root, data, sessionId, worker, rpc, calls, env };
+}
+
+async function waitUntil(fn, ms = 2500) {
+  const start = Date.now();
+  let last;
+  while (Date.now() - start < ms) {
+    last = await fn();
+    if (last) return last;
+    await new Promise((resolve) => setTimeout(resolve, 15));
+  }
+  throw new Error("timeout waiting for condition");
 }
 
 const REQUIRED_BUNDLE = ["control.mjs", "worker.mjs", "auth-control.mjs", "setup-control.mjs"];
@@ -159,7 +176,7 @@ test("splitFrames survives chunk boundaries and keeps a partial trail", () => {
 });
 
 test("control capability is required and unknown ops fail", async (t) => {
-  const { rpc, worker } = await start(t);
+  const { rpc, worker, sessionId, root } = await start(t);
   const denied = await rpc({ capability: "nope", op: "status" });
   assert.equal(denied.ok, false);
   const unknown = await rpc({ capability: worker.controlCapability, op: "shutdown-please" });
@@ -167,6 +184,12 @@ test("control capability is required and unknown ops fail", async (t) => {
   const ping = await rpc({ capability: worker.controlCapability, op: "ping" });
   assert.equal(ping.ok, true);
   assert.equal(ping.result.pid, process.pid);
+  assert.equal(ping.result.protocolVersion, 2);
+  assert.equal(ping.result.sessionId, sessionId);
+  assert.equal(ping.result.projectRoot, root);
+  assert.equal(typeof ping.result.workerGeneration, "number");
+  assert.equal(typeof ping.result.settingsRevision, "number");
+  assert.equal(typeof ping.result.configPath, "string");
 });
 
 
@@ -243,6 +266,48 @@ test("runControl hook is fail-open on parse and ipc errors", async () => {
   });
   assert.equal(dead.exitCode, 0);
   assert.equal(dead.stdout, "");
+});
+
+test("skill --plugin-data wins over another plugin's exported CLAUDE_PLUGIN_DATA", async (t) => {
+  // The Bash tool does not export this plugin's data directory, and the Codex
+  // plugin's SessionStart exports its own through CLAUDE_ENV_FILE. Trusting
+  // that value enabled a session the hooks never read.
+  const { worker, data, root, sessionId } = await start(t);
+  const decoy = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cma-ipc-decoy-")));
+  t.after(() => fs.rm(decoy, { recursive: true, force: true }));
+  const out = collectWriter();
+  await runControl({
+    argv: ["on", "--plugin-data", data],
+    stdout: out.stdout,
+    env: {
+      CLAUDE_CODE_SESSION_ID: sessionId,
+      CLAUDE_PROJECT_DIR: root,
+      CLAUDE_PLUGIN_DATA: decoy
+    },
+    spawnImpl: () => {
+      throw new Error("the live worker must be reused");
+    }
+  });
+  assert.equal(JSON.parse(out.text).enabled, true);
+  assert.equal(worker._state().enabled, true);
+  await assert.rejects(fs.access(path.join(decoy, "sessions")));
+});
+
+test("--plugin-data must be a substituted absolute path and never applies to hooks", async () => {
+  const env = { CLAUDE_CODE_SESSION_ID: "s", CLAUDE_PLUGIN_DATA: os.tmpdir() };
+  const noSpawn = () => {
+    throw new Error("should not spawn");
+  };
+  for (const value of ["${CLAUDE_PLUGIN_DATA}", "relative/data", ""]) {
+    await assert.rejects(
+      runControl({ argv: ["status", "--plugin-data", value], env, spawnImpl: noSpawn }),
+      /Invalid --plugin-data/
+    );
+  }
+  await assert.rejects(
+    runControl({ argv: ["hook", "--plugin-data", os.tmpdir()], env, spawnImpl: noSpawn }),
+    { code: "usage" }
+  );
 });
 
 test("control stdout for on/status/doctor is JSON without secrets", async (t) => {
@@ -471,4 +536,132 @@ test("command diagnostics never echo sensitive filesystem error paths", () => {
   assert.match(result.stderr, /cross-model-advisor: control:/);
   assert.equal(result.stdout, "");
   assert.equal(result.stderr.includes(secret), false);
+});
+
+test("settings reports protocol 2 identity after on", async (t) => {
+  const { rpc, worker, sessionId, root } = await start(t);
+  await rpc({ capability: worker.controlCapability, op: "on" });
+  const settings = await rpc({
+    capability: worker.controlCapability,
+    op: "settings",
+    protocolVersion: 2
+  });
+  assert.equal(settings.ok, true);
+  assert.equal(settings.result.ok, true);
+  assert.equal(settings.result.protocolVersion, 2);
+  assert.equal(settings.result.sessionId, sessionId);
+  assert.equal(await fs.realpath(settings.result.projectRoot), await fs.realpath(root));
+  assert.equal(typeof settings.result.workerGeneration, "number");
+  assert.equal(typeof settings.result.settingsRevision, "number");
+  assert.equal(typeof settings.result.enabled, "boolean");
+  assert.ok(Array.isArray(settings.result.advisors));
+});
+
+test("settings and apply reject old protocol versions", async (t) => {
+  const { rpc, worker } = await start(t);
+  await rpc({ capability: worker.controlCapability, op: "on" });
+  const settings = await rpc({ capability: worker.controlCapability, op: "settings" });
+  assert.equal(settings.result?.ok, false);
+  assert.equal(settings.result?.code, "protocol");
+  const ping = await rpc({ capability: worker.controlCapability, op: "ping" });
+  const apply = await rpc({
+    capability: worker.controlCapability,
+    op: "apply",
+    protocolVersion: 1,
+    workerGeneration: ping.result.workerGeneration,
+    settingsRevision: ping.result.settingsRevision,
+    configRevision: "0".repeat(64)
+  });
+  assert.equal(apply.result?.ok, false);
+  assert.equal(apply.result?.code, "protocol");
+});
+
+test("runControl does not ack until stdout write callback completes", async (t) => {
+  const { worker, sessionId, root, data, rpc, env } = await start(t, {
+    reviewApi: async (args) => {
+      await args.tools.call("advise", {
+        severity: "concern",
+        note: "hold-the-envelope",
+        evidence: [{ kind: "observation", eventId: "obs_1", detail: "x" }]
+      });
+      return { usage: { costUsd: "unknown" }, history: [] };
+    }
+  });
+  await rpc({ capability: worker.controlCapability, op: "on" });
+  await rpc({
+    capability: worker.controlCapability,
+    op: "hook",
+    payload: {
+      hook_event_name: "UserPromptSubmit",
+      prompt: "hold stdout",
+      prompt_id: "hold-1"
+    }
+  });
+  await waitUntil(async () => {
+    const status = await rpc({ capability: worker.controlCapability, op: "status" });
+    return status.result.inbox.some((item) => item.status === "pending");
+  });
+
+  let writePending = false;
+  let writeSink = null;
+  let writeReleased = false;
+  let writeStarted;
+  const started = new Promise((resolve) => {
+    writeStarted = resolve;
+  });
+  const releaseWrite = () => {
+    if (writeReleased) return;
+    writeReleased = true;
+    writePending = false;
+    const cb = writeSink;
+    writeSink = null;
+    if (cb) cb();
+  };
+  const stdout = new Writable({
+    write(_chunk, _enc, cb) {
+      writePending = true;
+      writeSink = cb;
+      writeStarted();
+    }
+  });
+  t.after(releaseWrite);
+
+  let ackDuringHold = false;
+  let ackCount = 0;
+  const running = runControl({
+    argv: ["hook"],
+    stdin: Readable.from([
+      JSON.stringify({
+        hook_event_name: "PreToolUse",
+        session_id: sessionId,
+        cwd: root,
+        prompt_id: "hold-1",
+        tool_name: "Read",
+        tool_use_id: "toolu_hold"
+      })
+    ]),
+    stdout,
+    env,
+    request: async (socketPath, req, opts) => {
+      if (req.op === "ack") {
+        ackCount += 1;
+        if (writePending) ackDuringHold = true;
+      }
+      return requestIpc(socketPath, req, opts);
+    },
+    spawnImpl: () => {
+      throw new Error("runControl must not spawn while the worker is live");
+    }
+  });
+
+  await started;
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(ackDuringHold, false);
+  assert.equal(ackCount, 0);
+  releaseWrite();
+  const result = await running;
+  assert.equal(ackDuringHold, false);
+  assert.ok(ackCount >= 1);
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, /hold-the-envelope/);
 });

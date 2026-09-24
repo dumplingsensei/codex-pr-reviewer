@@ -12,6 +12,14 @@ function randomCapability() {
 function randomId(prefix = "id") {
   return `${prefix}_${crypto.randomBytes(8).toString("hex")}`;
 }
+var PROTOCOL_VERSION = 2;
+function createClientMeta() {
+  return {
+    pid: process.pid,
+    id: crypto.randomUUID(),
+    protocolVersion: PROTOCOL_VERSION
+  };
+}
 function encodeFrame(value) {
   return `${JSON.stringify(value)}
 `;
@@ -117,12 +125,35 @@ function socketExists(socketPath) {
     return false;
   }
 }
+function writeCompleted(stream, data) {
+  return new Promise((resolve, reject) => {
+    if (data == null || data === "") {
+      resolve();
+      return;
+    }
+    let settled = false;
+    const done = (error) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve();
+    };
+    try {
+      stream.write(data, done);
+    } catch (error) {
+      done(error);
+    }
+  });
+}
 export {
+  PROTOCOL_VERSION,
+  createClientMeta,
   encodeFrame,
   listenIpc,
   randomCapability,
   randomId,
   requestIpc,
   socketExists,
-  splitFrames
+  splitFrames,
+  writeCompleted
 };

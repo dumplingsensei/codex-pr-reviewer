@@ -4,8 +4,30 @@ import { createRequire as __cmaCreateRequire } from "node:module"; const require
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-var CONFIG_VERSION = 1;
+var CONFIG_VERSION = 2;
+var CONFIG_VERSION_V1 = 1;
 var CONFIG_FILENAME = "cross-model-advisor.json";
+var REASONING_EFFORTS = Object.freeze([
+  "default",
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+]);
+var THINKING_FORMATS = Object.freeze(["openai", "openrouter", "zai"]);
+var THINKING_LEVELS = Object.freeze([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+]);
+var NATIVE_LEVEL_MAX = 64;
 var API_PROVIDERS = Object.freeze([
   "openai",
   "anthropic",
@@ -46,14 +68,32 @@ var CONFIG_KEYS = Object.freeze(["version", "providers", "advisors", "exclude", 
 var API_KEYS = Object.freeze(["kind", "provider", "apiKeyEnv"]);
 var COMPAT_KEYS = Object.freeze(["kind", "provider", "apiKeyEnv", "baseUrl", "models"]);
 var OAUTH_KEYS = Object.freeze(["kind", "provider"]);
-var ADVISOR_KEYS = Object.freeze(["name", "provider", "model", "instructions"]);
+var ADVISOR_KEYS_V1 = Object.freeze(["name", "provider", "model", "instructions"]);
+var ADVISOR_KEYS_V2 = Object.freeze([
+  "name",
+  "provider",
+  "model",
+  "instructions",
+  "enabled",
+  "reasoningEffort"
+]);
 var LIMIT_KEYS = Object.freeze(Object.keys(DEFAULT_LIMITS));
-var MODEL_META_KEYS = Object.freeze([
+var MODEL_META_KEYS_V1 = Object.freeze([
   "contextWindow",
   "maxTokens",
   "reasoning",
   "input",
   "pricing"
+]);
+var MODEL_META_KEYS_V2 = Object.freeze([
+  "contextWindow",
+  "maxTokens",
+  "reasoning",
+  "input",
+  "pricing",
+  "thinkingFormat",
+  "thinkingLevelMap",
+  "supportsReasoningEffort"
 ]);
 var PRICING_KEYS = Object.freeze(["prompt", "completion"]);
 function fail(message) {
@@ -111,9 +151,30 @@ function assertBaseUrl(value, label) {
   if (parsed.protocol === "http:" && isLoopbackHost(parsed.hostname)) return parsed.toString();
   fail(`${label} must use HTTPS (HTTP is allowed only for localhost/loopback)`);
 }
-function assertModelMeta(value, label) {
+function assertNativeLevel(value, label) {
+  if (value === null) return null;
+  if (typeof value !== "string" || value.length === 0 || value.length > NATIVE_LEVEL_MAX) {
+    fail(`${label} must be a bounded native string or null`);
+  }
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code < 32 || code === 127) fail(`${label} must be a bounded native string or null`);
+  }
+  return value;
+}
+function assertThinkingLevelMap(value, label) {
   assertPlainObject(value, label);
-  assertKnownKeys(value, MODEL_META_KEYS, label);
+  assertKnownKeys(value, THINKING_LEVELS, label);
+  const mapped = {};
+  for (const level of THINKING_LEVELS) {
+    if (!Object.hasOwn(value, level)) fail(`${label} is missing ${level}`);
+    mapped[level] = assertNativeLevel(value[level], `${label}.${level}`);
+  }
+  return mapped;
+}
+function assertModelMeta(value, label, version) {
+  assertPlainObject(value, label);
+  assertKnownKeys(value, version === 2 ? MODEL_META_KEYS_V2 : MODEL_META_KEYS_V1, label);
   for (const key of ["contextWindow", "maxTokens", "reasoning", "input"]) {
     if (!(key in value)) fail(`${label} is missing ${key}`);
   }
@@ -148,9 +209,30 @@ function assertModelMeta(value, label) {
     }
     meta.pricing = pricing;
   }
+  const hasFormat = Object.hasOwn(value, "thinkingFormat");
+  const hasMap = Object.hasOwn(value, "thinkingLevelMap");
+  if (hasFormat !== hasMap) {
+    fail(`${label} must pair thinkingFormat with thinkingLevelMap`);
+  }
+  if (hasFormat) {
+    if (typeof value.thinkingFormat !== "string" || !THINKING_FORMATS.includes(value.thinkingFormat)) {
+      fail(`${label}.thinkingFormat must be "openai", "openrouter", or "zai"`);
+    }
+    meta.thinkingFormat = value.thinkingFormat;
+    meta.thinkingLevelMap = assertThinkingLevelMap(value.thinkingLevelMap, `${label}.thinkingLevelMap`);
+  }
+  if (Object.hasOwn(value, "supportsReasoningEffort")) {
+    if (!hasFormat) {
+      fail(`${label}.supportsReasoningEffort is only valid with thinkingFormat and thinkingLevelMap`);
+    }
+    if (typeof value.supportsReasoningEffort !== "boolean") {
+      fail(`${label}.supportsReasoningEffort must be a boolean`);
+    }
+    meta.supportsReasoningEffort = value.supportsReasoningEffort;
+  }
   return meta;
 }
-function assertProvider(value, id) {
+function assertProvider(value, id, version) {
   assertPlainObject(value, `providers.${id}`);
   if (value.kind === "api") {
     const compatible = value.provider === "openai-compatible";
@@ -179,7 +261,7 @@ function assertProvider(value, id) {
         if (typeof modelId !== "string" || modelId.length === 0 || modelId.length > 256 || FORBIDDEN_KEYS.has(modelId)) {
           fail(`providers.${id}.models has an invalid model id`);
         }
-        models[modelId] = assertModelMeta(value.models[modelId], `providers.${id}.models.${modelId}`);
+        models[modelId] = assertModelMeta(value.models[modelId], `providers.${id}.models.${modelId}`, version);
       }
       entry.models = models;
     }
@@ -223,55 +305,76 @@ function assertLimits(value) {
   }
   return limits;
 }
+function assertAdvisor(entry, index, providers, version, names) {
+  const label = `advisors[${index}]`;
+  assertPlainObject(entry, label);
+  assertKnownKeys(entry, version === 2 ? ADVISOR_KEYS_V2 : ADVISOR_KEYS_V1, label);
+  assertIdentifier(entry.name, `${label}.name`);
+  if (names.has(entry.name)) fail(`advisor name ${entry.name} is not unique`);
+  names.add(entry.name);
+  if (typeof entry.provider !== "string" || !Object.hasOwn(providers, entry.provider)) {
+    fail(`${label}.provider is not a configured provider`);
+  }
+  if (typeof entry.model !== "string" || entry.model.length === 0 || entry.model.length > 256) {
+    fail(`${label}.model must be a user-selected model id`);
+  }
+  const provider = providers[entry.provider];
+  if (provider.kind === "api" && provider.provider === "openai-compatible") {
+    if (!Object.hasOwn(provider.models, entry.model)) {
+      fail(`${label}.model is not defined on providers.${entry.provider}`);
+    }
+  }
+  if (typeof entry.instructions !== "string" || entry.instructions.length === 0 || entry.instructions.length > 8192) {
+    fail(`${label}.instructions must be a literal string`);
+  }
+  let enabled = true;
+  let reasoningEffort = "default";
+  if (version === 2) {
+    if (typeof entry.enabled !== "boolean") fail(`${label}.enabled must be a boolean`);
+    enabled = entry.enabled;
+    if (typeof entry.reasoningEffort !== "string" || !REASONING_EFFORTS.includes(entry.reasoningEffort)) {
+      fail(`${label}.reasoningEffort is not a supported value`);
+    }
+    reasoningEffort = entry.reasoningEffort;
+  }
+  return {
+    name: entry.name,
+    provider: entry.provider,
+    model: entry.model,
+    instructions: entry.instructions,
+    enabled,
+    reasoningEffort
+  };
+}
 function validateConfig(value) {
   assertPlainObject(value, "config");
   assertKnownKeys(value, CONFIG_KEYS, "config");
-  if (value.version !== CONFIG_VERSION) fail("config.version must be 1");
+  if (value.version !== CONFIG_VERSION_V1 && value.version !== CONFIG_VERSION) {
+    fail("config.version must be 1 or 2");
+  }
+  const version = value.version;
   if (!("providers" in value) || !("advisors" in value)) {
     fail("config requires providers and advisors");
   }
   assertPlainObject(value.providers, "providers");
   const providerIds = Object.keys(value.providers);
-  if (providerIds.length === 0) fail("providers must include at least one entry");
+  if (version === CONFIG_VERSION_V1 && providerIds.length === 0) {
+    fail("providers must include at least one entry");
+  }
   const providers = {};
   for (const id of providerIds) {
     assertIdentifier(id, `providers key ${id}`);
-    providers[id] = assertProvider(value.providers[id], id);
+    providers[id] = assertProvider(value.providers[id], id, version);
   }
-  if (!Array.isArray(value.advisors) || value.advisors.length === 0) {
+  if (!Array.isArray(value.advisors)) fail("advisors must be an array");
+  if (version === CONFIG_VERSION_V1 && value.advisors.length === 0) {
     fail("advisors must be a nonempty array");
   }
   if (value.advisors.length > 32) fail("too many advisors");
   const names = /* @__PURE__ */ new Set();
-  const advisors = value.advisors.map((entry, index) => {
-    const label = `advisors[${index}]`;
-    assertPlainObject(entry, label);
-    assertKnownKeys(entry, ADVISOR_KEYS, label);
-    assertIdentifier(entry.name, `${label}.name`);
-    if (names.has(entry.name)) fail(`advisor name ${entry.name} is not unique`);
-    names.add(entry.name);
-    if (typeof entry.provider !== "string" || !Object.hasOwn(providers, entry.provider)) {
-      fail(`${label}.provider is not a configured provider`);
-    }
-    if (typeof entry.model !== "string" || entry.model.length === 0 || entry.model.length > 256) {
-      fail(`${label}.model must be a user-selected model id`);
-    }
-    const provider = providers[entry.provider];
-    if (provider.kind === "api" && provider.provider === "openai-compatible") {
-      if (!Object.hasOwn(provider.models, entry.model)) {
-        fail(`${label}.model is not defined on providers.${entry.provider}`);
-      }
-    }
-    if (typeof entry.instructions !== "string" || entry.instructions.length === 0 || entry.instructions.length > 8192) {
-      fail(`${label}.instructions must be a literal string`);
-    }
-    return {
-      name: entry.name,
-      provider: entry.provider,
-      model: entry.model,
-      instructions: entry.instructions
-    };
-  });
+  const advisors = value.advisors.map(
+    (entry, index) => assertAdvisor(entry, index, providers, version, names)
+  );
   return {
     version: CONFIG_VERSION,
     providers,
@@ -378,8 +481,12 @@ export {
   API_PROVIDERS,
   CONFIG_FILENAME,
   CONFIG_VERSION,
+  CONFIG_VERSION_V1,
   DEFAULT_LIMITS,
   OAUTH_PROVIDERS,
+  REASONING_EFFORTS,
+  THINKING_FORMATS,
+  THINKING_LEVELS,
   configFilePath,
   loadConfig,
   runtimeErrors,

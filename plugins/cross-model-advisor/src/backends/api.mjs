@@ -16,7 +16,8 @@ import {
 } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { createCredentialStore } from "../auth.mjs";
-import { createBuiltinProvider } from "../providers.mjs";
+import { createBuiltinProvider, createCompatibleModel } from "../providers.mjs";
+import { planReasoningCompletion, validateReasoning } from "../reasoning.mjs";
 import { groupHistory } from "../session/history.mjs";
 import { toolSchemas } from "../tools.mjs";
 import { API_PROVIDERS, OAUTH_PROVIDERS } from "../config.mjs";
@@ -354,24 +355,7 @@ function compatiblePiModel(provider, advisor) {
   const baseUrl = normalizeBaseUrl(/** @type {{ baseUrl?: string }} */ (provider).baseUrl);
   if (!baseUrl) return { error: issue("config", "openai-compatible provider requires baseUrl") };
   return {
-    model: {
-      id: modelId,
-      name: modelId,
-      api: /** @type {const} */ ("openai-completions"),
-      provider: "openai-compatible",
-      baseUrl,
-      reasoning: Boolean(meta.reasoning),
-      input: meta.input,
-      cost,
-      contextWindow: meta.contextWindow,
-      maxTokens: meta.maxTokens,
-      compat: {
-        supportsStore: false,
-        supportsDeveloperRole: false,
-        supportsReasoningEffort: Boolean(meta.reasoning),
-        supportsStrictMode: false
-      }
-    },
+    model: createCompatibleModel({ id: modelId, baseUrl, meta, cost }),
     pricingKnown: compatiblePricingKnown(meta.pricing)
   };
 }
@@ -857,14 +841,38 @@ function toolResultMessage(call, result, isError) {
 
 /**
  * Offline validation of the registered API/OAuth model. Never refreshes
- * OAuth or calls a provider.
+ * OAuth or calls a provider. Semantic effort/budget checks use the configured
+ * output limit before the snapshot is treated as available.
  *
- * @param {{ provider: unknown, advisor: unknown, env?: NodeJS.ProcessEnv | Record<string, string | undefined> }} args
- * @returns {Promise<{ available: boolean, error?: { code: ApiErrorCode, message: string } }>}
+ * @param {{
+ *   provider: unknown,
+ *   advisor: unknown,
+ *   env?: NodeJS.ProcessEnv | Record<string, string | undefined>,
+ *   maxOutputTokens?: number
+ * }} args
+ * @returns {Promise<{ available: boolean, reasoningInvalid?: true, error?: { code: ApiErrorCode, message: string } }>}
  */
-export async function validateApi({ provider, advisor, env = process.env }) {
+export async function validateApi({
+  provider,
+  advisor,
+  env = process.env,
+  maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS
+}) {
   const prepared = await prepareApi(provider, advisor, env);
   if (prepared.error) return diagnostic(false, prepared.error);
+  const requested = Number.isInteger(maxOutputTokens) ? maxOutputTokens : DEFAULT_MAX_OUTPUT_TOKENS;
+  const ceiling = Math.min(
+    requested,
+    Number.isInteger(prepared.model.maxTokens) ? prepared.model.maxTokens : requested
+  );
+  const reasoning = await validateReasoning(provider, advisor, ceiling);
+  if (!reasoning.ok) {
+    return {
+      available: false,
+      reasoningInvalid: true,
+      error: issue("config", reasoning.error)
+    };
+  }
   return diagnostic(true);
 }
 
@@ -917,7 +925,8 @@ export async function reviewApi({
     Number.isInteger(limits.maxOutputTokens) ? /** @type {number} */ (limits.maxOutputTokens) : DEFAULT_MAX_OUTPUT_TOKENS,
     model.maxTokens
   );
-
+  const reasoning = await validateReasoning(provider, advisor, maxOutputTokens);
+  if (!reasoning.ok) fail("config", reasoning.error);
   const piTools = toPiTools(toolSchemas);
   if (piTools.length === 0) fail("config", "host tool schemas are missing");
   const allowed = HOST_TOOL_NAMES;
@@ -957,6 +966,8 @@ export async function reviewApi({
     env: {}
   };
   if (kind === "api") requestOptions.apiKey = apiKey;
+  const completion = planReasoningCompletion(model, advisor, requestOptions);
+  const requestModel = completion.model ?? model;
 
   let toolCalls = 0;
   try {
@@ -967,7 +978,10 @@ export async function reviewApi({
         fail("context-limit", "required review context exceeds the model or character bound");
       }
 
-      const message = await models.complete(model, context, requestOptions);
+      const message =
+        completion.method === "completeSimple"
+          ? await models.completeSimple(requestModel, context, completion.options)
+          : await models.complete(requestModel, context, completion.options);
       accumulateUsage(usage, message, pricingKnown);
       if (message.stopReason === "aborted" || message.stopReason === "error" || message.stopReason === "length") {
         const code = classifyMessage(message, model, signal);
