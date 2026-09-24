@@ -34,6 +34,9 @@ or prompt, often after Claude had finished.
   nothing to apply to a live session. `limits.reviewTimeoutSeconds` is now at
   most 240, inside the Stop hook's 300-second timeout.
 - **Requires git.** `on` refuses a project outside a git work tree.
+- **Reviewer prompt.** A problem Claude mentions in its final message but
+  leaves in the code is still reported; only a fix in the diff excuses it. An
+  input the request did not mention but the code mishandles is at least a nit.
 
 ## 1.2.0
 
