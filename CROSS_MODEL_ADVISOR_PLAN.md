@@ -55,7 +55,7 @@ Create `plugins/cross-model-advisor/` with a standard `.claude-plugin/plugin.jso
 
 Runtime baseline: **Claude Code 2.1.252 or newer; Node 22.19.0 or newer; macOS and Linux**. Use mature `UserPromptSubmit`, `PreToolUse`, and `PostToolUse` hooks rather than making correctness depend on `PostToolBatch` detection. Do not add a second PostToolBatch/fallback delivery path. Unsupported Node/host/OS is a clear `doctor` error; ordinary hooks remain fail-open and do not start providers.
 
-Pin production dependencies to `@earendil-works/pi-ai@0.85.1` and `ignore@7.0.8`; pin `esbuild@0.28.2` for builds and commit the npm lockfile. Bundle only selected direct provider adapters and their OAuth flows/model assets. No MCP SDK or advisor subprocess transport. Users install without npm bootstrap or a build; a cold plugin-only copy must work without source/node_modules.
+Pin production dependencies to `@earendil-works/pi-ai@0.87.1` and `ignore@7.0.8`; pin `esbuild@0.28.2` for builds and commit the npm lockfile. Bundle only selected direct provider adapters and their OAuth flows/model assets. No MCP SDK or advisor subprocess transport. Users install without npm bootstrap or a build; a cold plugin-only copy must work without source/node_modules.
 
 Keep `package.json`, `package-lock.json`, and the build script in **`tooling/cross-model-advisor/`**, outside the installable marketplace source. Claude automatically runs npm dependency installation for a cached plugin containing root package manifests; bundling alone does not suppress that. The build resolves dependencies from this tooling directory and emits into the plugin's `dist/`. Ship no root package manifest in the plugin. Tests exercise bundled modules/executables, not unbundled source imports that depend on a developer node_modules tree.
 
@@ -302,7 +302,7 @@ The authenticated Claude smoke proves host injection semantics; offline fixtures
 - [Claude hooks](https://code.claude.com/docs/en/hooks): concurrent tool hooks, additionalContext, transcript lag, Stop waking behavior, interrupt and SessionEnd limits.
 - [Claude skills](https://code.claude.com/docs/en/skills): explicit user invocation and session/plugin path substitutions.
 - [Claude plugin reference](https://code.claude.com/docs/en/plugins-reference): install layout, persistent plugin data, command-hook exec arguments.
-- [Pi AI 0.85.1 package](https://www.npmjs.com/package/@earendil-works/pi-ai/v/0.85.1) and [source](https://github.com/earendil-works/pi/tree/v0.85.1/packages/ai): provider registry, explicit auth, Context/tool execution, Node requirement.
+- [Pi AI 0.87.1 package](https://www.npmjs.com/package/@earendil-works/pi-ai/v/0.87.1) and [source](https://github.com/earendil-works/pi/tree/v0.87.1/packages/ai): provider registry, explicit auth, Context/tool execution, Node requirement.
 - [Anthropic authentication restrictions](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use): no third-party Claude.ai subscription login.
 - [Antigravity terms](https://antigravity.google/terms/) and [FAQ](https://antigravity.google/docs/faq/#why-cant-i-use-third-party-software-eg-claude-code-openclaw-opencode-with-my-antigravity-login): third-party OAuth prohibition and Gemini API alternative.
 
@@ -394,7 +394,7 @@ Examples of the distinct SDK option families, not a universal wire schema:
 | Google | Thinking configuration with a supported level or token budget, depending on the model. |
 | OpenRouter and other compatible adapters | Model/route-specific compatibility format; for example nested reasoning effort or thinking enable/type controls, not necessarily OpenAI's `reasoning_effort`. |
 
-Planning-time offline SDK probe confirmed: `gpt-5.6-luna` exposes normalized Off/Minimal/Low/Medium/High/XHigh/Max but maps Minimal to native Low; `kimi-coding/k3` exposes only Low/High/Max; `xai/grok-4.3` exposes Off/Low/Medium/High and maps Off to `none`. These are evidence from pinned SDK 0.85.1, not hard-coded UI lists or live-provider verification.
+Planning-time offline SDK probe confirmed: `openai-codex/gpt-5.6-luna` exposes normalized Off/Minimal/Low/Medium/High/XHigh/Max but maps Minimal to native Low (the `openai` API route offers no Minimal); `kimi-coding/k3` exposes only Low/High/Max; `xai/grok-4.3` exposes Off/Low/Medium/High and maps Off to `none`. These are evidence from pinned SDK 0.87.1, not hard-coded UI lists or live-provider verification.
 
 Budget-based reasoning requires explicit care: inspect SDK budget conversion and any automatic response-token expansion. Preserve configured token/context/time limits; do not silently increase the review ceiling to accommodate thinking. Reject an incompatible effort/budget with an actionable explanation. Verify enough permitted answer space remains and expose bounded/effective budget behavior rather than implying qualitative efforts consume identical resources across providers.
 
