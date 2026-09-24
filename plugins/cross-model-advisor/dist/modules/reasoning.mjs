@@ -289,6 +289,9 @@ async function validateReasoning(providerSlot, advisor, maxOutputTokens) {
   return { ok: true };
 }
 function modelForDefaultGeneration(model) {
+  if (model?.api === "openai-codex-responses" && model.reasoning) {
+    return { ...model, thinkingLevelMap: { ...model.thinkingLevelMap, off: null } };
+  }
   if (model?.provider !== "openai-compatible") return model;
   if (!model.compat?.thinkingFormat && model.thinkingLevelMap == null) return model;
   const compat = { ...model.compat, supportsReasoningEffort: false };

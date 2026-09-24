@@ -841,7 +841,7 @@ test("validateApi accepts new API catalog providers offline", async () => {
   for (const [provider, model] of [
     ["zai", "glm-5.3"],
     ["xai", "grok-4.6"],
-    ["moonshotai", "kimi-k2.5"],
+    ["moonshotai", "kimi-k2.6"],
     ["kimi-coding", "kimi-for-coding"]
   ]) {
     const result = await validateApi({

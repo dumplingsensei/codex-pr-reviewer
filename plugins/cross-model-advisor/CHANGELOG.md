@@ -6,6 +6,24 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.0
+
+The offline model catalog moves to `@earendil-works/pi-ai` 0.87.1.
+
+- **Added.** `gpt-6-sol` and `gpt-6-luna` on `openai`, `openai-codex`, and
+  `github-copilot`; `grok-4.7` on `xai` and `github-copilot`;
+  `claude-opus-5-5` on `anthropic` (`claude-opus-5.5` on `github-copilot`).
+  OpenRouter's catalog also moved (GPT-6, Claude Opus 5.5, Grok 4.7, and
+  others in; some previews and batch variants out).
+- **Removed upstream.** `gpt-5.4` and `gpt-5.4-mini` on `openai-codex`, and
+  `kimi-k2.5`, `kimi-k2-thinking`, `kimi-k2-thinking-turbo`,
+  `kimi-k2-turbo-preview`, `kimi-k2-0905-preview`, and `kimi-k2-0711-preview`
+  on `moonshotai`. An advisor that names one of these is now unavailable with
+  `unknown model`; pick another model in the settings menu.
+- **Codex Default.** SDK 0.87.1 sends reasoning `none` to Codex when no effort
+  is given. Default still omits reasoning there, as documented, so it keeps
+  meaning the provider's own default rather than reasoning off.
+
 ## 2.0.0
 
 The plugin now reviews Claude's work after a turn instead of watching it

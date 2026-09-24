@@ -56,17 +56,6 @@ var init_metrics = __esm({
   }
 });
 
-// node_modules/typebox/build/system/memory/assign.mjs
-function Assign(left, right) {
-  Metrics.assign += 1;
-  return { ...left, ...right };
-}
-var init_assign = __esm({
-  "node_modules/typebox/build/system/memory/assign.mjs"() {
-    init_metrics();
-  }
-});
-
 // node_modules/typebox/build/guard/string.mjs
 function IsBetween(value, min, max) {
   return value >= min && value <= max;
@@ -104,7 +93,7 @@ function NextGraphemeClusterIndex(value, clusterStart) {
   const startCP = value.codePointAt(clusterStart);
   let clusterEnd = clusterStart + CodePointLength(startCP);
   clusterEnd = ConsumeModifiers(value, clusterEnd);
-  while (clusterEnd < value.length - 1 && value[clusterEnd] === "‍") {
+  while (clusterEnd < value.length - 1 && IsZeroWidthJoiner(value.codePointAt(clusterEnd))) {
     const nextCP = value.codePointAt(clusterEnd + 1);
     clusterEnd += 1 + CodePointLength(nextCP);
     clusterEnd = ConsumeModifiers(value, clusterEnd);
@@ -115,7 +104,8 @@ function NextGraphemeClusterIndex(value, clusterStart) {
   return clusterEnd;
 }
 function IsGraphemeCodePoint(value) {
-  return IsHighSurrogate(value) || IsCombiningMark(value) || IsVariationSelector(value) || IsZeroWidthJoiner(value);
+  return value >= 768 && // above special range
+  (IsHighSurrogate(value) || IsCombiningMark(value) || IsVariationSelector(value) || IsZeroWidthJoiner(value));
 }
 function GraphemeCount(value) {
   let count = 0;
@@ -126,55 +116,51 @@ function GraphemeCount(value) {
   }
   return count;
 }
+function IsMinLengthSegmented(value, minLength) {
+  let count = 0;
+  let index3 = 0;
+  while (index3 < value.length) {
+    index3 = NextGraphemeClusterIndex(value, index3);
+    if (++count >= minLength)
+      return true;
+  }
+  return false;
+}
+function IsMaxLengthSegmented(value, maxLength) {
+  let count = 0;
+  let index3 = 0;
+  while (index3 < value.length) {
+    index3 = NextGraphemeClusterIndex(value, index3);
+    if (++count > maxLength)
+      return false;
+  }
+  return true;
+}
 function IsMinLength(value, minLength) {
   if (minLength === 0)
     return true;
-  let count = 0;
+  if (value.length < minLength)
+    return false;
   let index3 = 0;
-  while (index3 < value.length) {
-    index3 = NextGraphemeClusterIndex(value, index3);
-    count++;
-    if (count >= minLength)
+  while (true) {
+    if (IsGraphemeCodePoint(value.charCodeAt(index3))) {
+      return IsMinLengthSegmented(value, minLength);
+    }
+    if (++index3 >= minLength)
       return true;
   }
-  return false;
 }
 function IsMaxLength(value, maxLength) {
-  let count = 0;
-  let index3 = 0;
-  while (index3 < value.length) {
-    index3 = NextGraphemeClusterIndex(value, index3);
-    count++;
-    if (count > maxLength)
-      return false;
-  }
-  return true;
-}
-function IsMinLengthFast(value, minLength) {
-  if (minLength === 0)
+  if (value.length <= maxLength)
     return true;
   let index3 = 0;
-  while (index3 < value.length) {
+  while (true) {
     if (IsGraphemeCodePoint(value.charCodeAt(index3))) {
-      return IsMinLength(value, minLength);
+      return IsMaxLengthSegmented(value, maxLength);
     }
-    index3++;
-    if (index3 >= minLength)
-      return true;
-  }
-  return false;
-}
-function IsMaxLengthFast(value, maxLength) {
-  let index3 = 0;
-  while (index3 < value.length) {
-    if (IsGraphemeCodePoint(value.charCodeAt(index3))) {
-      return IsMaxLength(value, maxLength);
-    }
-    index3++;
-    if (index3 > maxLength)
+    if (++index3 > maxLength)
       return false;
   }
-  return true;
 }
 var init_string = __esm({
   "node_modules/typebox/build/guard/string.mjs"() {
@@ -184,6 +170,7 @@ var init_string = __esm({
 // node_modules/typebox/build/guard/guard.mjs
 var guard_exports = {};
 __export(guard_exports, {
+  Counted: () => Counted,
   Entries: () => Entries,
   EntriesRegExp: () => EntriesRegExp,
   Every: () => Every,
@@ -217,6 +204,8 @@ __export(guard_exports, {
   IsValueLike: () => IsValueLike,
   Keys: () => Keys,
   ShiftLeft: () => ShiftLeft,
+  Some: () => Some,
+  SomeAll: () => SomeAll,
   Symbols: () => Symbols,
   Values: () => Values
 });
@@ -308,25 +297,35 @@ function GraphemeCount2(value) {
   return GraphemeCount(value);
 }
 function IsMaxLength2(value, length) {
-  return IsMaxLengthFast(value, length);
+  return IsMaxLength(value, length);
 }
 function IsMinLength2(value, length) {
-  return IsMinLengthFast(value, length);
+  return IsMinLength(value, length);
 }
 function Every(value, offset, callback) {
-  for (let index3 = offset; index3 < value.length; index3++) {
-    if (!callback(value[index3], index3))
-      return false;
-  }
-  return true;
+  return value.every((item, index3) => index3 < offset || callback(item, index3));
 }
 function EveryAll(value, offset, callback) {
   let result = true;
-  for (let index3 = offset; index3 < value.length; index3++) {
-    if (!callback(value[index3], index3))
+  value.forEach((item, index3) => {
+    if (index3 >= offset && !callback(item, index3))
       result = false;
-  }
+  });
   return result;
+}
+function Some(value, callback) {
+  return value.some((value2, index3) => callback(value2, index3));
+}
+function SomeAll(value, callback) {
+  let result = false;
+  value.forEach((item, index3) => {
+    if (callback(item, index3))
+      result = true;
+  });
+  return result;
+}
+function Counted(value, callback) {
+  return value.reduce((result, value2, index3) => callback(value2, index3) ? ++result : result, 0);
 }
 function ShiftLeft(array, true_, false_) {
   return IsEqual(array.length, 0) ? false_() : true_(array[0], array.slice(1));
@@ -379,6 +378,7 @@ __export(emit_exports, {
   Call: () => Call,
   ConstDeclaration: () => ConstDeclaration,
   Constant: () => Constant,
+  Counted: () => Counted2,
   Entries: () => Entries2,
   Every: () => Every2,
   HasPropertyKey: () => HasPropertyKey2,
@@ -410,10 +410,11 @@ __export(emit_exports, {
   New: () => New,
   Not: () => Not,
   Or: () => Or,
-  PrefixIncrement: () => PrefixIncrement,
   ReduceAnd: () => ReduceAnd,
   ReduceOr: () => ReduceOr,
   Return: () => Return,
+  Some: () => Some2,
+  SomeAll: () => SomeAll2,
   Statements: () => Statements,
   Ternary: () => Ternary
 });
@@ -490,7 +491,16 @@ function IsMaxLength3(value, length) {
   return `Guard.IsMaxLength(${value}, ${length})`;
 }
 function Every2(value, offset, params, expression) {
-  return IsEqual(offset, "0") ? `${value}.every((${params[0]}, ${params[1]}) => ${expression})` : `((value, callback) => { for(let index = ${offset}; index < value.length; index++) if (!callback(value[index], index)) return false; return true })(${value}, (${params[0]}, ${params[1]}) => ${expression})`;
+  return IsEqual(offset, "0") ? `${value}.every((${params[0]}, ${params[1]}) => (${expression}))` : `${value}.every((${params[0]}, ${params[1]}) => (${params[1]} < ${offset}) || (${expression}))`;
+}
+function Some2(value, params, expression) {
+  return `${value}.some((${params[0]}, ${params[1]}) => ${expression})`;
+}
+function SomeAll2(value, params, expression) {
+  return `((value) => { let result = false; value.forEach((${params[0]}, ${params[1]}) => { if (${expression}) result = true }); return result })(${value})`;
+}
+function Counted2(value, params, expression) {
+  return `${value}.reduce((result, ${params[0]}, ${params[1]}) => (${expression}) ? ++result : result, 0)`;
 }
 function Entries2(value) {
   return `Object.entries(${value})`;
@@ -521,6 +531,8 @@ function Member(left, right) {
   return `${left}${IsIdentifier(right) ? `.${right}` : `[${Constant(right)}]`}`;
 }
 function Constant(value) {
+  if (!IsValueLike(value))
+    throw Error("Unsupported Constant");
   return IsString(value) ? JSON.stringify(value) : `${value}`;
 }
 function Ternary(condition, true_, false_) {
@@ -543,9 +555,6 @@ function ReduceAnd(operands) {
 }
 function ReduceOr(operands) {
   return IsEqual(operands.length, 0) ? "false" : operands.reduce((left, right) => Or(left, right));
-}
-function PrefixIncrement(expression) {
-  return `++${expression}`;
 }
 function MultipleOf(dividend, divisor) {
   return `Guard.IsMultipleOf(${dividend}, ${divisor})`;
@@ -663,22 +672,98 @@ var init_guard2 = __esm({
   }
 });
 
+// node_modules/typebox/build/system/settings/settings.mjs
+var settings_exports = {};
+__export(settings_exports, {
+  Get: () => Get,
+  Reset: () => Reset,
+  Set: () => Set2
+});
+function Reset() {
+  settings.immutableTypes = false;
+  settings.maxErrors = 8;
+  settings.maxInstantiationCount = 128;
+  settings.useAcceleration = true;
+  settings.exactOptionalPropertyTypes = false;
+  settings.enumerableKind = false;
+  settings.correctiveParse = false;
+  settings.unionPrioritySort = true;
+}
+function Set2(options) {
+  for (const key of guard_exports.Keys(options)) {
+    const value = options[key];
+    if (value !== void 0) {
+      Object.defineProperty(settings, key, { value });
+    }
+  }
+}
+function Get() {
+  return settings;
+}
+var settings;
+var init_settings = __esm({
+  "node_modules/typebox/build/system/settings/settings.mjs"() {
+    init_guard2();
+    settings = {
+      immutableTypes: false,
+      maxErrors: 8,
+      maxInstantiationCount: 128,
+      useAcceleration: true,
+      exactOptionalPropertyTypes: false,
+      enumerableKind: false,
+      correctiveParse: false,
+      unionPrioritySort: true
+    };
+  }
+});
+
+// node_modules/typebox/build/system/settings/index.mjs
+var init_settings2 = __esm({
+  "node_modules/typebox/build/system/settings/index.mjs"() {
+    init_settings();
+  }
+});
+
+// node_modules/typebox/build/system/memory/freeze.mjs
+function Freeze(value) {
+  return settings_exports.Get().immutableTypes ? Object.freeze(value) : value;
+}
+var init_freeze = __esm({
+  "node_modules/typebox/build/system/memory/freeze.mjs"() {
+    init_settings2();
+  }
+});
+
+// node_modules/typebox/build/system/memory/assign.mjs
+function Assign(left, right) {
+  Metrics.assign += 1;
+  return Freeze({ ...left, ...right });
+}
+var init_assign = __esm({
+  "node_modules/typebox/build/system/memory/assign.mjs"() {
+    init_metrics();
+    init_freeze();
+  }
+});
+
 // node_modules/typebox/build/system/memory/clone.mjs
 function FromClassInstance(value) {
   return value;
 }
-function IsTypeObject(value) {
+function IsSchemaObject(value) {
   return guard_exports.HasPropertyKey(value, "~kind") || guard_exports.HasPropertyKey(value, "~unsafe");
 }
-function FromTypeObject(value) {
+function FromSchemaObject(value) {
   const result = {};
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  for (const key of Object.keys(descriptors)) {
+  for (const key of guard_exports.Keys(value)) {
     if (guard_exports.IsUnsafePropertyKey(key))
       continue;
-    const descriptor = descriptors[key];
-    if (guard_exports.HasPropertyKey(descriptor, "value")) {
-      Object.defineProperty(result, key, { ...descriptor, value: FromValue(descriptor.value) });
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    descriptor.value = FromValue(descriptor.value);
+    if (guard_exports.IsEqual(descriptor.enumerable, true)) {
+      result[key] = descriptor.value;
+    } else {
+      Object.defineProperty(result, key, descriptor);
     }
   }
   return result;
@@ -696,7 +781,7 @@ function FromPlainObject(value) {
   return result;
 }
 function FromObject(value) {
-  return guard_exports.IsClassInstance(value) ? FromClassInstance(value) : IsTypeObject(value) ? FromTypeObject(value) : FromPlainObject(value);
+  return guard_exports.IsClassInstance(value) ? FromClassInstance(value) : IsSchemaObject(value) ? FromSchemaObject(value) : FromPlainObject(value);
 }
 function FromArray(value) {
   return value.map((element) => FromValue(element));
@@ -727,56 +812,6 @@ var init_clone = __esm({
   }
 });
 
-// node_modules/typebox/build/system/settings/settings.mjs
-var settings_exports = {};
-__export(settings_exports, {
-  Get: () => Get,
-  Reset: () => Reset,
-  Set: () => Set2
-});
-function Reset() {
-  settings.immutableTypes = false;
-  settings.maxErrors = 8;
-  settings.useAcceleration = true;
-  settings.exactOptionalPropertyTypes = false;
-  settings.enumerableKind = false;
-  settings.correctiveParse = false;
-  settings.unionPrioritySort = true;
-}
-function Set2(options) {
-  for (const key of guard_exports.Keys(options)) {
-    const value = options[key];
-    if (value !== void 0) {
-      Object.defineProperty(settings, key, { value });
-    }
-  }
-}
-function Get() {
-  return settings;
-}
-var settings;
-var init_settings = __esm({
-  "node_modules/typebox/build/system/settings/settings.mjs"() {
-    init_guard2();
-    settings = {
-      immutableTypes: false,
-      maxErrors: 8,
-      useAcceleration: true,
-      exactOptionalPropertyTypes: false,
-      enumerableKind: false,
-      correctiveParse: false,
-      unionPrioritySort: true
-    };
-  }
-});
-
-// node_modules/typebox/build/system/settings/index.mjs
-var init_settings2 = __esm({
-  "node_modules/typebox/build/system/settings/index.mjs"() {
-    init_settings();
-  }
-});
-
 // node_modules/typebox/build/system/memory/create.mjs
 function MergeHidden(left, right) {
   for (const key of Object.keys(right)) {
@@ -794,15 +829,15 @@ function Merge(left, right) {
 }
 function Create(hidden, enumerable, options = {}) {
   Metrics.create += 1;
-  const settings2 = settings_exports.Get();
   const withOptions = Merge(enumerable, options);
-  const withHidden = settings2.enumerableKind ? Merge(withOptions, hidden) : MergeHidden(withOptions, hidden);
-  return settings2.immutableTypes ? Object.freeze(withHidden) : withHidden;
+  const withHidden = settings_exports.Get().enumerableKind ? Merge(withOptions, hidden) : MergeHidden(withOptions, hidden);
+  return Freeze(withHidden);
 }
 var init_create = __esm({
   "node_modules/typebox/build/system/memory/create.mjs"() {
     init_settings2();
     init_metrics();
+    init_freeze();
   }
 });
 
@@ -810,18 +845,20 @@ var init_create = __esm({
 function Discard(value, propertyKeys) {
   Metrics.discard += 1;
   const result = {};
-  const descriptors = Object.getOwnPropertyDescriptors(Clone(value));
-  const keysToDiscard = new Set(propertyKeys);
-  for (const key of Object.keys(descriptors)) {
-    if (keysToDiscard.has(key))
+  for (const key of guard_exports.Keys(value)) {
+    if (propertyKeys.includes(key))
       continue;
-    Object.defineProperty(result, key, descriptors[key]);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    descriptor.value = Clone(descriptor.value);
+    Object.defineProperty(result, key, descriptor);
   }
-  return result;
+  return Freeze(result);
 }
 var init_discard = __esm({
   "node_modules/typebox/build/system/memory/discard.mjs"() {
+    init_guard2();
     init_metrics();
+    init_freeze();
     init_clone();
   }
 });
@@ -847,12 +884,13 @@ function Update(current, hidden, enumerable) {
       value: enumerable[key]
     });
   }
-  return result;
+  return Freeze(result);
 }
 var init_update = __esm({
   "node_modules/typebox/build/system/memory/update.mjs"() {
     init_settings2();
     init_metrics();
+    init_freeze();
     init_clone();
   }
 });
@@ -2442,6 +2480,9 @@ var init_to_object = __esm({
 });
 
 // node_modules/typebox/build/type/engine/evaluate/composite.mjs
+function CanComposite(type) {
+  return IsObject3(type) || IsTuple(type);
+}
 function IsReadonlyProperty(left, right) {
   return IsReadonly(left) ? IsReadonly(right) ? true : false : false;
 }
@@ -2459,24 +2500,25 @@ function CompositePropertyKey(left, right, key) {
   return key in left ? key in right ? CompositeProperty(left[key], right[key]) : left[key] : key in right ? right[key] : Never();
 }
 function CompositeProperties(left, right) {
-  const keys = /* @__PURE__ */ new Set([...guard_exports.Keys(right), ...guard_exports.Keys(left)]);
-  return [...keys].reduce((result, key) => {
-    return { ...result, [key]: CompositePropertyKey(left, right, key) };
+  const keys = /* @__PURE__ */ new Set([...guard_exports.Keys(left), ...guard_exports.Keys(right)]);
+  const result = [...keys].reduce((result2, key) => {
+    return { ...result2, [key]: CompositePropertyKey(left, right, key) };
   }, {});
+  return result;
 }
 function GetProperties(type) {
-  const result = IsObject3(type) ? type.properties : IsTuple(type) ? TupleElementsToProperties(type.items) : Unreachable();
+  const result = IsObject3(type) ? type.properties : IsTuple(type) ? TupleElementsToProperties(type.items) : {};
   return result;
 }
 function Composite(left, right) {
   const leftProperties = GetProperties(left);
   const rightProperties = GetProperties(right);
   const properties = CompositeProperties(leftProperties, rightProperties);
-  return _Object_(properties);
+  const result = _Object_(properties);
+  return result;
 }
 var init_composite = __esm({
   "node_modules/typebox/build/type/engine/evaluate/composite.mjs"() {
-    init_unreachable2();
     init_guard2();
     init_readonly();
     init_optional();
@@ -2493,39 +2535,43 @@ var init_composite = __esm({
 });
 
 // node_modules/typebox/build/type/engine/evaluate/narrow.mjs
-function Narrow(left, right) {
+function NarrowCompareRule(left, right) {
   const result = Compare(left, right);
-  return guard_exports.IsEqual(result, ResultLeftInside) ? left : guard_exports.IsEqual(result, ResultRightInside) ? right : guard_exports.IsEqual(result, ResultEqual) ? right : Never();
+  return guard_exports.IsEqual(result, CompareResultLeftInside) ? left : guard_exports.IsEqual(result, CompareResultRightInside) ? right : guard_exports.IsEqual(result, CompareResultEqual) ? right : Never();
+}
+function NarrowCompositeRule(left, right) {
+  const canCompositeLeft = CanComposite(left);
+  const canCompositeRight = CanComposite(right);
+  return canCompositeLeft && canCompositeRight ? Composite(left, right) : canCompositeLeft && !canCompositeRight ? left : !canCompositeLeft && canCompositeRight ? right : NarrowCompareRule(left, right);
+}
+function Narrow(left, right) {
+  return IsNever(left) ? left : IsAny(left) ? left : IsUnknown(left) ? right : IsNever(right) ? right : IsAny(right) ? right : IsUnknown(right) ? left : NarrowCompositeRule(left, right);
 }
 var init_narrow = __esm({
   "node_modules/typebox/build/type/engine/evaluate/narrow.mjs"() {
     init_guard2();
+    init_any();
     init_never();
+    init_unknown();
     init_compare();
+    init_composite();
   }
 });
 
 // node_modules/typebox/build/type/engine/evaluate/distribute.mjs
-function IsObjectLike(type) {
-  return IsObject3(type) || IsTuple(type);
-}
-function IsUnionOperand(left, right) {
-  const isUnionLeft = IsUnion(left);
-  const isUnionRight = IsUnion(right);
-  const result = isUnionLeft || isUnionRight;
+function ShouldEvaluate(left, right) {
+  const result = IsUnion(left) || IsUnion(right);
   return result;
 }
 function DistributeOperation(left, right) {
   const evaluatedLeft = EvaluateType(left);
   const evaluatedRight = EvaluateType(right);
-  const isUnionOperand = IsUnionOperand(evaluatedLeft, evaluatedRight);
-  const isObjectLeft = IsObjectLike(evaluatedLeft);
-  const IsObjectRight = IsObjectLike(evaluatedRight);
-  const result = isUnionOperand ? EvaluateIntersect([evaluatedLeft, evaluatedRight]) : isObjectLeft && IsObjectRight ? Composite(evaluatedLeft, evaluatedRight) : isObjectLeft && !IsObjectRight ? evaluatedLeft : !isObjectLeft && IsObjectRight ? evaluatedRight : Narrow(evaluatedLeft, evaluatedRight);
+  const shouldEvaluate = ShouldEvaluate(evaluatedLeft, evaluatedRight);
+  const result = shouldEvaluate ? EvaluateIntersect([evaluatedLeft, evaluatedRight]) : Narrow(evaluatedLeft, evaluatedRight);
   return result;
 }
 function DistributeType(type, types, result = []) {
-  return guard_exports.ShiftLeft(types, (left, right) => DistributeType(type, right, [...result, DistributeOperation(type, left)]), () => guard_exports.IsEqual(result.length, 0) ? [type] : result);
+  return guard_exports.ShiftLeft(types, (left, right) => DistributeType(type, right, [...result, DistributeOperation(left, type)]), () => guard_exports.IsEqual(result.length, 0) ? [type] : result);
 }
 function DistributeUnion(types, distribution, result = []) {
   return guard_exports.ShiftLeft(types, (left, right) => DistributeUnion(right, distribution, [...result, ...Distribute([left], distribution)]), () => result);
@@ -2537,9 +2583,6 @@ var init_distribute = __esm({
   "node_modules/typebox/build/type/engine/evaluate/distribute.mjs"() {
     init_guard2();
     init_union();
-    init_object();
-    init_tuple();
-    init_composite();
     init_narrow();
     init_evaluate2();
     init_evaluate2();
@@ -2552,10 +2595,8 @@ function ExcludeType(left, right) {
   const result = result_exports.IsExtendsTrueLike(check) ? [] : [left];
   return result;
 }
-function ExcludeUnion(types, right) {
-  return types.reduce((result, head) => {
-    return [...result, ...ExcludeType(head, right)];
-  }, []);
+function ExcludeUnion(left, right, result = []) {
+  return guard_exports.ShiftLeft(left, (head, tail) => ExcludeUnion(tail, right, [...result, ...ExcludeType(head, right)]), () => result);
 }
 function ExcludeOperation(left, right) {
   const evaluated = EvaluateType(left);
@@ -2566,6 +2607,7 @@ function ExcludeOperation(left, right) {
 }
 var init_operation = __esm({
   "node_modules/typebox/build/type/engine/exclude/operation.mjs"() {
+    init_guard2();
     init_union();
     init_extends3();
     init_evaluate2();
@@ -2575,19 +2617,18 @@ var init_operation = __esm({
 
 // node_modules/typebox/build/type/engine/evaluate/evaluate.mjs
 function EvaluateDependent(if_, then_, else_) {
-  const intersect = Intersect([if_, then_]);
+  const intersected = EvaluateIntersect([if_, then_]);
   const excluded = ExcludeOperation(else_, if_);
-  const result = EvaluateUnion([intersect, excluded]);
+  const result = EvaluateUnion([intersected, excluded]);
   return result;
 }
-function EvaluateEnum(values) {
-  const result = values.map((value) => Literal(value));
-  return EvaluateUnion(result);
+function EvaluateEnum(values, result = []) {
+  return guard_exports.ShiftLeft(values, (left, right) => EvaluateEnum(right, [...result, Literal(left)]), () => EvaluateUnion(result));
 }
 function EvaluateIntersect(types) {
   const distribution = Distribute(types);
   const broadend = Broaden(distribution);
-  const result = EvaluateUnionFast(broadend);
+  const result = EvaluateUnion(broadend);
   return result;
 }
 function EvaluateTemplateLiteral(pattern) {
@@ -2601,7 +2642,8 @@ function EvaluateUnion(types) {
   return result;
 }
 function EvaluateType(type) {
-  return IsDependent(type) ? EvaluateDependent(type.if, type.then, type.else) : IsEnum(type) ? EvaluateEnum(type.enum) : IsIntersect(type) ? EvaluateIntersect(type.allOf) : IsTemplateLiteral(type) ? EvaluateTemplateLiteral(type.pattern) : IsUnion(type) ? EvaluateUnion(type.anyOf) : type;
+  const result = IsDependent(type) ? EvaluateDependent(type.if, type.then, type.else) : IsEnum(type) ? EvaluateEnum(type.enum) : IsIntersect(type) ? EvaluateIntersect(type.allOf) : IsTemplateLiteral(type) ? EvaluateTemplateLiteral(type.pattern) : IsUnion(type) ? EvaluateUnion(type.anyOf) : type;
+  return result;
 }
 function EvaluateUnionFast(types) {
   const result = guard_exports.IsEqual(types.length, 1) ? types[0] : guard_exports.IsEqual(types.length, 0) ? Never() : Union(types);
@@ -2612,8 +2654,8 @@ var init_evaluate2 = __esm({
     init_guard2();
     init_dependent();
     init_enum();
-    init_literal();
     init_intersect();
+    init_literal();
     init_never();
     init_template_literal();
     init_union();
@@ -2719,13 +2761,12 @@ function FlattenType(type) {
   const result = IsUnion(type) ? Flatten(type.anyOf) : [type];
   return result;
 }
-function Flatten(types) {
-  return types.reduce((result, type) => {
-    return [...result, ...FlattenType(type)];
-  }, []);
+function Flatten(types, result = []) {
+  return guard_exports.ShiftLeft(types, (left, right) => Flatten(right, [...result, ...FlattenType(left)]), () => result);
 }
 var init_flatten = __esm({
   "node_modules/typebox/build/type/engine/evaluate/flatten.mjs"() {
+    init_guard2();
     init_union();
   }
 });
@@ -2984,6 +3025,12 @@ function IntrinsicOrCall(ref, parameters) {
 function Unreachable2() {
   throw Error("Unreachable");
 }
+function DelimitedDecode(input, result = []) {
+  return guard_exports.ShiftLeft(input, (left, right) => DelimitedDecode(right, [...result, left[1]]), () => result);
+}
+function Delimited(input) {
+  return guard_exports.IsEqual(input.length, 3) ? [input[0], ...DelimitedDecode(input[1])] : [];
+}
 function GenericParameterExtendsEqualsMapping(input) {
   return Parameter(input[0], input[2], input[4]);
 }
@@ -3214,17 +3261,11 @@ function _Object_Mapping(input) {
 function ElementNamedMapping(input) {
   return guard_exports.IsEqual(input.length, 5) ? AddReadonlyDeferred(AddOptionalDeferred(input[4])) : guard_exports.IsEqual(input.length, 3) ? input[2] : guard_exports.IsEqual(input.length, 4) ? guard_exports.IsEqual(input[2], "readonly") ? AddReadonlyDeferred(input[3]) : AddOptionalDeferred(input[3]) : Unreachable2();
 }
-function ElementReadonlyOptionalMapping(input) {
-  return AddReadonlyDeferred(AddOptionalDeferred(input[1]));
-}
-function ElementReadonlyMapping(input) {
-  return AddReadonlyDeferred(input[1]);
-}
-function ElementOptionalMapping(input) {
-  return AddOptionalDeferred(input[0]);
-}
 function ElementBaseMapping(input) {
-  return input;
+  if (!guard_exports.IsArray(input) || !guard_exports.IsEqual(input.length, 3))
+    return input;
+  const [isReadonly, type, isOptional] = input;
+  return isReadonly && isOptional ? AddReadonlyDeferred(AddOptionalDeferred(type)) : isReadonly && !isOptional ? AddReadonlyDeferred(type) : !isReadonly && isOptional ? AddOptionalDeferred(type) : type;
 }
 function ElementMapping(input) {
   return guard_exports.IsEqual(input.length, 2) ? Rest(input[1]) : guard_exports.IsEqual(input.length, 1) ? input[0] : Unreachable2();
@@ -3392,35 +3433,24 @@ function ModuleDeclarationDelimiterMapping(input) {
   return input;
 }
 function ModuleDeclarationListMapping(input) {
-  return PropertiesReduce(Delimited(input));
+  return Delimited(input);
 }
 function ModuleDeclarationMapping(input) {
   return input[1];
 }
 function ModuleMapping(input) {
-  const moduleDeclaration = input[0];
-  const moduleDeclarationList = input[1];
-  return ModuleDeferred(memory_exports.Assign(moduleDeclaration, moduleDeclarationList[0]));
+  const [moduleDeclaration, moduleDeclarationList] = [input[0], input[1]];
+  return ModuleDeferred(memory_exports.Assign(moduleDeclaration, PropertiesReduce(moduleDeclarationList)[0]));
 }
 function ScriptMapping(input) {
   return input;
 }
-var DelimitedDecode, Delimited;
 var init_mapping = __esm({
   "node_modules/typebox/build/type/script/mapping.mjs"() {
     init_memory2();
     init_guard2();
     init_types();
     init_action();
-    DelimitedDecode = (input, result = []) => {
-      return input.reduce((result2, left) => {
-        return guard_exports.IsArray(left) && guard_exports.IsEqual(left.length, 2) ? [...result2, left[0]] : [...result2, left];
-      }, []);
-    };
-    Delimited = (input) => {
-      const [left, right] = input;
-      return DelimitedDecode([...left, ...right]);
-    };
   }
 });
 
@@ -3871,7 +3901,7 @@ var init_token = __esm({
 });
 
 // node_modules/typebox/build/type/script/parser.mjs
-var If2, GenericParameterExtendsEquals, GenericParameterExtends, GenericParameterEquals, GenericParameterIdentifier, GenericParameter, GenericParameterList_0, GenericParameterList, GenericParameters, GenericCallArgumentList_0, GenericCallArgumentList, GenericCallArguments, GenericCall, OptionalSemiColon, KeywordString, KeywordNumber, KeywordBoolean, KeywordUndefined, KeywordNull, KeywordInteger, KeywordBigInt, KeywordUnknown, KeywordAny, KeywordObject, KeywordNever, KeywordSymbol, KeywordVoid, KeywordThis, TemplateInterpolate, TemplateSpan, TemplateBody, TemplateLiteralTypes, TemplateLiteral, Dependent2, LiteralBigInt, LiteralBoolean, LiteralNumber, LiteralString, KeyOf, IndexArray_0, IndexArray, Extends2, Base, With, Factor, ExprTermTail, ExprTerm, ExprTail, Expr, ExprReadonly, ExprPipe, GenericType, InferType, Type, PropertyKeyNumber, PropertyKeyIdent, PropertyKeyQuoted, PropertyKeyIndex, PropertyKey, Readonly2, Optional3, Property, PropertyDelimiter, PropertyList_0, PropertyList, Properties, _Object_2, ElementNamed, ElementReadonlyOptional, ElementReadonly, ElementOptional, ElementBase, Element, ElementList_0, ElementList, _Tuple_, ParameterReadonlyOptional, ParameterReadonly, ParameterOptional, ParameterType, ParameterBase, Parameter2, ParameterList_0, ParameterList, _Function_2, _Constructor_, MappedReadonly, MappedOptional, MappedAs, _Mapped_, Reference, WithBigInt, WithNumber, WithBoolean, WithString, WithNull, WithUndefined, WithProperty, WithPropertyList_0, WithPropertyList, WithObject, WithElementList_0, WithElementList, WithArray, WithValue, PatternBigInt, PatternString, PatternNumber, PatternInteger, PatternNever, PatternText, PatternBase, PatternGroup, PatternUnion, PatternTerm, PatternBody, Pattern, InterfaceDeclarationHeritageList_0, InterfaceDeclarationHeritageList, InterfaceDeclarationHeritage, InterfaceDeclarationGeneric, InterfaceDeclaration, TypeAliasDeclarationGeneric, TypeAliasDeclaration, ExportKeyword, ModuleDeclarationDelimiter, ModuleDeclarationList_0, ModuleDeclarationList, ModuleDeclaration, Module, Script;
+var If2, GenericParameterExtendsEquals, GenericParameterExtends, GenericParameterEquals, GenericParameterIdentifier, GenericParameter, GenericParameterList_0, GenericParameterList, GenericParameters, GenericCallArgumentList_0, GenericCallArgumentList, GenericCallArguments, GenericCall, OptionalSemiColon, KeywordString, KeywordNumber, KeywordBoolean, KeywordUndefined, KeywordNull, KeywordInteger, KeywordBigInt, KeywordUnknown, KeywordAny, KeywordObject, KeywordNever, KeywordSymbol, KeywordVoid, KeywordThis, TemplateInterpolate, TemplateSpan, TemplateBody, TemplateLiteralTypes, TemplateLiteral, Dependent2, LiteralBigInt, LiteralBoolean, LiteralNumber, LiteralString, KeyOf, IndexArray_0, IndexArray, Extends2, Base, With, Factor, ExprTermTail, ExprTerm, ExprTail, Expr, ExprReadonly, ExprPipe, GenericType, InferType, Type, PropertyKeyNumber, PropertyKeyIdent, PropertyKeyQuoted, PropertyKeyIndex, PropertyKey, Readonly2, Optional3, Property, PropertyDelimiter, PropertyList_0, PropertyList, Properties, _Object_2, ElementNamed, ElementBase, Element, ElementList_0, ElementList, _Tuple_, ParameterReadonlyOptional, ParameterReadonly, ParameterOptional, ParameterType, ParameterBase, Parameter2, ParameterList_0, ParameterList, _Function_2, _Constructor_, MappedReadonly, MappedOptional, MappedAs, _Mapped_, Reference, WithBigInt, WithNumber, WithBoolean, WithString, WithNull, WithUndefined, WithProperty, WithPropertyList_0, WithPropertyList, WithObject, WithElementList_0, WithElementList, WithArray, WithValue, PatternBigInt, PatternString, PatternNumber, PatternInteger, PatternNever, PatternText, PatternBase, PatternGroup, PatternUnion, PatternTerm, PatternBody, Pattern, InterfaceDeclarationHeritageList_0, InterfaceDeclarationHeritageList, InterfaceDeclarationHeritage, InterfaceDeclarationGeneric, InterfaceDeclaration, TypeAliasDeclarationGeneric, TypeAliasDeclaration, ExportKeyword, ModuleDeclarationDelimiter, ModuleDeclarationList_0, ModuleDeclarationList, ModuleDeclaration, Module, Script;
 var init_parser = __esm({
   "node_modules/typebox/build/type/script/parser.mjs"() {
     init_mapping();
@@ -3882,11 +3912,11 @@ var init_parser = __esm({
     GenericParameterEquals = (input) => If2(If2(Ident(input), ([_0, input2]) => If2(Const("=", input2), ([_1, input3]) => If2(Type(input3), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [GenericParameterEqualsMapping(_0), input2]);
     GenericParameterIdentifier = (input) => If2(Ident(input), ([_0, input2]) => [GenericParameterIdentifierMapping(_0), input2]);
     GenericParameter = (input) => If2(If2(GenericParameterExtendsEquals(input), ([_0, input2]) => [_0, input2], () => If2(GenericParameterExtends(input), ([_0, input2]) => [_0, input2], () => If2(GenericParameterEquals(input), ([_0, input2]) => [_0, input2], () => If2(GenericParameterIdentifier(input), ([_0, input2]) => [_0, input2], () => [])))), ([_0, input2]) => [GenericParameterMapping(_0), input2]);
-    GenericParameterList_0 = (input, result = []) => If2(If2(GenericParameter(input), ([_0, input2]) => If2(Const(",", input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => GenericParameterList_0(input2, [...result, _0]), () => [result, input]);
-    GenericParameterList = (input) => If2(If2(GenericParameterList_0(input), ([_0, input2]) => If2(If2(If2(GenericParameter(input2), ([_02, input3]) => [[_02], input3]), ([_02, input3]) => [_02, input3], () => If2([[], input2], ([_02, input3]) => [_02, input3], () => [])), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [GenericParameterListMapping(_0), input2]);
+    GenericParameterList_0 = (input, result = []) => If2(If2(Const(",", input), ([_0, input2]) => If2(GenericParameter(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => GenericParameterList_0(input2, [...result, _0]), () => [result, input]);
+    GenericParameterList = (input) => If2(If2(If2(GenericParameter(input), ([_0, input2]) => If2(GenericParameterList_0(input2), ([_1, input3]) => If2(If2(Const(",", input3), ([_02, input4]) => [[_02], input4], () => [[], input3]), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [_0, input2], () => If2([[], input], ([_0, input2]) => [_0, input2], () => [])), ([_0, input2]) => [GenericParameterListMapping(_0), input2]);
     GenericParameters = (input) => If2(If2(Const("<", input), ([_0, input2]) => If2(GenericParameterList(input2), ([_1, input3]) => If2(Const(">", input3), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [GenericParametersMapping(_0), input2]);
-    GenericCallArgumentList_0 = (input, result = []) => If2(If2(Type(input), ([_0, input2]) => If2(Const(",", input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => GenericCallArgumentList_0(input2, [...result, _0]), () => [result, input]);
-    GenericCallArgumentList = (input) => If2(If2(GenericCallArgumentList_0(input), ([_0, input2]) => If2(If2(If2(Type(input2), ([_02, input3]) => [[_02], input3]), ([_02, input3]) => [_02, input3], () => If2([[], input2], ([_02, input3]) => [_02, input3], () => [])), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [GenericCallArgumentListMapping(_0), input2]);
+    GenericCallArgumentList_0 = (input, result = []) => If2(If2(Const(",", input), ([_0, input2]) => If2(Type(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => GenericCallArgumentList_0(input2, [...result, _0]), () => [result, input]);
+    GenericCallArgumentList = (input) => If2(If2(If2(Type(input), ([_0, input2]) => If2(GenericCallArgumentList_0(input2), ([_1, input3]) => If2(If2(Const(",", input3), ([_02, input4]) => [[_02], input4], () => [[], input3]), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [_0, input2], () => If2([[], input], ([_0, input2]) => [_0, input2], () => [])), ([_0, input2]) => [GenericCallArgumentListMapping(_0), input2]);
     GenericCallArguments = (input) => If2(If2(Const("<", input), ([_0, input2]) => If2(GenericCallArgumentList(input2), ([_1, input3]) => If2(Const(">", input3), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [GenericCallArgumentsMapping(_0), input2]);
     GenericCall = (input) => If2(If2(Ident(input), ([_0, input2]) => If2(GenericCallArguments(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [GenericCallMapping(_0), input2]);
     OptionalSemiColon = (input) => If2(If2(If2(Const(";", input), ([_0, input2]) => [[_0], input2]), ([_0, input2]) => [_0, input2], () => If2([[], input], ([_0, input2]) => [_0, input2], () => [])), ([_0, input2]) => [OptionalSemiColonMapping(_0), input2]);
@@ -3939,18 +3969,15 @@ var init_parser = __esm({
     Optional3 = (input) => If2(If2(If2(Const("?", input), ([_0, input2]) => [[_0], input2]), ([_0, input2]) => [_0, input2], () => If2([[], input], ([_0, input2]) => [_0, input2], () => [])), ([_0, input2]) => [OptionalMapping(_0), input2]);
     Property = (input) => If2(If2(Readonly2(input), ([_0, input2]) => If2(PropertyKey(input2), ([_1, input3]) => If2(Optional3(input3), ([_2, input4]) => If2(Const(":", input4), ([_3, input5]) => If2(Type(input5), ([_4, input6]) => [[_0, _1, _2, _3, _4], input6]))))), ([_0, input2]) => [PropertyMapping(_0), input2]);
     PropertyDelimiter = (input) => If2(If2(If2(Const(",", input), ([_0, input2]) => If2(Const("\n", input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [_0, input2], () => If2(If2(Const(";", input), ([_0, input2]) => If2(Const("\n", input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [_0, input2], () => If2(If2(Const(",", input), ([_0, input2]) => [[_0], input2]), ([_0, input2]) => [_0, input2], () => If2(If2(Const(";", input), ([_0, input2]) => [[_0], input2]), ([_0, input2]) => [_0, input2], () => If2(If2(Const("\n", input), ([_0, input2]) => [[_0], input2]), ([_0, input2]) => [_0, input2], () => []))))), ([_0, input2]) => [PropertyDelimiterMapping(_0), input2]);
-    PropertyList_0 = (input, result = []) => If2(If2(Property(input), ([_0, input2]) => If2(PropertyDelimiter(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => PropertyList_0(input2, [...result, _0]), () => [result, input]);
-    PropertyList = (input) => If2(If2(PropertyList_0(input), ([_0, input2]) => If2(If2(If2(Property(input2), ([_02, input3]) => [[_02], input3]), ([_02, input3]) => [_02, input3], () => If2([[], input2], ([_02, input3]) => [_02, input3], () => [])), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [PropertyListMapping(_0), input2]);
+    PropertyList_0 = (input, result = []) => If2(If2(PropertyDelimiter(input), ([_0, input2]) => If2(Property(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => PropertyList_0(input2, [...result, _0]), () => [result, input]);
+    PropertyList = (input) => If2(If2(If2(Property(input), ([_0, input2]) => If2(PropertyList_0(input2), ([_1, input3]) => If2(If2(PropertyDelimiter(input3), ([_02, input4]) => [[_02], input4], () => [[], input3]), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [_0, input2], () => If2([[], input], ([_0, input2]) => [_0, input2], () => [])), ([_0, input2]) => [PropertyListMapping(_0), input2]);
     Properties = (input) => If2(If2(Const("{", input), ([_0, input2]) => If2(PropertyList(input2), ([_1, input3]) => If2(Const("}", input3), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [PropertiesMapping(_0), input2]);
     _Object_2 = (input) => If2(Properties(input), ([_0, input2]) => [_Object_Mapping(_0), input2]);
     ElementNamed = (input) => If2(If2(If2(Ident(input), ([_0, input2]) => If2(Const("?", input2), ([_1, input3]) => If2(Const(":", input3), ([_2, input4]) => If2(Const("readonly", input4), ([_3, input5]) => If2(Type(input5), ([_4, input6]) => [[_0, _1, _2, _3, _4], input6]))))), ([_0, input2]) => [_0, input2], () => If2(If2(Ident(input), ([_0, input2]) => If2(Const(":", input2), ([_1, input3]) => If2(Const("readonly", input3), ([_2, input4]) => If2(Type(input4), ([_3, input5]) => [[_0, _1, _2, _3], input5])))), ([_0, input2]) => [_0, input2], () => If2(If2(Ident(input), ([_0, input2]) => If2(Const("?", input2), ([_1, input3]) => If2(Const(":", input3), ([_2, input4]) => If2(Type(input4), ([_3, input5]) => [[_0, _1, _2, _3], input5])))), ([_0, input2]) => [_0, input2], () => If2(If2(Ident(input), ([_0, input2]) => If2(Const(":", input2), ([_1, input3]) => If2(Type(input3), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [_0, input2], () => [])))), ([_0, input2]) => [ElementNamedMapping(_0), input2]);
-    ElementReadonlyOptional = (input) => If2(If2(Const("readonly", input), ([_0, input2]) => If2(Type(input2), ([_1, input3]) => If2(Const("?", input3), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [ElementReadonlyOptionalMapping(_0), input2]);
-    ElementReadonly = (input) => If2(If2(Const("readonly", input), ([_0, input2]) => If2(Type(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [ElementReadonlyMapping(_0), input2]);
-    ElementOptional = (input) => If2(If2(Type(input), ([_0, input2]) => If2(Const("?", input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [ElementOptionalMapping(_0), input2]);
-    ElementBase = (input) => If2(If2(ElementNamed(input), ([_0, input2]) => [_0, input2], () => If2(ElementReadonlyOptional(input), ([_0, input2]) => [_0, input2], () => If2(ElementReadonly(input), ([_0, input2]) => [_0, input2], () => If2(ElementOptional(input), ([_0, input2]) => [_0, input2], () => If2(Type(input), ([_0, input2]) => [_0, input2], () => []))))), ([_0, input2]) => [ElementBaseMapping(_0), input2]);
+    ElementBase = (input) => If2(If2(ElementNamed(input), ([_0, input2]) => [_0, input2], () => If2(If2(Readonly2(input), ([_0, input2]) => If2(Type(input2), ([_1, input3]) => If2(Optional3(input3), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [_0, input2], () => [])), ([_0, input2]) => [ElementBaseMapping(_0), input2]);
     Element = (input) => If2(If2(If2(Const("...", input), ([_0, input2]) => If2(ElementBase(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [_0, input2], () => If2(If2(ElementBase(input), ([_0, input2]) => [[_0], input2]), ([_0, input2]) => [_0, input2], () => [])), ([_0, input2]) => [ElementMapping(_0), input2]);
-    ElementList_0 = (input, result = []) => If2(If2(Element(input), ([_0, input2]) => If2(Const(",", input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => ElementList_0(input2, [...result, _0]), () => [result, input]);
-    ElementList = (input) => If2(If2(ElementList_0(input), ([_0, input2]) => If2(If2(If2(Element(input2), ([_02, input3]) => [[_02], input3]), ([_02, input3]) => [_02, input3], () => If2([[], input2], ([_02, input3]) => [_02, input3], () => [])), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [ElementListMapping(_0), input2]);
+    ElementList_0 = (input, result = []) => If2(If2(Const(",", input), ([_0, input2]) => If2(Element(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => ElementList_0(input2, [...result, _0]), () => [result, input]);
+    ElementList = (input) => If2(If2(If2(Element(input), ([_0, input2]) => If2(ElementList_0(input2), ([_1, input3]) => If2(If2(Const(",", input3), ([_02, input4]) => [[_02], input4], () => [[], input3]), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [_0, input2], () => If2([[], input], ([_0, input2]) => [_0, input2], () => [])), ([_0, input2]) => [ElementListMapping(_0), input2]);
     _Tuple_ = (input) => If2(If2(Const("[", input), ([_0, input2]) => If2(ElementList(input2), ([_1, input3]) => If2(Const("]", input3), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [_Tuple_Mapping(_0), input2]);
     ParameterReadonlyOptional = (input) => If2(If2(Ident(input), ([_0, input2]) => If2(Const("?", input2), ([_1, input3]) => If2(Const(":", input3), ([_2, input4]) => If2(Const("readonly", input4), ([_3, input5]) => If2(Type(input5), ([_4, input6]) => [[_0, _1, _2, _3, _4], input6]))))), ([_0, input2]) => [ParameterReadonlyOptionalMapping(_0), input2]);
     ParameterReadonly = (input) => If2(If2(Ident(input), ([_0, input2]) => If2(Const(":", input2), ([_1, input3]) => If2(Const("readonly", input3), ([_2, input4]) => If2(Type(input4), ([_3, input5]) => [[_0, _1, _2, _3], input5])))), ([_0, input2]) => [ParameterReadonlyMapping(_0), input2]);
@@ -3958,8 +3985,8 @@ var init_parser = __esm({
     ParameterType = (input) => If2(If2(Ident(input), ([_0, input2]) => If2(Const(":", input2), ([_1, input3]) => If2(Type(input3), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [ParameterTypeMapping(_0), input2]);
     ParameterBase = (input) => If2(If2(ParameterReadonlyOptional(input), ([_0, input2]) => [_0, input2], () => If2(ParameterReadonly(input), ([_0, input2]) => [_0, input2], () => If2(ParameterOptional(input), ([_0, input2]) => [_0, input2], () => If2(ParameterType(input), ([_0, input2]) => [_0, input2], () => [])))), ([_0, input2]) => [ParameterBaseMapping(_0), input2]);
     Parameter2 = (input) => If2(If2(If2(Const("...", input), ([_0, input2]) => If2(ParameterBase(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [_0, input2], () => If2(If2(ParameterBase(input), ([_0, input2]) => [[_0], input2]), ([_0, input2]) => [_0, input2], () => [])), ([_0, input2]) => [ParameterMapping(_0), input2]);
-    ParameterList_0 = (input, result = []) => If2(If2(Parameter2(input), ([_0, input2]) => If2(Const(",", input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => ParameterList_0(input2, [...result, _0]), () => [result, input]);
-    ParameterList = (input) => If2(If2(ParameterList_0(input), ([_0, input2]) => If2(If2(If2(Parameter2(input2), ([_02, input3]) => [[_02], input3]), ([_02, input3]) => [_02, input3], () => If2([[], input2], ([_02, input3]) => [_02, input3], () => [])), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [ParameterListMapping(_0), input2]);
+    ParameterList_0 = (input, result = []) => If2(If2(Const(",", input), ([_0, input2]) => If2(Parameter2(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => ParameterList_0(input2, [...result, _0]), () => [result, input]);
+    ParameterList = (input) => If2(If2(If2(Parameter2(input), ([_0, input2]) => If2(ParameterList_0(input2), ([_1, input3]) => If2(If2(Const(",", input3), ([_02, input4]) => [[_02], input4], () => [[], input3]), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [_0, input2], () => If2([[], input], ([_0, input2]) => [_0, input2], () => [])), ([_0, input2]) => [ParameterListMapping(_0), input2]);
     _Function_2 = (input) => If2(If2(Const("(", input), ([_0, input2]) => If2(ParameterList(input2), ([_1, input3]) => If2(Const(")", input3), ([_2, input4]) => If2(Const("=>", input4), ([_3, input5]) => If2(Type(input5), ([_4, input6]) => [[_0, _1, _2, _3, _4], input6]))))), ([_0, input2]) => [_Function_Mapping(_0), input2]);
     _Constructor_ = (input) => If2(If2(Const("new", input), ([_0, input2]) => If2(Const("(", input2), ([_1, input3]) => If2(ParameterList(input3), ([_2, input4]) => If2(Const(")", input4), ([_3, input5]) => If2(Const("=>", input5), ([_4, input6]) => If2(Type(input6), ([_5, input7]) => [[_0, _1, _2, _3, _4, _5], input7])))))), ([_0, input2]) => [_Constructor_Mapping(_0), input2]);
     MappedReadonly = (input) => If2(If2(If2(Const("+", input), ([_0, input2]) => If2(Const("readonly", input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [_0, input2], () => If2(If2(Const("-", input), ([_0, input2]) => If2(Const("readonly", input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [_0, input2], () => If2(If2(Const("readonly", input), ([_0, input2]) => [[_0], input2]), ([_0, input2]) => [_0, input2], () => If2([[], input], ([_0, input2]) => [_0, input2], () => [])))), ([_0, input2]) => [MappedReadonlyMapping(_0), input2]);
@@ -3974,11 +4001,11 @@ var init_parser = __esm({
     WithNull = (input) => If2(Const("null", input), ([_0, input2]) => [WithNullMapping(_0), input2]);
     WithUndefined = (input) => If2(Const("undefined", input), ([_0, input2]) => [WithUndefinedMapping(_0), input2]);
     WithProperty = (input) => If2(If2(PropertyKey(input), ([_0, input2]) => If2(Const(":", input2), ([_1, input3]) => If2(WithValue(input3), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [WithPropertyMapping(_0), input2]);
-    WithPropertyList_0 = (input, result = []) => If2(If2(WithProperty(input), ([_0, input2]) => If2(PropertyDelimiter(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => WithPropertyList_0(input2, [...result, _0]), () => [result, input]);
-    WithPropertyList = (input) => If2(If2(WithPropertyList_0(input), ([_0, input2]) => If2(If2(If2(WithProperty(input2), ([_02, input3]) => [[_02], input3]), ([_02, input3]) => [_02, input3], () => If2([[], input2], ([_02, input3]) => [_02, input3], () => [])), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [WithPropertyListMapping(_0), input2]);
+    WithPropertyList_0 = (input, result = []) => If2(If2(PropertyDelimiter(input), ([_0, input2]) => If2(WithProperty(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => WithPropertyList_0(input2, [...result, _0]), () => [result, input]);
+    WithPropertyList = (input) => If2(If2(If2(WithProperty(input), ([_0, input2]) => If2(WithPropertyList_0(input2), ([_1, input3]) => If2(If2(PropertyDelimiter(input3), ([_02, input4]) => [[_02], input4], () => [[], input3]), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [_0, input2], () => If2([[], input], ([_0, input2]) => [_0, input2], () => [])), ([_0, input2]) => [WithPropertyListMapping(_0), input2]);
     WithObject = (input) => If2(If2(Const("{", input), ([_0, input2]) => If2(WithPropertyList(input2), ([_1, input3]) => If2(Const("}", input3), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [WithObjectMapping(_0), input2]);
-    WithElementList_0 = (input, result = []) => If2(If2(WithValue(input), ([_0, input2]) => If2(Const(",", input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => WithElementList_0(input2, [...result, _0]), () => [result, input]);
-    WithElementList = (input) => If2(If2(WithElementList_0(input), ([_0, input2]) => If2(If2(If2(WithValue(input2), ([_02, input3]) => [[_02], input3]), ([_02, input3]) => [_02, input3], () => If2([[], input2], ([_02, input3]) => [_02, input3], () => [])), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [WithElementListMapping(_0), input2]);
+    WithElementList_0 = (input, result = []) => If2(If2(Const(",", input), ([_0, input2]) => If2(WithValue(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => WithElementList_0(input2, [...result, _0]), () => [result, input]);
+    WithElementList = (input) => If2(If2(If2(WithValue(input), ([_0, input2]) => If2(WithElementList_0(input2), ([_1, input3]) => If2(If2(Const(",", input3), ([_02, input4]) => [[_02], input4], () => [[], input3]), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [_0, input2], () => If2([[], input], ([_0, input2]) => [_0, input2], () => [])), ([_0, input2]) => [WithElementListMapping(_0), input2]);
     WithArray = (input) => If2(If2(Const("[", input), ([_0, input2]) => If2(WithElementList(input2), ([_1, input3]) => If2(Const("]", input3), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [WithArrayMapping(_0), input2]);
     WithValue = (input) => If2(If2(WithBigInt(input), ([_0, input2]) => [_0, input2], () => If2(WithNumber(input), ([_0, input2]) => [_0, input2], () => If2(WithBoolean(input), ([_0, input2]) => [_0, input2], () => If2(WithString(input), ([_0, input2]) => [_0, input2], () => If2(WithNull(input), ([_0, input2]) => [_0, input2], () => If2(WithUndefined(input), ([_0, input2]) => [_0, input2], () => If2(WithObject(input), ([_0, input2]) => [_0, input2], () => If2(WithArray(input), ([_0, input2]) => [_0, input2], () => [])))))))), ([_0, input2]) => [WithValueMapping(_0), input2]);
     PatternBigInt = (input) => If2(Const("-?(?:0|[1-9][0-9]*)n", input), ([_0, input2]) => [PatternBigIntMapping(_0), input2]);
@@ -3993,8 +4020,8 @@ var init_parser = __esm({
     PatternTerm = (input) => If2(If2(PatternBase(input), ([_0, input2]) => If2(PatternBody(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [PatternTermMapping(_0), input2]);
     PatternBody = (input) => If2(If2(PatternUnion(input), ([_0, input2]) => [_0, input2], () => If2(PatternTerm(input), ([_0, input2]) => [_0, input2], () => [])), ([_0, input2]) => [PatternBodyMapping(_0), input2]);
     Pattern = (input) => If2(If2(Const("^", input), ([_0, input2]) => If2(PatternBody(input2), ([_1, input3]) => If2(Const("$", input3), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [PatternMapping(_0), input2]);
-    InterfaceDeclarationHeritageList_0 = (input, result = []) => If2(If2(Type(input), ([_0, input2]) => If2(Const(",", input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => InterfaceDeclarationHeritageList_0(input2, [...result, _0]), () => [result, input]);
-    InterfaceDeclarationHeritageList = (input) => If2(If2(InterfaceDeclarationHeritageList_0(input), ([_0, input2]) => If2(If2(If2(Type(input2), ([_02, input3]) => [[_02], input3]), ([_02, input3]) => [_02, input3], () => If2([[], input2], ([_02, input3]) => [_02, input3], () => [])), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [InterfaceDeclarationHeritageListMapping(_0), input2]);
+    InterfaceDeclarationHeritageList_0 = (input, result = []) => If2(If2(Const(",", input), ([_0, input2]) => If2(Type(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => InterfaceDeclarationHeritageList_0(input2, [...result, _0]), () => [result, input]);
+    InterfaceDeclarationHeritageList = (input) => If2(If2(If2(Type(input), ([_0, input2]) => If2(InterfaceDeclarationHeritageList_0(input2), ([_1, input3]) => If2(If2(Const(",", input3), ([_02, input4]) => [[_02], input4], () => [[], input3]), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [_0, input2], () => If2([[], input], ([_0, input2]) => [_0, input2], () => [])), ([_0, input2]) => [InterfaceDeclarationHeritageListMapping(_0), input2]);
     InterfaceDeclarationHeritage = (input) => If2(If2(If2(Const("extends", input), ([_0, input2]) => If2(InterfaceDeclarationHeritageList(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [_0, input2], () => If2([[], input], ([_0, input2]) => [_0, input2], () => [])), ([_0, input2]) => [InterfaceDeclarationHeritageMapping(_0), input2]);
     InterfaceDeclarationGeneric = (input) => If2(If2(Const("interface", input), ([_0, input2]) => If2(Ident(input2), ([_1, input3]) => If2(GenericParameters(input3), ([_2, input4]) => If2(InterfaceDeclarationHeritage(input4), ([_3, input5]) => If2(Properties(input5), ([_4, input6]) => [[_0, _1, _2, _3, _4], input6]))))), ([_0, input2]) => [InterfaceDeclarationGenericMapping(_0), input2]);
     InterfaceDeclaration = (input) => If2(If2(Const("interface", input), ([_0, input2]) => If2(Ident(input2), ([_1, input3]) => If2(InterfaceDeclarationHeritage(input3), ([_2, input4]) => If2(Properties(input4), ([_3, input5]) => [[_0, _1, _2, _3], input5])))), ([_0, input2]) => [InterfaceDeclarationMapping(_0), input2]);
@@ -4002,8 +4029,8 @@ var init_parser = __esm({
     TypeAliasDeclaration = (input) => If2(If2(Const("type", input), ([_0, input2]) => If2(Ident(input2), ([_1, input3]) => If2(Const("=", input3), ([_2, input4]) => If2(Type(input4), ([_3, input5]) => [[_0, _1, _2, _3], input5])))), ([_0, input2]) => [TypeAliasDeclarationMapping(_0), input2]);
     ExportKeyword = (input) => If2(If2(If2(Const("export", input), ([_0, input2]) => [[_0], input2]), ([_0, input2]) => [_0, input2], () => If2([[], input], ([_0, input2]) => [_0, input2], () => [])), ([_0, input2]) => [ExportKeywordMapping(_0), input2]);
     ModuleDeclarationDelimiter = (input) => If2(If2(If2(Const(";", input), ([_0, input2]) => If2(Const("\n", input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [_0, input2], () => If2(If2(Const(";", input), ([_0, input2]) => [[_0], input2]), ([_0, input2]) => [_0, input2], () => If2(If2(Const("\n", input), ([_0, input2]) => [[_0], input2]), ([_0, input2]) => [_0, input2], () => []))), ([_0, input2]) => [ModuleDeclarationDelimiterMapping(_0), input2]);
-    ModuleDeclarationList_0 = (input, result = []) => If2(If2(ModuleDeclaration(input), ([_0, input2]) => If2(ModuleDeclarationDelimiter(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => ModuleDeclarationList_0(input2, [...result, _0]), () => [result, input]);
-    ModuleDeclarationList = (input) => If2(If2(ModuleDeclarationList_0(input), ([_0, input2]) => If2(If2(If2(ModuleDeclaration(input2), ([_02, input3]) => [[_02], input3]), ([_02, input3]) => [_02, input3], () => If2([[], input2], ([_02, input3]) => [_02, input3], () => [])), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [ModuleDeclarationListMapping(_0), input2]);
+    ModuleDeclarationList_0 = (input, result = []) => If2(If2(ModuleDeclarationDelimiter(input), ([_0, input2]) => If2(ModuleDeclaration(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => ModuleDeclarationList_0(input2, [...result, _0]), () => [result, input]);
+    ModuleDeclarationList = (input) => If2(If2(If2(ModuleDeclaration(input), ([_0, input2]) => If2(ModuleDeclarationList_0(input2), ([_1, input3]) => If2(If2(ModuleDeclarationDelimiter(input3), ([_02, input4]) => [[_02], input4], () => [[], input3]), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [_0, input2], () => If2([[], input], ([_0, input2]) => [_0, input2], () => [])), ([_0, input2]) => [ModuleDeclarationListMapping(_0), input2]);
     ModuleDeclaration = (input) => If2(If2(ExportKeyword(input), ([_0, input2]) => If2(If2(InterfaceDeclarationGeneric(input2), ([_02, input3]) => [_02, input3], () => If2(InterfaceDeclaration(input2), ([_02, input3]) => [_02, input3], () => If2(TypeAliasDeclarationGeneric(input2), ([_02, input3]) => [_02, input3], () => If2(TypeAliasDeclaration(input2), ([_02, input3]) => [_02, input3], () => [])))), ([_1, input3]) => If2(OptionalSemiColon(input3), ([_2, input4]) => [[_0, _1, _2], input4]))), ([_0, input2]) => [ModuleDeclarationMapping(_0), input2]);
     Module = (input) => If2(If2(ModuleDeclaration(input), ([_0, input2]) => If2(ModuleDeclarationList(input2), ([_1, input3]) => [[_0, _1], input3])), ([_0, input2]) => [ModuleMapping(_0), input2]);
     Script = (input) => If2(If2(Module(input), ([_0, input2]) => [_0, input2], () => If2(GenericType(input), ([_0, input2]) => [_0, input2], () => If2(Type(input), ([_0, input2]) => [_0, input2], () => []))), ([_0, input2]) => [ScriptMapping(_0), input2]);
@@ -5086,51 +5113,45 @@ var init_extends3 = __esm({
 
 // node_modules/typebox/build/type/engine/evaluate/compare.mjs
 function Compare(left, right) {
-  const extendsCheck = [
-    IsUnknown(left) ? result_exports.ExtendsFalse() : Extends({}, left, right),
-    IsUnknown(left) ? result_exports.ExtendsTrue({}) : Extends({}, right, left)
-  ];
-  return result_exports.IsExtendsTrueLike(extendsCheck[0]) && result_exports.IsExtendsTrueLike(extendsCheck[1]) ? ResultEqual : result_exports.IsExtendsTrueLike(extendsCheck[0]) && result_exports.IsExtendsFalse(extendsCheck[1]) ? ResultLeftInside : result_exports.IsExtendsFalse(extendsCheck[0]) && result_exports.IsExtendsTrueLike(extendsCheck[1]) ? ResultRightInside : ResultDisjoint;
+  const extendsCheck = [Extends({}, left, right), Extends({}, right, left)];
+  return result_exports.IsExtendsTrueLike(extendsCheck[0]) && result_exports.IsExtendsTrueLike(extendsCheck[1]) ? CompareResultEqual : result_exports.IsExtendsTrueLike(extendsCheck[0]) && result_exports.IsExtendsFalse(extendsCheck[1]) ? CompareResultLeftInside : result_exports.IsExtendsFalse(extendsCheck[0]) && result_exports.IsExtendsTrueLike(extendsCheck[1]) ? CompareResultRightInside : CompareResultDisjoint;
 }
-var ResultEqual, ResultDisjoint, ResultLeftInside, ResultRightInside;
+var CompareResultEqual, CompareResultDisjoint, CompareResultLeftInside, CompareResultRightInside;
 var init_compare = __esm({
   "node_modules/typebox/build/type/engine/evaluate/compare.mjs"() {
-    init_unknown();
     init_extends3();
-    ResultEqual = "equal";
-    ResultDisjoint = "disjoint";
-    ResultLeftInside = "left-inside";
-    ResultRightInside = "right-inside";
+    CompareResultEqual = 0;
+    CompareResultDisjoint = 1;
+    CompareResultLeftInside = 2;
+    CompareResultRightInside = 3;
   }
 });
 
 // node_modules/typebox/build/type/engine/evaluate/broaden.mjs
-function BroadFilter(type, types) {
-  return types.filter((left) => {
-    return Compare(type, left) === ResultRightInside ? false : true;
-  });
+function BroadenFilter(type, types, result = [], all = types) {
+  return guard_exports.ShiftLeft(types, (left, right) => {
+    const compare = Compare(type, left);
+    return guard_exports.IsEqual(compare, CompareResultLeftInside) || guard_exports.IsEqual(compare, CompareResultEqual) ? all : guard_exports.IsEqual(compare, CompareResultDisjoint) ? BroadenFilter(type, right, [...result, left], all) : BroadenFilter(type, right, result, all);
+  }, () => [...result, type]);
 }
-function IsBroadestType(type, types) {
-  const result = types.some((left) => {
-    const result2 = Compare(type, left);
-    return guard_exports.IsEqual(result2, ResultLeftInside) || guard_exports.IsEqual(result2, ResultEqual);
-  });
-  return guard_exports.IsEqual(result, false);
-}
-function BroadenType(type, types) {
+function BroadenType(type, types, result) {
   const evaluated = EvaluateType(type);
-  return IsAny(evaluated) ? [evaluated] : IsBroadestType(evaluated, types) ? [...BroadFilter(evaluated, types), evaluated] : types;
-}
-function BroadenTypes(types) {
-  return types.reduce((result, left) => {
-    return IsObject3(left) ? [...result, left] : (
-      // push
-      IsNever(left) ? result : (
-        // ignore
-        BroadenType(left, result)
+  return IsAny(evaluated) ? [evaluated] : (
+    // terminate (always the most broad)
+    IsUnknown(evaluated) ? [evaluated] : (
+      // terminate (always the most broad)
+      IsNever(evaluated) ? BroadenTypes(types, result) : (
+        // ignored: never is dropped
+        IsObject3(evaluated) ? BroadenTypes(types, [...result, evaluated]) : (
+          // objects are always considered (too expensive to compare)
+          BroadenTypes(types, BroadenFilter(evaluated, result))
+        )
       )
-    );
-  }, []);
+    )
+  );
+}
+function BroadenTypes(types, result = []) {
+  return guard_exports.ShiftLeft(types, (left, right) => BroadenType(left, right, result), () => result);
 }
 function Broaden(types) {
   const broadened = BroadenTypes(types);
@@ -5143,6 +5164,7 @@ var init_broaden = __esm({
     init_any();
     init_never();
     init_object();
+    init_unknown();
     init_compare();
     init_flatten();
     init_evaluate2();
@@ -5193,8 +5215,12 @@ function BuildDistributionArray(parameters, names2) {
 function ZipDistributionArray(arguments_, distributionArray, result = []) {
   return guard_exports.ShiftLeft(arguments_, (argumentLeft, argumentRight) => guard_exports.ShiftLeft(distributionArray, (booleanLeft, booleanRight) => ZipDistributionArray(argumentRight, booleanRight, [...result, [booleanLeft, argumentLeft]]), () => result), () => result);
 }
+function CanonicalArgument(type) {
+  return IsTemplateLiteral(type) ? EvaluateTemplateLiteral(type.pattern) : IsEnum(type) ? EvaluateEnum(type.enum) : type;
+}
 function Expand(type) {
-  return IsUnion(type) ? [...type.anyOf] : [type];
+  const canonicalArgument = CanonicalArgument(type);
+  return IsUnion(canonicalArgument) ? [...canonicalArgument.anyOf] : [canonicalArgument];
 }
 function Append(current, type) {
   return current.reduce((result, left) => [...result, [...left, type]], []);
@@ -5220,7 +5246,11 @@ var init_distribute_arguments = __esm({
     init_guard2();
     init_union();
     init_deferred();
+    init_enum();
+    init_template_literal();
     init_ref();
+    init_evaluate2();
+    init_evaluate2();
   }
 });
 
@@ -5286,6 +5316,21 @@ var init_resolve_arguments = __esm({
 });
 
 // node_modules/typebox/build/type/engine/call/instantiate.mjs
+function InstantiationAssert() {
+  if (guard_exports.IsLessThan(instantiationCount, settings_exports.Get().maxInstantiationCount))
+    return;
+  throw Error("Type instantiation is excessively deep and possibly infinite");
+}
+function InstantiationIncrement() {
+  InstantiationAssert();
+  instantiationCount++;
+  instantiationDepth++;
+}
+function InstantiationDecrement() {
+  instantiationDepth--;
+  if (guard_exports.IsEqual(instantiationDepth, 0))
+    instantiationCount = 0;
+}
 function Peek(state2) {
   const result = guard_exports.IsGreaterThan(state2.callstack.length, 0) ? state2.callstack[state2.callstack.length - 1] : "";
   return result;
@@ -5295,12 +5340,20 @@ function IsTailCall(state2, name) {
   return result;
 }
 function CallDispatch(context, state2, target, parameters, expression, arguments_) {
-  const argumentsContext = ResolveArgumentsContext(context, state2, parameters, arguments_);
-  const returnType = InstantiateType(argumentsContext, State([...state2["callstack"], target["$ref"]], state2["visited"]), expression);
-  return InstantiateType(argumentsContext, State([], []), returnType);
+  InstantiationIncrement();
+  try {
+    const argumentsContext = ResolveArgumentsContext(context, state2, parameters, arguments_);
+    const returnType = InstantiateType(argumentsContext, State([...state2["callstack"], target["$ref"]], state2["visited"]), expression);
+    return InstantiateType(argumentsContext, State([], []), returnType);
+  } finally {
+    InstantiationDecrement();
+  }
 }
 function CallDistributed(context, state2, target, parameters, expression, distributedArguments) {
-  return distributedArguments.reduce((result, arguments_) => [...result, CallDispatch(context, state2, target, parameters, expression, arguments_)], []);
+  return distributedArguments.reduce((result, arguments_) => {
+    const returnType = CallDispatch(context, state2, target, parameters, expression, arguments_);
+    return [...result, returnType];
+  }, []);
 }
 function CallImmediate(context, state2, target, parameters, expression, arguments_) {
   const distributedArguments = DistributeArguments(parameters, arguments_, expression);
@@ -5316,8 +5369,10 @@ function CallInstantiate(context, state2, target, arguments_) {
   const result = IsGeneric(type) ? IsTailCall(state2, name) ? CallConstruct(Ref(name), instantiatedArguments) : CallImmediate(context, state2, Ref(name), type.parameters, type.expression, instantiatedArguments) : CallConstruct(target, instantiatedArguments);
   return result;
 }
+var instantiationDepth, instantiationCount;
 var init_instantiate6 = __esm({
   "node_modules/typebox/build/type/engine/call/instantiate.mjs"() {
+    init_settings2();
     init_guard2();
     init_call();
     init_ref();
@@ -5329,6 +5384,8 @@ var init_instantiate6 = __esm({
     init_distribute_arguments();
     init_resolve_target();
     init_resolve_arguments();
+    instantiationDepth = 0;
+    instantiationCount = 0;
   }
 });
 
@@ -5677,10 +5734,8 @@ function ExtractType(left, right) {
   const result = result_exports.IsExtendsTrueLike(check) ? [left] : [];
   return result;
 }
-function ExtractUnion(types, right) {
-  return types.reduce((result, head) => {
-    return [...result, ...ExtractType(head, right)];
-  }, []);
+function ExtractUnion(left, right, result = []) {
+  return guard_exports.ShiftLeft(left, (head, tail) => ExtractUnion(tail, right, [...result, ...ExtractType(head, right)]), () => result);
 }
 function ExtractOperation(left, right) {
   const evaluated = EvaluateType(left);
@@ -5691,6 +5746,7 @@ function ExtractOperation(left, right) {
 }
 var init_operation2 = __esm({
   "node_modules/typebox/build/type/engine/extract/operation.mjs"() {
+    init_guard2();
     init_union();
     init_extends3();
     init_evaluate2();
@@ -7601,8 +7657,7 @@ var init_pick2 = __esm({
 // node_modules/typebox/build/type/engine/priority/priority.mjs
 function Comparer(left, right) {
   const compareResult = Compare(left, right);
-  const result = guard_exports.IsEqual(compareResult, "right-inside") ? 1 : guard_exports.IsEqual(compareResult, "disjoint") ? 1 : 0;
-  return result;
+  return guard_exports.IsEqual(compareResult, CompareResultRightInside) ? 1 : guard_exports.IsEqual(compareResult, CompareResultDisjoint) ? 1 : 0;
 }
 function Insert(type, types, result = []) {
   return guard_exports.ShiftLeft(types, (left, right) => guard_exports.IsEqual(Comparer(type, left), 1) ? Insert(type, right, [...result, left]) : [...result, type, ...types], () => [...result, type]);
@@ -7973,12 +8028,30 @@ var init_build = __esm({
 function createAssistantMessageEventStream() {
   return new AssistantMessageEventStream();
 }
-var EventStream, AssistantMessageEventStream;
+var FifoQueue, EventStream, AssistantMessageEventStream;
 var init_event_stream = __esm({
   "node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js"() {
+    FifoQueue = class {
+      incoming = [];
+      outgoing = [];
+      get length() {
+        return this.incoming.length + this.outgoing.length;
+      }
+      enqueue(value) {
+        this.incoming.push(value);
+      }
+      dequeue() {
+        if (this.outgoing.length === 0) {
+          while (this.incoming.length > 0) {
+            this.outgoing.push(this.incoming.pop());
+          }
+        }
+        return this.outgoing.pop();
+      }
+    };
     EventStream = class {
-      queue = [];
-      waiting = [];
+      queue = new FifoQueue();
+      waiting = new FifoQueue();
       done = false;
       finalResultPromise;
       resolveFinalResult;
@@ -7998,11 +8071,11 @@ var init_event_stream = __esm({
           this.done = true;
           this.resolveFinalResult(this.extractResult(event));
         }
-        const waiter = this.waiting.shift();
+        const waiter = this.waiting.dequeue();
         if (waiter) {
           waiter({ value: event, done: false });
         } else {
-          this.queue.push(event);
+          this.queue.enqueue(event);
         }
       }
       end(result) {
@@ -8011,18 +8084,18 @@ var init_event_stream = __esm({
           this.resolveFinalResult(result);
         }
         while (this.waiting.length > 0) {
-          const waiter = this.waiting.shift();
+          const waiter = this.waiting.dequeue();
           waiter({ value: void 0, done: true });
         }
       }
       async *[Symbol.asyncIterator]() {
         while (true) {
           if (this.queue.length > 0) {
-            yield this.queue.shift();
+            yield this.queue.dequeue();
           } else if (this.done) {
             return;
           } else {
-            const result = await new Promise((resolve) => this.waiting.push(resolve));
+            const result = await new Promise((resolve) => this.waiting.enqueue(resolve));
             if (result.done)
               return;
             yield result.value;
@@ -8617,6 +8690,195 @@ var init_models_store = __esm({
   }
 });
 
+// node_modules/@earendil-works/pi-ai/dist/utils/text.js
+function contentText(content, separator = "\n") {
+  if (typeof content === "string")
+    return content;
+  return content.filter((block) => block.type === "text").map((block) => block.text).join(separator);
+}
+function getSystemMessageText(message) {
+  const parts = [contentText(message.content)];
+  for (const text of Object.values(message.sections ?? {})) {
+    if (text !== null)
+      parts.push(text);
+  }
+  return parts.filter((part) => part.length > 0).join("\n\n");
+}
+function renderSystemMessageUpdate(message) {
+  const parts = [];
+  const text = contentText(message.content);
+  if (text.length > 0)
+    parts.push(text);
+  for (const [name, value] of Object.entries(message.sections ?? {})) {
+    parts.push(value === null ? `Removed system prompt section "${name}".` : `Updated system prompt section "${name}":
+
+${value}`);
+  }
+  return parts.join("\n\n");
+}
+var init_text = __esm({
+  "node_modules/@earendil-works/pi-ai/dist/utils/text.js"() {
+  }
+});
+
+// node_modules/@earendil-works/pi-ai/dist/utils/transcript.js
+function createInitialSystemMessage(systemPrompt, tools) {
+  const hasSystemPrompt = systemPrompt !== void 0 && systemPrompt.length > 0;
+  const hasTools = tools !== void 0 && tools.length > 0;
+  if (!hasSystemPrompt && !hasTools)
+    return void 0;
+  return {
+    role: "system",
+    content: systemPrompt ?? "",
+    ...hasTools ? { toolsAdded: tools } : {},
+    timestamp: 0
+  };
+}
+function normalizeContext(context) {
+  const initialMessage = createInitialSystemMessage(context.systemPrompt, context.tools);
+  const messages = initialMessage ? [initialMessage, ...context.messages] : context.messages;
+  return { messages };
+}
+function isSystemMessage(message) {
+  return message.role === "system";
+}
+function getInitialSystemMessage(messages) {
+  const first = messages[0];
+  return first && isSystemMessage(first) ? first : void 0;
+}
+function withoutInitialSystemMessage(messages) {
+  return getInitialSystemMessage(messages) ? messages.slice(1) : messages;
+}
+function getCurrentTools(messages) {
+  const tools = /* @__PURE__ */ new Map();
+  for (const message of messages) {
+    if (!isSystemMessage(message))
+      continue;
+    for (const tool of message.toolsRemoved ?? [])
+      tools.delete(tool.name);
+    for (const tool of message.toolsAdded ?? [])
+      tools.set(tool.name, tool);
+  }
+  return [...tools.values()];
+}
+function getCurrentSystemMessage(messages) {
+  const content = [];
+  const sections = /* @__PURE__ */ new Map();
+  let timestamp;
+  for (const message of messages) {
+    if (!isSystemMessage(message))
+      continue;
+    timestamp ??= message.timestamp;
+    const text = contentText(message.content);
+    if (text.length > 0)
+      content.push(text);
+    for (const [name, value] of Object.entries(message.sections ?? {})) {
+      if (value === null)
+        sections.delete(name);
+      else
+        sections.set(name, value);
+    }
+  }
+  const tools = getCurrentTools(messages);
+  if (timestamp === void 0 && tools.length === 0)
+    return void 0;
+  return {
+    role: "system",
+    content: content.join("\n\n"),
+    ...sections.size > 0 ? { sections: Object.fromEntries(sections) } : {},
+    ...tools.length > 0 ? { toolsAdded: tools } : {},
+    timestamp: timestamp ?? 0
+  };
+}
+function getCurrentSystemPrompt(messages) {
+  const message = getCurrentSystemMessage(messages);
+  return message ? getSystemMessageText(message) : "";
+}
+function collapseSystemMessages(context) {
+  const head = getCurrentSystemMessage(context.messages);
+  const messages = context.messages.filter((message) => message.role !== "system");
+  return { messages: head ? [head, ...messages] : messages };
+}
+function resolveTranscript(context, supportsMidConvoSystemMessages) {
+  return supportsMidConvoSystemMessages ? context : collapseSystemMessages(context);
+}
+function toToolDeclaration(tool) {
+  return {
+    name: tool.name,
+    description: tool.description,
+    parameters: JSON.parse(JSON.stringify(tool.parameters)),
+    ...tool.constrainedSampling === void 0 ? {} : { constrainedSampling: tool.constrainedSampling }
+  };
+}
+function declarationsEqual(left, right) {
+  return JSON.stringify(toToolDeclaration(left)) === JSON.stringify(toToolDeclaration(right));
+}
+function getToolStateChanges(previous, current) {
+  const previousTools = new Map(previous.map((tool) => [tool.name, tool]));
+  const currentTools = new Map(current.map((tool) => [tool.name, tool]));
+  return {
+    toolsAdded: current.filter((tool) => {
+      const previousTool = previousTools.get(tool.name);
+      return previousTool === void 0 || !declarationsEqual(previousTool, tool);
+    }).map(toToolDeclaration),
+    toolsRemoved: previous.filter((tool) => {
+      const currentTool = currentTools.get(tool.name);
+      return currentTool === void 0 || !declarationsEqual(tool, currentTool);
+    }).map((tool) => ({ name: tool.name }))
+  };
+}
+function getDeclaredTools(messages) {
+  const definitions = /* @__PURE__ */ new Map();
+  for (const message of messages) {
+    if (!isSystemMessage(message))
+      continue;
+    for (const tool of message.toolsAdded ?? [])
+      definitions.set(tool.name, tool);
+  }
+  return [...definitions.values()];
+}
+function hasToolRedefinitions(messages) {
+  const declared = /* @__PURE__ */ new Map();
+  for (const message of messages) {
+    if (!isSystemMessage(message))
+      continue;
+    for (const tool of message.toolsAdded ?? []) {
+      const previous = declared.get(tool.name);
+      if (previous !== void 0 && !declarationsEqual(previous, tool))
+        return true;
+      declared.set(tool.name, tool);
+    }
+  }
+  return false;
+}
+function hasNonAdditiveToolChanges(messages) {
+  const declared = /* @__PURE__ */ new Set();
+  for (const message of messages) {
+    if (!isSystemMessage(message))
+      continue;
+    if ((message.toolsRemoved?.length ?? 0) > 0)
+      return true;
+    for (const tool of message.toolsAdded ?? []) {
+      if (declared.has(tool.name))
+        return true;
+      declared.add(tool.name);
+    }
+  }
+  return false;
+}
+function resolveTranscriptTools(messages, supportsToolAdditions) {
+  const anchorsAdditions = supportsToolAdditions && !hasNonAdditiveToolChanges(messages);
+  return {
+    requestTools: anchorsAdditions ? getInitialSystemMessage(messages)?.toolsAdded ?? [] : getCurrentTools(messages),
+    anchorsAdditions
+  };
+}
+var init_transcript = __esm({
+  "node_modules/@earendil-works/pi-ai/dist/utils/transcript.js"() {
+    init_text();
+  }
+});
+
 // node_modules/@earendil-works/pi-ai/dist/models.js
 function mergeHeaders(base, override) {
   if (!base && !override)
@@ -8784,6 +9046,7 @@ var init_models = __esm({
     init_resolve();
     init_models_store();
     init_abort();
+    init_transcript();
     init_resolve();
     ModelsImpl = class {
       providers = /* @__PURE__ */ new Map();
@@ -9129,20 +9392,22 @@ var init_models = __esm({
         return { requestModel, requestOptions };
       }
       stream(model, context, options) {
+        const transcript = normalizeContext(context);
         return lazyStream(model, async () => {
           const provider = this.requireProvider(model);
           const { requestModel, requestOptions } = await this.applyAuth(model, options);
-          return provider.stream(requestModel, context, requestOptions);
+          return provider.stream(requestModel, transcript, requestOptions);
         });
       }
       async complete(model, context, options) {
         return this.stream(model, context, options).result();
       }
       streamSimple(model, context, options) {
+        const transcript = normalizeContext(context);
         return lazyStream(model, async () => {
           const provider = this.requireProvider(model);
           const { requestModel, requestOptions } = await this.applyAuth(model, options);
-          return provider.streamSimple(requestModel, context, requestOptions);
+          return provider.streamSimple(requestModel, transcript, requestOptions);
         });
       }
       async completeSimple(model, context, options) {
@@ -9242,6 +9507,13 @@ function toolResultToText(message) {
   return [message.toolName, ...message.content.map((block) => contentToText([block]))].join("\n");
 }
 function messageToText(message) {
+  if (message.role === "system") {
+    return [
+      getSystemMessageText(message),
+      ...message.toolsRemoved?.map((tool) => `tool-:${JSON.stringify(tool)}`) ?? [],
+      ...message.toolsAdded?.map((tool) => `tool+:${JSON.stringify(tool)}`) ?? []
+    ].filter((part) => part.length > 0).join("\n");
+  }
   if (message.role === "user") {
     return contentToText(message.content);
   }
@@ -9251,17 +9523,7 @@ function messageToText(message) {
   return toolResultToText(message);
 }
 function serializeContext(context) {
-  const parts = [];
-  if (context.systemPrompt) {
-    parts.push(`system:${context.systemPrompt}`);
-  }
-  for (const message of context.messages) {
-    parts.push(`${message.role}:${messageToText(message)}`);
-  }
-  if (context.tools?.length) {
-    parts.push(`tools:${JSON.stringify(context.tools)}`);
-  }
-  return parts.join("\n\n");
+  return context.messages.map((message) => `${message.role}:${messageToText(message)}`).join("\n\n");
 }
 function commonPrefixLength(a, b) {
   const length = Math.min(a.length, b.length);
@@ -9477,6 +9739,7 @@ function createFauxCore(options) {
     baseUrl: DEFAULT_BASE_URL,
     reasoning: definition.reasoning ?? false,
     input: definition.input ?? ["text", "image"],
+    inputLimits: definition.inputLimits,
     cost: definition.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: definition.contextWindow ?? 128e3,
     maxTokens: definition.maxTokens ?? 16384
@@ -9627,6 +9890,7 @@ var init_faux = __esm({
   "node_modules/@earendil-works/pi-ai/dist/providers/faux.js"() {
     init_models();
     init_event_stream();
+    init_text();
     DEFAULT_API = "faux";
     DEFAULT_PROVIDER = "faux";
     DEFAULT_MODEL_ID = "faux-1";
@@ -10430,8 +10694,13 @@ var init_assistant_message_frame = __esm({
 function isContextOverflow(message, contextWindow) {
   if (message.stopReason === "error" && message.errorMessage) {
     const isNonOverflow = NON_OVERFLOW_PATTERNS.some((p) => p.test(message.errorMessage));
-    if (!isNonOverflow && OVERFLOW_PATTERNS.some((p) => p.test(message.errorMessage))) {
-      return true;
+    if (!isNonOverflow) {
+      if (OVERFLOW_PATTERNS.some((p) => p.test(message.errorMessage))) {
+        return true;
+      }
+      if (message.provider === "cerebras" && CEREBRAS_BODYLESS_OVERFLOW_PATTERN.test(message.errorMessage)) {
+        return true;
+      }
     }
   }
   if (contextWindow && message.stopReason === "stop") {
@@ -10454,12 +10723,12 @@ function isRecoverableLength(message, desiredMaxOutput) {
 function getOverflowPatterns() {
   return [...OVERFLOW_PATTERNS];
 }
-var OVERFLOW_PATTERNS, NON_OVERFLOW_PATTERNS;
+var OVERFLOW_PATTERNS, CEREBRAS_BODYLESS_OVERFLOW_PATTERN, NON_OVERFLOW_PATTERNS;
 var init_overflow = __esm({
   "node_modules/@earendil-works/pi-ai/dist/utils/overflow.js"() {
     OVERFLOW_PATTERNS = [
-      /prompt is too long/i,
-      // Anthropic token overflow
+      /prompt (?:is )?too long/i,
+      // Anthropic and z.ai token overflow
       /request_too_large/i,
       // Anthropic request byte-size overflow (HTTP 413)
       /input is too long for requested model/i,
@@ -10504,11 +10773,10 @@ var init_overflow = __esm({
       // Generic fallback
       /too many tokens/i,
       // Generic fallback
-      /token limit exceeded/i,
+      /token limit exceeded/i
       // Generic fallback
-      /^4(?:00|13)\s*(?:status code)?\s*\(no body\)/i
-      // Cerebras: 400/413 with no body
     ];
+    CEREBRAS_BODYLESS_OVERFLOW_PATTERN = /^4(?:00|13)\s*(?:status code)?\s*\(no body\)/i;
     NON_OVERFLOW_PATTERNS = [
       /^(Throttling error|Service unavailable):/i,
       // AWS Bedrock non-overflow errors (human-readable prefixes from formatBedrockError)
@@ -10523,6 +10791,11 @@ var init_overflow = __esm({
 // node_modules/@earendil-works/pi-ai/dist/utils/retry.js
 function buildProviderErrorPattern(patterns) {
   return new RegExp(patterns.join("|"), "i");
+}
+function retryDelayMs(policy, attempt) {
+  const delay = policy.baseDelayMs * 2 ** Math.max(0, attempt - 1);
+  const safeDelay = Number.isSafeInteger(delay) ? delay : Number.MAX_SAFE_INTEGER;
+  return Math.min(safeDelay, policy.maxAgentDelayMs ?? DEFAULT_MAX_AGENT_RETRY_DELAY_MS);
 }
 function sleep(ms, signal) {
   return new Promise((resolve, reject) => {
@@ -10560,7 +10833,7 @@ async function retryAssistantCall(produce, policy, signal, callbacks) {
     }
     attempt++;
     lastRetry = { attempt, errorMessage: response.errorMessage || "Unknown error" };
-    const delayMs = policy.baseDelayMs * 2 ** (attempt - 1);
+    const delayMs = retryDelayMs(policy, attempt);
     await callbacks?.onRetryScheduled?.(attempt, maxAttempts, delayMs, lastRetry.errorMessage);
     try {
       await sleep(delayMs, signal);
@@ -10583,7 +10856,7 @@ function isRetryableAssistantError(message) {
     return false;
   return RETRYABLE_PROVIDER_ERROR_PATTERN.test(errorMessage);
 }
-var NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN, RETRYABLE_PROVIDER_ERROR_PATTERN, RetrySleepAbortError;
+var NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN, RETRYABLE_PROVIDER_ERROR_PATTERN, DEFAULT_MAX_AGENT_RETRY_DELAY_MS, RetrySleepAbortError;
 var init_retry = __esm({
   "node_modules/@earendil-works/pi-ai/dist/utils/retry.js"() {
     NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
@@ -10605,6 +10878,7 @@ var init_retry = __esm({
     RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
       // Generic provider load, HTTP status, and server-side transient failures.
       "overloaded",
+      "currently experiencing high demand",
       "rate.?limit",
       "too many requests",
       "429",
@@ -10612,6 +10886,7 @@ var init_retry = __esm({
       "502",
       "503",
       "504",
+      "520",
       "524",
       "service.?unavailable",
       "server.?error",
@@ -10660,22 +10935,12 @@ var init_retry = __esm({
       // gRPC based providers (e.g. NVIDIA NIM)
       "ResourceExhausted"
     ]);
+    DEFAULT_MAX_AGENT_RETRY_DELAY_MS = 6e4;
     RetrySleepAbortError = class extends Error {
       constructor() {
         super("Aborted");
       }
     };
-  }
-});
-
-// node_modules/@earendil-works/pi-ai/dist/utils/text.js
-function contentText(content, separator = "\n") {
-  if (typeof content === "string")
-    return content;
-  return content.filter((block) => block.type === "text").map((block) => block.text).join(separator);
-}
-var init_text = __esm({
-  "node_modules/@earendil-works/pi-ai/dist/utils/text.js"() {
   }
 });
 
@@ -10745,14 +11010,14 @@ var init_refine2 = __esm({
 });
 
 // node_modules/typebox/build/schema/types/schema.mjs
-function IsSchemaObject(value) {
+function IsSchemaObject2(value) {
   return guard_exports.IsObject(value) && !guard_exports.IsArray(value);
 }
 function IsSchemaBoolean(value) {
   return guard_exports.IsBoolean(value);
 }
 function IsSchema2(value) {
-  return IsSchemaObject(value) || IsSchemaBoolean(value);
+  return IsSchemaObject2(value) || IsSchemaBoolean(value);
 }
 var init_schema2 = __esm({
   "node_modules/typebox/build/schema/types/schema.mjs"() {
@@ -10832,20 +11097,6 @@ var init_contains = __esm({
   "node_modules/typebox/build/schema/types/contains.mjs"() {
     init_guard2();
     init_schema2();
-  }
-});
-
-// node_modules/typebox/build/schema/types/contentEncoding.mjs
-var init_contentEncoding = __esm({
-  "node_modules/typebox/build/schema/types/contentEncoding.mjs"() {
-    init_guard2();
-  }
-});
-
-// node_modules/typebox/build/schema/types/contentMediaType.mjs
-var init_contentMediaType = __esm({
-  "node_modules/typebox/build/schema/types/contentMediaType.mjs"() {
-    init_guard2();
   }
 });
 
@@ -11300,8 +11551,6 @@ var init_types4 = __esm({
     init_anyOf();
     init_const2();
     init_contains();
-    init_contentEncoding();
-    init_contentMediaType();
     init_default();
     init_defs();
     init_dependencies2();
@@ -11350,20 +11599,21 @@ var init_types4 = __esm({
 
 // node_modules/typebox/build/schema/engine/_context.mjs
 function HasUnevaluatedFromObject(value) {
-  return IsUnevaluatedItems(value) || IsUnevaluatedProperties(value) || guard_exports.Keys(value).some((key) => HasUnevaluatedFromUnknown(value[key]));
+  return IsUnevaluatedItems(value) || IsUnevaluatedProperties(value) || guard_exports.Some(guard_exports.Keys(value), (key) => HasUnevaluatedFromUnknown(value[key]));
 }
 function HasUnevaluatedFromArray(value) {
-  return value.some((value2) => HasUnevaluatedFromUnknown(value2));
+  return guard_exports.Some(value, (value2) => HasUnevaluatedFromUnknown(value2));
 }
 function HasUnevaluatedFromUnknown(value) {
   return guard_exports.IsArray(value) ? HasUnevaluatedFromArray(value) : guard_exports.IsObject(value) ? HasUnevaluatedFromObject(value) : false;
 }
 function HasUnevaluated(context, schema) {
-  return HasUnevaluatedFromUnknown(schema) || guard_exports.Keys(context).some((key) => HasUnevaluatedFromUnknown(context[key]));
+  return HasUnevaluatedFromUnknown(schema) || guard_exports.Some(guard_exports.Keys(context), (key) => HasUnevaluatedFromUnknown(context[key]));
 }
-var BuildContext, CheckContext, ErrorContext, AccumulatedErrorContext;
+var BuildContext, CheckContext, ErrorContext;
 var init_context2 = __esm({
   "node_modules/typebox/build/schema/engine/_context.mjs"() {
+    init_settings2();
     init_types4();
     init_guard2();
     BuildContext = class {
@@ -11442,22 +11692,16 @@ var init_context2 = __esm({
       }
     };
     ErrorContext = class extends CheckContext {
-      constructor(callback) {
-        super();
-        this.callback = callback;
-      }
-      AddError(error) {
-        this.callback(error);
-        return false;
-      }
-    };
-    AccumulatedErrorContext = class extends ErrorContext {
       constructor() {
-        super((error) => this.errors.push(error));
+        super();
         this.errors = [];
       }
+      AtCapacity() {
+        return this.errors.length >= settings_exports.Get().maxErrors;
+      }
       AddError(error) {
-        this.errors.push(error);
+        if (!this.AtCapacity())
+          this.errors.push(error);
         return false;
       }
       GetErrors() {
@@ -11529,20 +11773,28 @@ var init_unique = __esm({
 function IsValid(schema) {
   return IsItems(schema) && guard_exports.IsArray(schema.items);
 }
-function BuildAdditionalItems(stack, context, schema, value) {
-  if (!IsValid(schema))
-    return emit_exports.Constant(true);
+function BuildAdditionalItemsStandard(stack, context, schema, value) {
   const [item, index3] = [Unique(), Unique()];
   const isSchema = BuildSchemaPushStack(stack, context, schema.additionalItems, item);
   const isLength = emit_exports.IsLessThan(index3, emit_exports.Constant(schema.items.length));
   const addIndex = context.AddIndex(index3);
-  const guarded = context.UseUnevaluated() ? emit_exports.Or(isLength, emit_exports.And(isSchema, addIndex)) : emit_exports.Or(isLength, isSchema);
-  return emit_exports.Call(emit_exports.Member(value, "every"), [emit_exports.ArrowFunction([item, index3], guarded)]);
+  return emit_exports.Every(value, emit_exports.Constant(0), [item, index3], emit_exports.Or(isLength, emit_exports.And(isSchema, addIndex)));
+}
+function BuildAdditionalItemsFast(stack, context, schema, value) {
+  const [item, index3] = [Unique(), Unique()];
+  const isSchema = BuildSchemaPushStack(stack, context, schema.additionalItems, item);
+  const isLength = emit_exports.IsLessThan(index3, emit_exports.Constant(schema.items.length));
+  return emit_exports.Every(value, emit_exports.Constant(0), [item, index3], emit_exports.Or(isLength, isSchema));
+}
+function BuildAdditionalItems(stack, context, schema, value) {
+  if (!IsValid(schema))
+    return emit_exports.Constant(true);
+  return context.UseUnevaluated() ? BuildAdditionalItemsStandard(stack, context, schema, value) : BuildAdditionalItemsFast(stack, context, schema, value);
 }
 function CheckAdditionalItems(stack, context, schema, value) {
   if (!IsValid(schema))
     return true;
-  const isAdditionalItems = value.every((item, index3) => {
+  const isAdditionalItems = guard_exports.Every(value, 0, (item, index3) => {
     return guard_exports.IsLessThan(index3, schema.items.length) || CheckSchemaPushStack(stack, context, schema.additionalItems, item) && context.AddIndex(index3);
   });
   return isAdditionalItems;
@@ -11550,7 +11802,7 @@ function CheckAdditionalItems(stack, context, schema, value) {
 function ErrorAdditionalItems(stack, context, schemaPath, instancePath, schema, value) {
   if (!IsValid(schema))
     return true;
-  const isAdditionalItems = value.every((item, index3) => {
+  const isAdditionalItems = guard_exports.Every(value, 0, (item, index3) => {
     const nextSchemaPath = `${schemaPath}/additionalItems`;
     const nextInstancePath = `${instancePath}/${index3}`;
     return guard_exports.IsLessThan(index3, schema.items.length) || ErrorSchemaPushStack(stack, context, nextSchemaPath, nextInstancePath, schema.additionalItems, item) && context.AddIndex(index3);
@@ -11566,7 +11818,19 @@ var init_additionalItems2 = __esm({
   }
 });
 
+// node_modules/typebox/build/schema/engine/_regexp.mjs
+function UnicodeRegExp(pattern) {
+  return new RegExp(pattern, "u");
+}
+var init_regexp = __esm({
+  "node_modules/typebox/build/schema/engine/_regexp.mjs"() {
+  }
+});
+
 // node_modules/typebox/build/schema/engine/additionalProperties.mjs
+function IsAdditionalPropertiesIgnored(context, additionalProperties) {
+  return !context.UseUnevaluated() && (guard_exports.IsEqual(additionalProperties, true) || guard_exports.IsObject(additionalProperties) && guard_exports.IsEqual(guard_exports.Keys(additionalProperties).length, 0));
+}
 function GetPropertyKeyAsPattern(key) {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return `^${escaped}$`;
@@ -11587,7 +11851,7 @@ function BuildAdditionalPropertiesFast(_context, schema, value) {
 }
 function BuildAdditionalPropertiesStandard(stack, context, schema, value) {
   const [key, _index] = [Unique(), Unique()];
-  const regexp = CreateVariable(new RegExp(GetPropertiesPattern(schema)));
+  const regexp = CreateVariable(UnicodeRegExp(GetPropertiesPattern(schema)));
   const isSchema = BuildSchemaPushStack(stack, context, schema.additionalProperties, `${value}[${key}]`);
   const isKey = emit_exports.Call(emit_exports.Member(regexp, "test"), [key]);
   const addKey = context.AddKey(key);
@@ -11596,23 +11860,24 @@ function BuildAdditionalPropertiesStandard(stack, context, schema, value) {
   return result;
 }
 function BuildAdditionalProperties(stack, context, schema, value) {
+  if (IsAdditionalPropertiesIgnored(context, schema.additionalProperties))
+    return emit_exports.Constant(true);
   return CanAdditionalPropertiesFast(context, schema, value) ? BuildAdditionalPropertiesFast(context, schema, value) : BuildAdditionalPropertiesStandard(stack, context, schema, value);
 }
 function CheckAdditionalProperties(stack, context, schema, value) {
-  const regexp = new RegExp(GetPropertiesPattern(schema));
+  const regexp = UnicodeRegExp(GetPropertiesPattern(schema));
   const isAdditionalProperties = guard_exports.Every(guard_exports.Keys(value), 0, (key, _index) => {
     return regexp.test(key) || CheckSchemaPushStack(stack, context, schema.additionalProperties, value[key]) && context.AddKey(key);
   });
   return isAdditionalProperties;
 }
 function ErrorAdditionalProperties(stack, context, schemaPath, instancePath, schema, value) {
-  const regexp = new RegExp(GetPropertiesPattern(schema));
+  const regexp = UnicodeRegExp(GetPropertiesPattern(schema));
   const additionalProperties = [];
   const isAdditionalProperties = guard_exports.EveryAll(guard_exports.Keys(value), 0, (key, _index) => {
     const nextSchemaPath = `${schemaPath}/additionalProperties`;
     const nextInstancePath = `${instancePath}/${key}`;
-    const nextContext = new AccumulatedErrorContext();
-    const isAdditionalProperty = regexp.test(key) || ErrorSchemaPushStack(stack, nextContext, nextSchemaPath, nextInstancePath, schema.additionalProperties, value[key]) && context.AddKey(key);
+    const isAdditionalProperty = regexp.test(key) || ErrorSchemaPushStack(stack, context, nextSchemaPath, nextInstancePath, schema.additionalProperties, value[key]) && context.AddKey(key);
     if (!isAdditionalProperty)
       additionalProperties.push(key);
     return isAdditionalProperty;
@@ -11629,7 +11894,7 @@ var init_additionalProperties2 = __esm({
     init_types4();
     init_externals();
     init_unique();
-    init_context2();
+    init_regexp();
     init_guard2();
     init_schema3();
   }
@@ -11672,7 +11937,7 @@ function ErrorAllOf(stack, context, schemaPath, instancePath, schema, value) {
   const failedContexts = [];
   const results = schema.allOf.reduce((result, schema2, index3) => {
     const nextSchemaPath = `${schemaPath}/allOf/${index3}`;
-    const nextContext = new AccumulatedErrorContext();
+    const nextContext = new ErrorContext();
     const isSchema = ErrorSchema(stack, nextContext, nextSchemaPath, instancePath, schema2, value);
     if (!isSchema)
       failedContexts.push(nextContext);
@@ -11712,7 +11977,7 @@ function CheckAnyOf(stack, context, schema, value) {
 function ErrorAnyOf(stack, context, schemaPath, instancePath, schema, value) {
   const failedContexts = [];
   const results = schema.anyOf.reduce((result, schema2, index3) => {
-    const nextContext = new AccumulatedErrorContext();
+    const nextContext = new ErrorContext();
     const nextSchemaPath = `${schemaPath}/anyOf/${index3}`;
     const isSchema = ErrorSchema(stack, nextContext, nextSchemaPath, instancePath, schema2, value);
     if (!isSchema)
@@ -11785,18 +12050,29 @@ var init_const3 = __esm({
 function IsValid2(schema) {
   return !(IsMinContains(schema) && guard_exports.IsEqual(schema.minContains, 0));
 }
+function BuildContainsStandard(stack, context, schema, value) {
+  const [item, index3] = [Unique(), Unique()];
+  const isLength = emit_exports.Not(emit_exports.IsEqual(emit_exports.Member(value, "length"), emit_exports.Constant(0)));
+  const isSome = emit_exports.SomeAll(value, [item, index3], emit_exports.And(BuildSchema(stack, context, schema.contains, item), context.AddIndex(index3)));
+  return emit_exports.And(isLength, isSome);
+}
+function BuildContainsFast(stack, context, schema, value) {
+  const [item] = [Unique()];
+  const isLength = emit_exports.Not(emit_exports.IsEqual(emit_exports.Member(value, "length"), emit_exports.Constant(0)));
+  const isSome = emit_exports.Some(value, [item, "_"], BuildSchema(stack, context, schema.contains, item));
+  return emit_exports.And(isLength, isSome);
+}
 function BuildContains(stack, context, schema, value) {
   if (!IsValid2(schema))
     return emit_exports.Constant(true);
-  const item = Unique();
-  const isLength = emit_exports.Not(emit_exports.IsEqual(emit_exports.Member(value, "length"), emit_exports.Constant(0)));
-  const isSome = emit_exports.Call(emit_exports.Member(value, "some"), [emit_exports.ArrowFunction([item], BuildSchema(stack, context, schema.contains, item))]);
-  return emit_exports.And(isLength, isSome);
+  return context.UseUnevaluated() ? BuildContainsStandard(stack, context, schema, value) : BuildContainsFast(stack, context, schema, value);
 }
 function CheckContains(stack, context, schema, value) {
   if (!IsValid2(schema))
     return true;
-  return !guard_exports.IsEqual(value.length, 0) && value.some((item) => CheckSchema(stack, context, schema.contains, item));
+  return !guard_exports.IsEqual(value.length, 0) && guard_exports.SomeAll(value, (item, index3) => {
+    return CheckSchema(stack, context, schema.contains, item) && context.AddIndex(index3);
+  });
 }
 function ErrorContains(stack, context, schemaPath, instancePath, schema, value) {
   return CheckContains(stack, context, schema, value) || context.AddError({
@@ -11951,7 +12227,7 @@ function BuildEnum(_stack, _context, schema, value) {
   }));
 }
 function CheckEnum(_stack, _context, schema, value) {
-  return schema.enum.some((option) => guard_exports.IsValueLike(option) ? guard_exports.IsEqual(value, option) : guard_exports.IsDeepEqual(value, option));
+  return guard_exports.Some(schema.enum, (option) => guard_exports.IsValueLike(option) ? guard_exports.IsEqual(value, option) : guard_exports.IsDeepEqual(value, option));
 }
 function ErrorEnum(stack, context, schemaPath, instancePath, schema, value) {
   return CheckEnum(stack, context, schema, value) || context.AddError({
@@ -12036,34 +12312,38 @@ function IsTime(value, strictTimeZone = true) {
   const matches = TIME.exec(value);
   if (!matches)
     return false;
+  if (strictTimeZone && !matches[4] && !matches[5])
+    return false;
   const hr = +matches[1];
   const min = +matches[2];
   const sec = +matches[3];
-  const tzSign = matches[4] === "-" ? -1 : 1;
-  const tzH = +(matches[5] || 0);
-  const tzM = +(matches[6] || 0);
-  if (tzH > 23 || tzM > 59)
+  if (hr > 23 || min > 59 || sec > 60)
     return false;
-  if (strictTimeZone && !matches[4] && value.toLowerCase().indexOf("z") === -1) {
-    return false;
+  if (matches[5]) {
+    const tzH2 = +matches[6];
+    const tzM2 = +matches[7];
+    if (tzH2 > 23 || tzM2 > 59)
+      return false;
   }
-  if (hr <= 23 && min <= 59 && sec < 60)
+  if (sec < 60)
     return true;
-  const utcMin = min - tzM * tzSign;
-  const utcHr = hr - tzH * tzSign - (utcMin < 0 ? 1 : 0);
-  return (utcHr === 23 || utcHr === -1) && (utcMin === 59 || utcMin === -1) && sec < 61;
+  const tzSign = matches[5] === "-" ? -1 : 1;
+  const tzH = +(matches[6] || 0);
+  const tzM = +(matches[7] || 0);
+  const totalUtcMin = hr * 60 + min - tzSign * (tzH * 60 + tzM);
+  return (totalUtcMin % 1440 + 1440) % 1440 === 1439;
 }
 var TIME;
 var init_time = __esm({
   "node_modules/typebox/build/format/time.mjs"() {
-    TIME = /^(\d\d):(\d\d):(\d\d(?:\.\d+)?)(?:Z|([+-])(\d\d):(\d\d))?$/i;
+    TIME = /^(\d\d):(\d\d):(\d\d)(?:\.\d+)?(?:([Zz])|([+-])(\d\d):(\d\d))?$/;
   }
 });
 
 // node_modules/typebox/build/format/date_time.mjs
-function IsDateTime(value, strictTimeZone = true) {
+function IsDateTime(value) {
   const dateTime = value.split(/T/i);
-  return dateTime.length === 2 && IsDate2(dateTime[0]) && IsTime(dateTime[1], strictTimeZone);
+  return dateTime.length === 2 && IsDate2(dateTime[0]) && IsTime(dateTime[1]);
 }
 var init_date_time = __esm({
   "node_modules/typebox/build/format/date_time.mjs"() {
@@ -12090,11 +12370,72 @@ function IsEmail(value) {
 var Email;
 var init_email = __esm({
   "node_modules/typebox/build/format/email.mjs"() {
-    Email = /^(?!.*\.\.)[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/i;
+    Email = /^(?:[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*|"(?:[^"\\]|\\[\x20-\x7e])*")@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*|\[(?:IPv6:[a-f0-9:]+|(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3})\])$/i;
   }
 });
 
-// node_modules/typebox/build/format/_puny.mjs
+// node_modules/typebox/build/format/idna/pattern/pattern.mjs
+var RE_RULE_HYPHEN_PLACEMENT, RE_RULE_NOT_RESERVED_ACE, RE_ASCII_LDH, RE_ASCII, RE_NON_ASCII, RE_ASCII_DIGIT, RE_ARABIC_INDIC_DIGIT, RE_EXT_ARABIC_INDIC_DIGIT, RE_COMMON_SEPARATOR, RE_EUROPEAN_SEPARATOR, RE_MARK_NONSPACING, RE_MARK_SPACING_COMBINING, RE_MARK_ENCLOSING, RE_COMBINING_MARK, RE_LETTER, RE_NUMBER_DECIMAL, RE_SCRIPT_GREEK, RE_SCRIPT_HEBREW, RE_SCRIPT_JAPANESE, RE_SCRIPT_ARABIC_LETTER, RE_VIRAMA, RE_RFC5892_DISALLOWED, RE_CONTEXTO_EXCEPTIONS, RE_PVALID_EXCEPTIONS, RE_EUROPEAN_NUMBER, RE_PERMITTED_CATEGORY;
+var init_pattern3 = __esm({
+  "node_modules/typebox/build/format/idna/pattern/pattern.mjs"() {
+    RE_RULE_HYPHEN_PLACEMENT = /^(?!-).*(?<!-)$/;
+    RE_RULE_NOT_RESERVED_ACE = /^(?!..--)/;
+    RE_ASCII_LDH = /^[a-zA-Z0-9-]*$/;
+    RE_ASCII = new RegExp("^\\p{ASCII}*$", "u");
+    RE_NON_ASCII = /[^\p{ASCII}]/u;
+    RE_ASCII_DIGIT = /[0-9]/;
+    RE_ARABIC_INDIC_DIGIT = /[\u{0660}-\u{0669}]/u;
+    RE_EXT_ARABIC_INDIC_DIGIT = /[\u{06f0}-\u{06f9}]/u;
+    RE_COMMON_SEPARATOR = /[\u{002e}\u{002c}\u{003a}\u{002f}]/u;
+    RE_EUROPEAN_SEPARATOR = /[\u{002d}\u{002b}]/u;
+    RE_MARK_NONSPACING = new RegExp("\\p{Mn}", "u");
+    RE_MARK_SPACING_COMBINING = new RegExp("\\p{Mc}", "u");
+    RE_MARK_ENCLOSING = new RegExp("\\p{Me}", "u");
+    RE_COMBINING_MARK = /[\p{Mn}\p{Mc}\p{Me}]/u;
+    RE_LETTER = new RegExp("\\p{L}", "u");
+    RE_NUMBER_DECIMAL = new RegExp("\\p{Nd}", "u");
+    RE_SCRIPT_GREEK = new RegExp("\\p{Script=Greek}", "u");
+    RE_SCRIPT_HEBREW = new RegExp("\\p{Script=Hebrew}", "u");
+    RE_SCRIPT_JAPANESE = /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u;
+    RE_SCRIPT_ARABIC_LETTER = /[\p{Script=Arabic}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Mandaic}]/u;
+    RE_VIRAMA = /[\u{094d}\u{09cd}\u{0a4d}\u{0acd}\u{0b4d}\u{0bcd}\u{0c4d}\u{0ccd}\u{0d3b}\u{0d3c}\u{0d4d}\u{0dca}\u{1b44}\u{1baa}\u{1bab}\u{a9c0}\u{11046}\u{1107f}\u{110b9}\u{11133}\u{11134}\u{111c0}\u{11235}\u{1134d}\u{11442}\u{114c2}\u{115bf}\u{1163f}\u{116b6}\u{11c3f}\u{11d44}\u{11d45}]/u;
+    RE_RFC5892_DISALLOWED = /[\u{0640}\u{07fa}\u{302e}\u{302f}\u{3031}\u{3032}\u{3033}\u{3034}\u{3035}\u{303b}]/u;
+    RE_CONTEXTO_EXCEPTIONS = /[\u{00b7}\u{0375}\u{05f3}\u{05f4}\u{200c}\u{200d}\u{30fb}]/u;
+    RE_PVALID_EXCEPTIONS = /[\u{00df}\u{03c2}\u{06fd}\u{06fe}\u{0f0b}\u{3007}]/u;
+    RE_EUROPEAN_NUMBER = new RegExp([
+      RE_ASCII_DIGIT,
+      RE_EXT_ARABIC_INDIC_DIGIT
+    ].map((regexp) => regexp.source).join("|"), "u");
+    RE_PERMITTED_CATEGORY = new RegExp([
+      RE_LETTER,
+      RE_EUROPEAN_SEPARATOR,
+      RE_COMMON_SEPARATOR,
+      RE_NUMBER_DECIMAL,
+      RE_MARK_NONSPACING,
+      RE_MARK_SPACING_COMBINING,
+      RE_CONTEXTO_EXCEPTIONS,
+      RE_PVALID_EXCEPTIONS
+    ].map((regexp) => regexp.source).join("|"), "u");
+  }
+});
+
+// node_modules/typebox/build/format/idna/label/ascii.mjs
+function IsAsciiLabel(value) {
+  return RE_RULE_HYPHEN_PLACEMENT.test(value) && RE_RULE_NOT_RESERVED_ACE.test(value) && RE_ASCII_LDH.test(value);
+}
+var init_ascii = __esm({
+  "node_modules/typebox/build/format/idna/label/ascii.mjs"() {
+    init_pattern3();
+  }
+});
+
+// node_modules/typebox/build/format/idna/format/puny.mjs
+function ThrowDontCare() {
+  throw null;
+}
+function IsAcePrefixed(value) {
+  return value.toLowerCase().startsWith("xn--");
+}
 function Adapt(delta, numPoints, firstTime) {
   delta = firstTime ? Math.floor(delta / PUNYCODE_DAMP) : delta >> 1;
   delta += Math.floor(delta / numPoints);
@@ -12115,7 +12456,7 @@ function Decode2(value) {
     for (let j = 0; j < delimIdx; j++) {
       const cp = value.charCodeAt(j);
       if (cp >= 128)
-        throw new Error("Invalid punycode: non-basic before delimiter");
+        ThrowDontCare();
       output.push(cp);
     }
   }
@@ -12126,17 +12467,15 @@ function Decode2(value) {
     let k = PUNYCODE_BASE;
     while (true) {
       if (inIdx >= value.length)
-        throw new Error("Invalid punycode: unexpected end of input");
+        ThrowDontCare();
       const ch = value.charCodeAt(inIdx++);
       let digit;
       if (ch >= 97 && ch <= 122)
         digit = ch - 97;
       else if (ch >= 48 && ch <= 57)
         digit = ch - 48 + 26;
-      else if (ch >= 65 && ch <= 90)
-        Unreachable();
       else
-        throw new Error("Invalid punycode: bad digit character");
+        ThrowDontCare();
       i += digit * w;
       const t = k <= bias ? PUNYCODE_TMIN : k >= bias + PUNYCODE_TMAX ? PUNYCODE_TMAX : k - bias;
       if (digit < t)
@@ -12151,12 +12490,56 @@ function Decode2(value) {
     output.splice(i, 0, n);
     i++;
   }
-  return globalThis.String.fromCodePoint(...output);
+  return String.fromCodePoint(...output);
 }
-var PUNYCODE_BASE, PUNYCODE_TMIN, PUNYCODE_TMAX, PUNYCODE_SKEW, PUNYCODE_DAMP, PUNYCODE_INITIAL_BIAS, PUNYCODE_INITIAL_N;
+function DigitToChar(digit) {
+  return digit < 26 ? String.fromCharCode(digit + 97) : String.fromCharCode(digit - 26 + 48);
+}
+function Encode2(input) {
+  const basic = input.replace(RE_REPLACE_NON_ASCII, "");
+  const basicLength = basic.length;
+  const result = basicLength > 0 ? [basic, "-"] : [];
+  const codePoints = Array.from(input, (char) => char.codePointAt(0));
+  let n = PUNYCODE_INITIAL_N;
+  let delta = 0;
+  let bias = PUNYCODE_INITIAL_BIAS;
+  let handledCPCount = basicLength;
+  while (handledCPCount < codePoints.length) {
+    let m = Infinity;
+    for (const cp of codePoints) {
+      if (cp >= n && cp < m)
+        m = cp;
+    }
+    delta += (m - n) * (handledCPCount + 1);
+    n = m;
+    for (const cp of codePoints) {
+      if (cp < n)
+        delta++;
+      if (cp === n) {
+        let q = delta;
+        for (let k = PUNYCODE_BASE; ; k += PUNYCODE_BASE) {
+          const t = k <= bias ? PUNYCODE_TMIN : k >= bias + PUNYCODE_TMAX ? PUNYCODE_TMAX : k - bias;
+          if (q < t)
+            break;
+          const digit = t + (q - t) % (PUNYCODE_BASE - t);
+          result.push(DigitToChar(digit));
+          q = Math.floor((q - t) / (PUNYCODE_BASE - t));
+        }
+        result.push(DigitToChar(q));
+        bias = Adapt(delta, handledCPCount + 1, handledCPCount === basicLength);
+        delta = 0;
+        handledCPCount++;
+      }
+    }
+    delta++;
+    n++;
+  }
+  return result.join("");
+}
+var PUNYCODE_BASE, PUNYCODE_TMIN, PUNYCODE_TMAX, PUNYCODE_SKEW, PUNYCODE_DAMP, PUNYCODE_INITIAL_BIAS, PUNYCODE_INITIAL_N, RE_REPLACE_NON_ASCII;
 var init_puny = __esm({
-  "node_modules/typebox/build/format/_puny.mjs"() {
-    init_unreachable2();
+  "node_modules/typebox/build/format/idna/format/puny.mjs"() {
+    init_pattern3();
     PUNYCODE_BASE = 36;
     PUNYCODE_TMIN = 1;
     PUNYCODE_TMAX = 26;
@@ -12164,94 +12547,127 @@ var init_puny = __esm({
     PUNYCODE_DAMP = 700;
     PUNYCODE_INITIAL_BIAS = 72;
     PUNYCODE_INITIAL_N = 128;
+    RE_REPLACE_NON_ASCII = new RegExp(RE_NON_ASCII.source, "gu");
   }
 });
 
-// node_modules/typebox/build/format/_idna.mjs
-function IsNonspacingMark(cp) {
-  return new RegExp("\\p{Mn}", "u").test(String.fromCodePoint(cp));
+// node_modules/typebox/build/format/idna/format/bidi.mjs
+function HasBidiChars(value) {
+  if (IsAcePrefixed(value)) {
+    try {
+      return HasRightToLeftCharacters(Decode2(value.slice(4).toLowerCase()));
+    } catch {
+      return false;
+    }
+  }
+  return HasRightToLeftCharacters(value);
 }
-function IsSpacingCombiningMark(cp) {
-  return new RegExp("\\p{Mc}", "u").test(String.fromCodePoint(cp));
+function GetBidiClass(codePoint) {
+  const char = String.fromCodePoint(codePoint);
+  return RE_EUROPEAN_NUMBER.test(char) ? "EN" : RE_ARABIC_INDIC_DIGIT.test(char) ? "AN" : (
+    // Pattern.RE_EUROPEAN_SEPARATOR.test(char) ? 'ES' : // (no-spec-coverage)
+    // Pattern.RE_COMMON_SEPARATOR.test(char) ? 'CS' : // (no-spec-coverage)
+    RE_MARK_NONSPACING.test(char) ? "NSM" : RE_SCRIPT_HEBREW.test(char) ? "R" : RE_SCRIPT_ARABIC_LETTER.test(char) ? "AL" : RE_LETTER.test(char) ? "L" : "ON"
+  );
 }
-function IsEnclosingMark(cp) {
-  return new RegExp("\\p{Me}", "u").test(String.fromCodePoint(cp));
+function HasRightToLeftCharacters(value) {
+  for (const ch of value)
+    if (RE_RTL_CLASSES.test(GetBidiClass(ch.codePointAt(0))))
+      return true;
+  return false;
 }
-function IsCombiningMark2(cp) {
-  return IsNonspacingMark(cp) || IsSpacingCombiningMark(cp) || IsEnclosingMark(cp);
+function SatisfiesBidiRule(value) {
+  let isRtl = false;
+  let allowed = RE_LTR_ALLOWED;
+  let sawEN = false;
+  let sawAN = false;
+  let isFirst = true;
+  for (const ch of value) {
+    const bidiClass = GetBidiClass(ch.codePointAt(0));
+    if (isFirst) {
+      if (bidiClass !== "L" && bidiClass !== "R" && bidiClass !== "AL")
+        return false;
+      isRtl = bidiClass === "R" || bidiClass === "AL";
+      allowed = isRtl ? RE_RTL_ALLOWED : RE_LTR_ALLOWED;
+      isFirst = false;
+    }
+    if (!allowed.test(bidiClass))
+      return false;
+    if (bidiClass === "EN")
+      sawEN = true;
+    else if (bidiClass === "AN")
+      sawAN = true;
+  }
+  if (isRtl && sawEN && sawAN)
+    return false;
+  return true;
 }
-function IsGreek(cp) {
-  return new RegExp("\\p{Script=Greek}", "u").test(String.fromCodePoint(cp));
+var RE_RTL_ALLOWED, RE_LTR_ALLOWED, RE_RTL_CLASSES;
+var init_bidi = __esm({
+  "node_modules/typebox/build/format/idna/format/bidi.mjs"() {
+    init_puny();
+    init_pattern3();
+    RE_RTL_ALLOWED = /^(?:R|AL|AN|EN|ES|CS|ET|ON|BN|NSM)$/;
+    RE_LTR_ALLOWED = /^(?:L|EN|ES|CS|ET|ON|BN|NSM)$/;
+    RE_RTL_CLASSES = /^(?:R|AL|AN)$/;
+  }
+});
+
+// node_modules/typebox/build/format/idna/label/unicode.mjs
+function ExceedsMaxALabelLength(value) {
+  return RE_NON_ASCII.test(value) && Encode2(value).length + 4 > 63;
 }
-function IsHebrew(cp) {
-  return new RegExp("\\p{Script=Hebrew}", "u").test(String.fromCodePoint(cp));
-}
-function IsHiragana(cp) {
-  return new RegExp("\\p{Script=Hiragana}", "u").test(String.fromCodePoint(cp));
-}
-function IsKatakana(cp) {
-  return new RegExp("\\p{Script=Katakana}", "u").test(String.fromCodePoint(cp));
-}
-function IsHan(cp) {
-  return new RegExp("\\p{Script=Han}", "u").test(String.fromCodePoint(cp));
-}
-function IsArabicIndicDigit(cp) {
-  return cp >= 1632 && cp <= 1641;
-}
-function IsExtendedArabicIndicDigit(cp) {
-  return cp >= 1776 && cp <= 1785;
-}
-function IsVirama(cp) {
-  return VIRAMA_CPS.has(cp);
+function HasInvalidHyphens(chars) {
+  if (chars[0] === "-" || chars[chars.length - 1] === "-")
+    return true;
+  return chars.slice(2).join("").startsWith("--");
 }
 function IsUnicodeLabel(value) {
-  if (value.length === 0)
-    return Unreachable();
-  const cps = [...value].map((c) => c.codePointAt(0));
-  const len = cps.length;
-  if (cps[0] === 45 || cps[len - 1] === 45)
+  if (ExceedsMaxALabelLength(value))
     return false;
-  if (len >= 4 && cps[2] === 45 && cps[3] === 45)
+  if (HasRightToLeftCharacters(value) && !SatisfiesBidiRule(value))
     return false;
-  if (IsCombiningMark2(cps[0]))
+  const chars = [...value];
+  const codePoints = chars.map((c) => c.codePointAt(0));
+  const length = codePoints.length;
+  if (HasInvalidHyphens(chars))
+    return false;
+  if (RE_COMBINING_MARK.test(chars[0]))
     return false;
   let hasJapanese = false;
-  let hasArabicIndic = false;
-  let hasExtendedArabicIndic = false;
-  for (let i = 0; i < len; i++) {
-    const cp = cps[i];
-    if (RFC5892_DISALLOWED.has(cp))
+  for (let i = 0; i < length; i++) {
+    const codePoint = codePoints[i];
+    const char = chars[i];
+    if (RE_RFC5892_DISALLOWED.test(char))
       return false;
-    if (IsHiragana(cp) || IsKatakana(cp) || IsHan(cp))
+    if (!RE_PERMITTED_CATEGORY.test(char))
+      return false;
+    if (RE_SCRIPT_JAPANESE.test(char))
       hasJapanese = true;
-    if (IsArabicIndicDigit(cp))
-      hasArabicIndic = true;
-    if (IsExtendedArabicIndicDigit(cp))
-      hasExtendedArabicIndic = true;
-    const prev = cps[i - 1], next = cps[i + 1];
-    switch (cp) {
+    const prev = codePoints[i - 1], next = codePoints[i + 1];
+    switch (codePoint) {
       case 183:
         if (prev !== 108 || next !== 108)
           return false;
         break;
       // MIDDLE DOT (Catalan)
       case 885:
-        if (next === void 0 || !IsGreek(next))
+        if (!next || !RE_SCRIPT_GREEK.test(chars[i + 1]))
           return false;
         break;
       // Greek KERAIA
       case 1523:
       case 1524:
-        if (prev === void 0 || !IsHebrew(prev))
+        if (!prev || !RE_SCRIPT_HEBREW.test(chars[i - 1]))
           return false;
         break;
       // Hebrew GERESH
       case 8204:
-        if (prev === void 0 || prev < 128 && !IsVirama(prev))
+        if (!prev || prev < 128 && !RE_VIRAMA.test(chars[i - 1]))
           return false;
         break;
       case 8205:
-        if (prev === void 0 || !IsVirama(prev))
+        if (!prev || !RE_VIRAMA.test(chars[i - 1]))
           return false;
         break;
       case 12539:
@@ -12260,130 +12676,102 @@ function IsUnicodeLabel(value) {
   }
   if (value.includes("・") && !hasJapanese)
     return false;
-  if (hasArabicIndic && hasExtendedArabicIndic)
-    return false;
   return true;
 }
-function IsAsciiLabel(value) {
-  if (value.charCodeAt(0) === 45 || value.charCodeAt(value.length - 1) === 45)
-    return false;
-  if (value.length >= 4 && value.charCodeAt(2) === 45 && value.charCodeAt(3) === 45)
-    return false;
-  for (let i = 0; i < value.length; i++) {
-    const ch = value.charCodeAt(i);
-    if (!(ch >= 97 && ch <= 122 || // a-z
-    ch >= 65 && ch <= 90 || // A-Z
-    ch >= 48 && ch <= 57 || // 0-9
-    ch === 45))
-      return false;
+var init_unicode = __esm({
+  "node_modules/typebox/build/format/idna/label/unicode.mjs"() {
+    init_pattern3();
+    init_bidi();
+    init_puny();
   }
-  return true;
-}
-function IsPuny(value) {
-  return value.toLowerCase().startsWith("xn--");
-}
+});
+
+// node_modules/typebox/build/format/idna/label/puny.mjs
 function IsPunyLabel(value) {
+  if (!IsAcePrefixed(value))
+    return false;
   try {
-    const payload = value.slice(4).toLowerCase();
-    const lastHyphen = payload.lastIndexOf("-");
-    if (lastHyphen === 0) {
+    const body = value.slice(4).toLowerCase();
+    if (body.lastIndexOf("-") === 0)
       return false;
-    }
-    const decoded = Decode2(payload);
-    if (!decoded)
+    const decoded = Decode2(body);
+    if (!RE_NON_ASCII.test(decoded))
       return false;
     return IsUnicodeLabel(decoded);
   } catch {
     return false;
   }
 }
-function IsIdnLabel(value) {
-  if (value.length === 0 || value.length > 63)
-    return false;
-  return IsPuny(value) ? IsPunyLabel(value) : IsUnicodeLabel(value);
-}
-function IsLabel(value) {
-  if (value.length === 0 || value.length > 63)
-    return false;
-  return IsPuny(value) ? IsPunyLabel(value) : IsAsciiLabel(value);
-}
-var RFC5892_DISALLOWED, VIRAMA_CPS;
-var init_idna = __esm({
-  "node_modules/typebox/build/format/_idna.mjs"() {
-    init_unreachable2();
+var init_puny2 = __esm({
+  "node_modules/typebox/build/format/idna/label/puny.mjs"() {
     init_puny();
-    RFC5892_DISALLOWED = /* @__PURE__ */ new Set([
-      1600,
-      // ARABIC TATWEEL
-      2042,
-      // NKO LAJANYALAN
-      12334,
-      // HANGUL SINGLE DOT TONE MARK
-      12335,
-      // HANGUL DOUBLE DOT TONE MARK
-      12337,
-      // VERTICAL KANA REPEAT MARK
-      12338,
-      // VERTICAL KANA REPEAT WITH VOICED ITERATION MARK
-      12339,
-      // VERTICAL KANA REPEAT MARK UPPER HALF
-      12340,
-      // VERTICAL KANA REPEAT WITH VOICED ITERATION MARK UPPER HALF
-      12341,
-      // VERTICAL KANA REPEAT MARK LOWER HALF
-      12347
-      // VERTICAL IDEOGRAPHIC ITERATION MARK
-    ]);
-    VIRAMA_CPS = /* @__PURE__ */ new Set([
-      2381,
-      2509,
-      2637,
-      2765,
-      2893,
-      3021,
-      3149,
-      3277,
-      3387,
-      3388,
-      3405,
-      3530,
-      6980,
-      7082,
-      7083,
-      43456,
-      69702,
-      69759,
-      69817,
-      69939,
-      69940,
-      70080,
-      70197,
-      70477,
-      70722,
-      70850,
-      71103,
-      71231,
-      71350,
-      72767,
-      73028,
-      73029
-    ]);
+    init_unicode();
+    init_pattern3();
   }
 });
 
-// node_modules/typebox/build/format/hostname.mjs
+// node_modules/typebox/build/format/idna/hostname.mjs
+function IsValidLabelLength(value) {
+  return value.length > 0 && value.length <= 63;
+}
+function IsLabel(value) {
+  return IsValidLabelLength(value) && (IsPunyLabel(value) || IsAsciiLabel(value));
+}
 function IsHostname(value) {
   if (value.length === 0 || value.length > 253)
     return false;
   if (value.charCodeAt(value.length - 1) === 46)
     return false;
-  for (const label of value.split(".")) {
-    if (!IsLabel(label))
-      return false;
-  }
-  return true;
+  return value.split(".").every((label) => IsLabel(label));
 }
 var init_hostname = __esm({
+  "node_modules/typebox/build/format/idna/hostname.mjs"() {
+    init_ascii();
+    init_puny2();
+  }
+});
+
+// node_modules/typebox/build/format/idna/idn-hostname.mjs
+function IsValidLabelLength2(value) {
+  return value.length > 0 && value.length <= 63;
+}
+function IsLabel2(value) {
+  return IsValidLabelLength2(value) && (IsPunyLabel(value) || IsUnicodeLabel(value));
+}
+function NormalizeHostname(value) {
+  return value.replace(/[\uff01-\uff5e]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 65248)).normalize("NFC").replace(/[\u00ad\u034f\u180b-\u180d\u200b\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu, "").replace(/[\u002E\u3002\uFF0E\uFF61]/g, ".");
+}
+function IsIdnHostname(value) {
+  if (value.length === 0 || value.includes(" "))
+    return false;
+  const normalized = NormalizeHostname(value);
+  if (normalized.length > 253)
+    return false;
+  const labels = normalized.split(".");
+  const hasBidiChars = labels.some((label) => HasBidiChars(label));
+  return labels.every((label) => IsLabel2(label) && (!hasBidiChars || SatisfiesBidiRule(label)));
+}
+var init_idn_hostname = __esm({
+  "node_modules/typebox/build/format/idna/idn-hostname.mjs"() {
+    init_bidi();
+    init_unicode();
+    init_puny2();
+  }
+});
+
+// node_modules/typebox/build/format/idna/index.mjs
+var init_idna = __esm({
+  "node_modules/typebox/build/format/idna/index.mjs"() {
+    init_hostname();
+    init_idn_hostname();
+  }
+});
+
+// node_modules/typebox/build/format/hostname.mjs
+function IsHostname2(value) {
+  return IsHostname(value);
+}
+var init_hostname2 = __esm({
   "node_modules/typebox/build/format/hostname.mjs"() {
     init_idna();
   }
@@ -12391,185 +12779,77 @@ var init_hostname = __esm({
 
 // node_modules/typebox/build/format/idn_email.mjs
 function IsIdnEmail(value) {
-  return IdnEmail.test(value);
+  return IdnEmail.test(value.normalize("NFC"));
 }
 var IdnEmail;
 var init_idn_email = __esm({
   "node_modules/typebox/build/format/idn_email.mjs"() {
-    IdnEmail = /^(?!.*\.\.)[\p{L}\p{N}!#$%&'*+/=?^_`{|}~-]+(?:\.[\p{L}\p{N}!#$%&'*+/=?^_`{|}~-]+)*@[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?(?:\.[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?)*$/iu;
+    IdnEmail = /^(?:[A-Za-z0-9!#$%&'*+\/=?^_`{|}~\u{0080}-\u{10FFFF}-]+(?:\.[A-Za-z0-9!#$%&'*+\/=?^_`{|}~\u{0080}-\u{10FFFF}-]+)*|"(?:[^"\\]|\\.)*")@[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,62})(?<!-)(?:\.[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,62})(?<!-))*$/iu;
   }
 });
 
 // node_modules/typebox/build/format/idn_hostname.mjs
-function IsIdnHostname(value) {
-  if (value.length === 0 || value.includes(" "))
-    return false;
-  const canonical = value.normalize("NFC").replace(/[\u002E\u3002\uFF0E\uFF61]/g, ".");
-  if (canonical.length > 253)
-    return false;
-  for (const label of canonical.split(".")) {
-    if (!IsIdnLabel(label))
-      return false;
-  }
-  return true;
+function IsIdnHostname2(value) {
+  return IsIdnHostname(value);
 }
-var init_idn_hostname = __esm({
+var init_idn_hostname2 = __esm({
   "node_modules/typebox/build/format/idn_hostname.mjs"() {
     init_idna();
   }
 });
 
 // node_modules/typebox/build/format/ipv4.mjs
-function IsIPv4Internal(value, start, end) {
-  let dots = 0;
-  let num = 0;
-  let digits = 0;
-  let leading = 0;
-  for (let i = start; i < end; i++) {
-    const ch = value.charCodeAt(i);
-    if (ch === 46) {
-      if (digits === 0 || num > 255 || leading === 48 && digits > 1)
-        return false;
-      dots++;
-      num = 0;
-      digits = 0;
-      leading = 0;
-    } else if (ch >= 48 && ch <= 57) {
-      if (digits === 0)
-        leading = ch;
-      num = num * 10 + (ch - 48);
-      digits++;
-    } else {
-      return false;
-    }
-  }
-  return dots === 3 && digits > 0 && num <= 255 && !(leading === 48 && digits > 1);
-}
 function IsIPv4(value) {
-  return IsIPv4Internal(value, 0, value.length);
+  return IPv4.test(value);
 }
+var IPv4;
 var init_ipv4 = __esm({
   "node_modules/typebox/build/format/ipv4.mjs"() {
+    IPv4 = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
   }
 });
 
 // node_modules/typebox/build/format/ipv6.mjs
-function InRange(ch) {
-  return ch >= 48 && ch <= 57 || // 0-9
-  ch >= 65 && ch <= 70 || // A-F
-  ch >= 97 && ch <= 102;
-}
 function IsIPv6(value) {
-  const length = value.length;
-  if (length === 0)
-    return false;
-  let groups = 0;
-  let compressed = false;
-  let i = 0;
-  if (value.charCodeAt(0) === 58 && value.charCodeAt(1) === 58) {
-    if (length === 2)
-      return true;
-    compressed = true;
-    i = 2;
-  }
-  while (i < length) {
-    let digits = 0;
-    const start = i;
-    while (i < length && InRange(value.charCodeAt(i))) {
-      i++;
-      digits++;
-    }
-    if (digits === 0)
-      return false;
-    const next = value.charCodeAt(i);
-    if (next === 46) {
-      if (!IsIPv4Internal(value, start, length))
-        return false;
-      groups += 2;
-      i = length;
-      break;
-    }
-    if (digits > 4)
-      return false;
-    groups++;
-    if (i === length)
-      break;
-    if (next !== 58)
-      return false;
-    i++;
-    if (value.charCodeAt(i) === 58) {
-      if (compressed)
-        return false;
-      if (value.charCodeAt(i + 1) === 58)
-        return false;
-      compressed = true;
-      i++;
-      if (i === length)
-        break;
-    }
-  }
-  return compressed ? groups <= 7 : groups === 8;
+  return IPv6.test(value);
 }
+var IPv6;
 var init_ipv6 = __esm({
   "node_modules/typebox/build/format/ipv6.mjs"() {
-    init_ipv4();
+    IPv6 = /^(?:(?:(?:[0-9a-f]{1,4}:){6}|::(?:[0-9a-f]{1,4}:){5}|(?:[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){4}|(?:(?:[0-9a-f]{1,4}:)?[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){3}|(?:(?:[0-9a-f]{1,4}:){0,2}[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){2}|(?:(?:[0-9a-f]{1,4}:){0,3}[0-9a-f]{1,4})?::[0-9a-f]{1,4}:|(?:(?:[0-9a-f]{1,4}:){0,4}[0-9a-f]{1,4})?::)(?:[0-9a-f]{1,4}:[0-9a-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[0-9a-f]{1,4}:){0,5}[0-9a-f]{1,4})?::[0-9a-f]{1,4}|(?:(?:[0-9a-f]{1,4}:){0,6}[0-9a-f]{1,4})?::)$/i;
   }
 });
 
 // node_modules/typebox/build/format/iri_reference.mjs
-function TryUrl(value) {
-  try {
-    new URL(value, "http://example.com");
-    return true;
-  } catch {
-    return false;
-  }
-}
 function IsIriReference(value) {
-  if (value.includes(" ")) {
-    return false;
-  }
-  if (value.includes("\\")) {
-    return false;
-  }
-  if (/[\x00-\x1F\x7F]/.test(value)) {
-    return false;
-  }
-  if (/%(?![0-9a-fA-F]{2})/.test(value)) {
-    return false;
-  }
-  if (value === "") {
-    return true;
-  }
-  const colonIndex = value.indexOf(":");
-  const hasValidSchemePrefix = colonIndex > 0 && // Colon must not be at the very beginning (e.g., ":foo")
-  /^[a-zA-Z][a-zA-Z0-9+\-.]*$/.test(value.substring(0, colonIndex));
-  if (hasValidSchemePrefix) {
-    return TryUrl(value);
-  } else {
-    const looksLikeMalformedSchemeAndAuthority = value.match(/^([a-zA-Z][a-zA-Z0-9+\-.]*)(\/\/)/);
-    if (looksLikeMalformedSchemeAndAuthority && colonIndex === -1) {
-      return false;
-    }
-    return TryUrl(value);
-  }
+  return !InvalidIriChars.test(value) && !MalformedScheme.test(value) && URL.canParse(value, "http://example.com");
 }
+var InvalidIriChars, MalformedScheme;
 var init_iri_reference = __esm({
   "node_modules/typebox/build/format/iri_reference.mjs"() {
+    InvalidIriChars = /[\x00-\x20\x7F\\]|%(?![0-9a-fA-F]{2})/;
+    MalformedScheme = /^[a-zA-Z][a-zA-Z0-9+\-.]*\/\//;
   }
 });
 
 // node_modules/typebox/build/format/iri.mjs
-function IsIri(value) {
-  try {
-    new URL(value);
-    return true;
-  } catch {
-    return false;
-  }
+function NarrowIpvFuture(value) {
+  return value.length < IpvFutureMatchMaxLength ? value.replace(IpvFutureMatch, "[::1]") : value;
 }
+function IsIri(value) {
+  if (InvalidIriChars2.test(value))
+    return false;
+  if (InvalidPercentEncoding.test(value))
+    return false;
+  return URL.canParse(NarrowIpvFuture(value));
+}
+var IpvFutureMatchMaxLength, IpvFutureMatch, InvalidIriChars2, InvalidPercentEncoding;
 var init_iri = __esm({
   "node_modules/typebox/build/format/iri.mjs"() {
+    IpvFutureMatchMaxLength = 2048;
+    IpvFutureMatch = /\[[vV][0-9a-fA-F]+\.[^\]]+\]/;
+    InvalidIriChars2 = /[\x00-\x20<>\^`{|}\\]/;
+    InvalidPercentEncoding = /%(?![0-9a-fA-F]{2})/;
   }
 });
 
@@ -12597,11 +12877,8 @@ var init_json_pointer = __esm({
 
 // node_modules/typebox/build/format/regex.mjs
 function IsRegex(value) {
-  if (value.length === 0) {
-    return false;
-  }
   try {
-    new RegExp(value);
+    new RegExp(value, "u");
     return true;
   } catch {
     return false;
@@ -12630,7 +12907,7 @@ function IsUriReference(value) {
 var UriReference;
 var init_uri_reference = __esm({
   "node_modules/typebox/build/format/uri_reference.mjs"() {
-    UriReference = /^(?!.*[^\x00-\x7F])(?!.*\\)(?:(?:[a-z][a-z0-9+\-.]*:)?(?:\/\/[^\s[\]{}<>^`|]*)?|[^\s[\]{}<>^`|]*)(?:\?[^\s[\]{}<>^`|]*)?(?:#[^\s[\]{}<>^`|]*)?$/i;
+    UriReference = /^(?:[a-z][a-z0-9+\-.]*:(?:\/\/(?:(?:[-a-z0-9._~!$&'()*+,;=:]|%[0-9a-f]{2})*@)?(?:\[(?:(?:(?:[\da-f]{1,4}:){6}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|::(?:[\da-f]{1,4}:){5}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:[\da-f]{1,4})?::(?:[\da-f]{1,4}:){4}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,1}[\da-f]{1,4})?::(?:[\da-f]{1,4}:){3}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,2}[\da-f]{1,4})?::(?:[\da-f]{1,4}:){2}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,3}[\da-f]{1,4})?::[\da-f]{1,4}:(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,4}[\da-f]{1,4})?::(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,5}[\da-f]{1,4})?::[\da-f]{1,4}|(?:(?:[\da-f]{1,4}:){0,6}[\da-f]{1,4})?::)|v[0-9a-f]+\.[-a-z0-9._~!$&'()*+,;=:]+)\]|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)|(?:[-a-z0-9._~!$&'()*+,;=]|%[0-9a-f]{2})*)(?::\d*)?(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*|\/(?:(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*)?|(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*)?|(?:\/\/(?:(?:[-a-z0-9._~!$&'()*+,;=:]|%[0-9a-f]{2})*@)?(?:\[(?:(?:(?:[\da-f]{1,4}:){6}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|::(?:[\da-f]{1,4}:){5}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:[\da-f]{1,4})?::(?:[\da-f]{1,4}:){4}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,1}[\da-f]{1,4})?::(?:[\da-f]{1,4}:){3}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,2}[\da-f]{1,4})?::(?:[\da-f]{1,4}:){2}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,3}[\da-f]{1,4})?::[\da-f]{1,4}:(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,4}[\da-f]{1,4})?::(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,5}[\da-f]{1,4})?::[\da-f]{1,4}|(?:(?:[\da-f]{1,4}:){0,6}[\da-f]{1,4})?::)|v[0-9a-f]+\.[-a-z0-9._~!$&'()*+,;=:]+)\]|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)|(?:[-a-z0-9._~!$&'()*+,;=]|%[0-9a-f]{2})*)(?::\d*)?(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*|\/(?:(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*)?|(?:[-a-z0-9._~!$&'()*+,;=@]|%[0-9a-f]{2})+(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*)?)(?:\?(?:[-a-z0-9._~!$&'()*+,;=:@/?]|%[0-9a-f]{2})*)?(?:#(?:[-a-z0-9._~!$&'()*+,;=:@/?]|%[0-9a-f]{2})*)?$/i;
   }
 });
 
@@ -12641,137 +12918,27 @@ function IsUriTemplate(value) {
 var UriTemplate;
 var init_uri_template = __esm({
   "node_modules/typebox/build/format/uri_template.mjs"() {
-    UriTemplate = /^(?:(?:[^\x00-\x20"'<>%\\^`{|}]|%[0-9a-f]{2})|\{[+#./;?&=,!@|]?(?:[a-z0-9_]|%[0-9a-f]{2})+(?::[1-9][0-9]{0,3}|\*)?(?:,(?:[a-z0-9_]|%[0-9a-f]{2})+(?::[1-9][0-9]{0,3}|\*)?)*\})*$/i;
+    UriTemplate = /^(?:(?:[^\x00-\x20"<>%\\^`{|}\x7f]|%[0-9a-f]{2})|\{[+#./;?&=,!@|]?(?:[a-z0-9_]|%[0-9a-f]{2})+(?:\.(?:[a-z0-9_]|%[0-9a-f]{2})+)*(?::[1-9]\d{0,3}|\*)?(?:,(?:[a-z0-9_]|%[0-9a-f]{2})+(?:\.(?:[a-z0-9_]|%[0-9a-f]{2})+)*(?::[1-9]\d{0,3}|\*)?)*\})*$/i;
   }
 });
 
 // node_modules/typebox/build/format/uri.mjs
-function IsAlpha(ch) {
-  return ch >= 97 && ch <= 122 || ch >= 65 && ch <= 90;
-}
-function IsAlphaNumeric(ch) {
-  return IsAlpha(ch) || ch >= 48 && ch <= 57;
-}
-function IsHex(ch) {
-  return ch >= 48 && ch <= 57 || // 0-9
-  ch >= 65 && ch <= 70 || // A-F
-  ch >= 97 && ch <= 102;
-}
-function IsSchemeChar(ch) {
-  return IsAlphaNumeric(ch) || ch === 43 || ch === 45 || ch === 46;
-}
-function IsUnreserved(ch) {
-  return IsAlphaNumeric(ch) || ch === 45 || ch === 46 || // '-', '.'
-  ch === 95 || ch === 126;
-}
-function IsSubDelim(ch) {
-  return ch === 33 || ch === 36 || ch === 38 || ch === 39 || ch === 40 || ch === 41 || ch === 42 || ch === 43 || ch === 44 || ch === 59 || ch === 61;
-}
-function IsPchar(ch) {
-  return IsUnreserved(ch) || IsSubDelim(ch) || ch === 58 || ch === 64;
-}
 function IsUri(value) {
-  const length = value.length;
-  if (length === 0)
-    return false;
-  if (!IsAlpha(value.charCodeAt(0)))
-    return false;
-  let i = 1;
-  while (i < length) {
-    const ch = value.charCodeAt(i);
-    if (ch === 58)
-      break;
-    if (!IsSchemeChar(ch))
-      return false;
-    i++;
-  }
-  if (value.charCodeAt(i) !== 58)
-    return false;
-  i++;
-  if (value.charCodeAt(i) === 47 && value.charCodeAt(i + 1) === 47) {
-    i += 2;
-    const authorityStart = i;
-    let atPos = -1;
-    for (let j = i; j < length; j++) {
-      const ch = value.charCodeAt(j);
-      if (ch === 64) {
-        atPos = j;
-        break;
-      }
-      if (ch === 47 || ch === 63 || ch === 35)
-        break;
-    }
-    if (atPos !== -1) {
-      for (let j = authorityStart; j < atPos; j++) {
-        const ch = value.charCodeAt(j);
-        if (ch === 91 || ch === 93)
-          return false;
-        if (ch === 37) {
-          if (j + 2 >= atPos || !IsHex(value.charCodeAt(j + 1)) || !IsHex(value.charCodeAt(j + 2)))
-            return false;
-          j += 2;
-        } else if (!IsUnreserved(ch) && !IsSubDelim(ch) && ch !== 58)
-          return false;
-      }
-      i = atPos + 1;
-    }
-    if (value.charCodeAt(i) === 91) {
-      i++;
-      while (i < length && value.charCodeAt(i) !== 93)
-        i++;
-      if (value.charCodeAt(i) !== 93)
-        return false;
-      i++;
-    } else {
-      while (i < length) {
-        const ch = value.charCodeAt(i);
-        if (ch === 47 || ch === 63 || ch === 35 || ch === 58)
-          break;
-        if (ch < 128 && !IsUnreserved(ch) && !IsSubDelim(ch))
-          return false;
-        i++;
-      }
-    }
-    if (value.charCodeAt(i) === 58) {
-      i++;
-      while (i < length) {
-        const ch = value.charCodeAt(i);
-        if (ch === 47 || ch === 63 || ch === 35)
-          break;
-        if (ch < 48 || ch > 57)
-          return false;
-        i++;
-      }
-    }
-  }
-  while (i < length) {
-    const ch = value.charCodeAt(i);
-    if (ch === 37) {
-      if (i + 2 >= length || !IsHex(value.charCodeAt(i + 1)) || !IsHex(value.charCodeAt(i + 2)))
-        return false;
-      i += 2;
-    } else if (ch > 127) {
-      return false;
-    } else if (!(IsPchar(ch) || ch === 47 || ch === 63 || ch === 35)) {
-      return false;
-    }
-    i++;
-  }
-  return true;
+  return Uri.test(value);
 }
+var Uri;
 var init_uri = __esm({
   "node_modules/typebox/build/format/uri.mjs"() {
+    Uri = /^[a-z][a-z0-9+\-.]*:(?:\/\/(?:(?:[-a-z0-9._~!$&'()*+,;=:]|%[0-9a-f]{2})*@)?(?:\[(?:(?:(?:[\da-f]{1,4}:){6}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|::(?:[\da-f]{1,4}:){5}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:[\da-f]{1,4})?::(?:[\da-f]{1,4}:){4}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,1}[\da-f]{1,4})?::(?:[\da-f]{1,4}:){3}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,2}[\da-f]{1,4})?::(?:[\da-f]{1,4}:){2}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,3}[\da-f]{1,4})?::[\da-f]{1,4}:(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,4}[\da-f]{1,4})?::(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,5}[\da-f]{1,4})?::[\da-f]{1,4}|(?:(?:[\da-f]{1,4}:){0,6}[\da-f]{1,4})?::)|v[0-9a-f]+\.[-a-z0-9._~!$&'()*+,;=:]+)\]|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)|(?:[-a-z0-9._~!$&'()*+,;=]|%[0-9a-f]{2})*)(?::\d*)?(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*|\/(?:(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*)?|(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*)?(?:\?(?:[-a-z0-9._~!$&'()*+,;=:@/?]|%[0-9a-f]{2})*)?(?:#(?:[-a-z0-9._~!$&'()*+,;=:@/?]|%[0-9a-f]{2})*)?$/i;
   }
 });
 
 // node_modules/typebox/build/format/url.mjs
 function IsUrl(value) {
-  return Url.test(value);
+  return URL.canParse(value);
 }
-var Url;
 var init_url = __esm({
   "node_modules/typebox/build/format/url.mjs"() {
-    Url = /^(?:https?|ftp):\/\/(?:\S+(?::\S*)?@)?(?:(?!(?:10|127)(?:\.\d{1,3}){3})(?!(?:169\.254|192\.168)(?:\.\d{1,3}){2})(?!172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2})(?:[1-9]\d?|1\d\d|2[01]\d|22[0-3])(?:\.(?:1?\d{1,2}|2[0-4]\d|25[0-5])){2}(?:\.(?:[1-9]\d?|1\d\d|2[0-4]\d|25[0-4]))|(?:(?:[a-z0-9\u{00a1}-\u{ffff}]+-)*[a-z0-9\u{00a1}-\u{ffff}]+)(?:\.(?:[a-z0-9\u{00a1}-\u{ffff}]+-)*[a-z0-9\u{00a1}-\u{ffff}]+)*(?:\.(?:[a-z\u{00a1}-\u{ffff}]{2,})))(?::\d{2,5})?(?:\/[^\s]*)?$/iu;
   }
 });
 
@@ -12811,9 +12978,9 @@ function Reset2() {
   formats.set("date", IsDate2);
   formats.set("duration", IsDuration);
   formats.set("email", IsEmail);
-  formats.set("hostname", IsHostname);
+  formats.set("hostname", IsHostname2);
   formats.set("idn-email", IsIdnEmail);
-  formats.set("idn-hostname", IsIdnHostname);
+  formats.set("idn-hostname", IsIdnHostname2);
   formats.set("ipv4", IsIPv4);
   formats.set("ipv6", IsIPv6);
   formats.set("iri-reference", IsIriReference);
@@ -12836,9 +13003,9 @@ var init_registry = __esm({
     init_date();
     init_duration();
     init_email();
-    init_hostname();
+    init_hostname2();
     init_idn_email();
-    init_idn_hostname();
+    init_idn_hostname2();
     init_ipv4();
     init_ipv6();
     init_iri_reference();
@@ -12869,11 +13036,11 @@ __export(format_exports, {
   IsDateTime: () => IsDateTime,
   IsDuration: () => IsDuration,
   IsEmail: () => IsEmail,
-  IsHostname: () => IsHostname,
+  IsHostname: () => IsHostname2,
   IsIPv4: () => IsIPv4,
   IsIPv6: () => IsIPv6,
   IsIdnEmail: () => IsIdnEmail,
-  IsIdnHostname: () => IsIdnHostname,
+  IsIdnHostname: () => IsIdnHostname2,
   IsIri: () => IsIri,
   IsIriReference: () => IsIriReference,
   IsJsonPointer: () => IsJsonPointer,
@@ -12897,9 +13064,9 @@ var init_format2 = __esm({
     init_date();
     init_duration();
     init_email();
-    init_hostname();
+    init_hostname2();
     init_idn_email();
-    init_idn_hostname();
+    init_idn_hostname2();
     init_ipv4();
     init_ipv6();
     init_iri_reference();
@@ -12962,7 +13129,7 @@ function CheckIf(stack, context, schema, value) {
 function ErrorIf(stack, context, schemaPath, instancePath, schema, value) {
   const thenSchema = IsThen(schema) ? schema.then : true;
   const elseSchema = IsElse(schema) ? schema.else : true;
-  const trueContext = new AccumulatedErrorContext();
+  const trueContext = new ErrorContext();
   const isIf = ErrorSchema(stack, trueContext, `${schemaPath}/if`, instancePath, schema.if, value) ? ErrorSchema(stack, trueContext, `${schemaPath}/then`, instancePath, thenSchema, value) || context.AddError({
     keyword: "if",
     schemaPath,
@@ -12988,14 +13155,23 @@ var init_if2 = __esm({
 });
 
 // node_modules/typebox/build/schema/engine/items.mjs
-function BuildItemsSized(stack, context, schema, value) {
+function BuildItemsSizedStandard(stack, context, schema, value) {
   return emit_exports.ReduceAnd(schema.items.map((schema2, index3) => {
     const isLength = emit_exports.IsLessEqualThan(emit_exports.Member(value, "length"), emit_exports.Constant(index3));
     const isSchema = BuildSchemaPushStack(stack, context, schema2, `${value}[${index3}]`);
     const addIndex = context.AddIndex(emit_exports.Constant(index3));
-    const guarded = context.UseUnevaluated() ? emit_exports.And(isSchema, addIndex) : isSchema;
-    return emit_exports.Or(isLength, guarded);
+    return emit_exports.Or(isLength, emit_exports.And(isSchema, addIndex));
   }));
+}
+function BuildItemsSizedFast(stack, context, schema, value) {
+  return emit_exports.ReduceAnd(schema.items.map((schema2, index3) => {
+    const isLength = emit_exports.IsLessEqualThan(emit_exports.Member(value, "length"), emit_exports.Constant(index3));
+    const isSchema = BuildSchemaPushStack(stack, context, schema2, `${value}[${index3}]`);
+    return emit_exports.Or(isLength, isSchema);
+  }));
+}
+function BuildItemsSized(stack, context, schema, value) {
+  return context.UseUnevaluated() ? BuildItemsSizedStandard(stack, context, schema, value) : BuildItemsSizedFast(stack, context, schema, value);
 }
 function CheckItemsSized(stack, context, schema, value) {
   return guard_exports.Every(schema.items, 0, (schema2, index3) => {
@@ -13009,12 +13185,19 @@ function ErrorItemsSized(stack, context, schemaPath, instancePath, schema, value
     return guard_exports.IsLessEqualThan(value.length, index3) || ErrorSchemaPushStack(stack, context, nextSchemaPath, nextInstancePath, schema2, value[index3]) && context.AddIndex(index3);
   });
 }
-function BuildItemsUnsized(stack, context, schema, value) {
+function BuildItemsUnsizedStandard(stack, context, schema, value) {
   const offset = IsPrefixItems(schema) ? schema.prefixItems.length : 0;
   const isSchema = BuildSchemaPushStack(stack, context, schema.items, "element");
   const addIndex = context.AddIndex("index");
-  const guarded = context.UseUnevaluated() ? emit_exports.And(isSchema, addIndex) : isSchema;
-  return emit_exports.Every(value, emit_exports.Constant(offset), ["element", "index"], guarded);
+  return emit_exports.Every(value, emit_exports.Constant(offset), ["element", "index"], emit_exports.And(isSchema, addIndex));
+}
+function BuildItemsUnsizedFast(stack, context, schema, value) {
+  const offset = IsPrefixItems(schema) ? schema.prefixItems.length : 0;
+  const isSchema = BuildSchemaPushStack(stack, context, schema.items, "element");
+  return emit_exports.Every(value, emit_exports.Constant(offset), ["element", "index"], isSchema);
+}
+function BuildItemsUnsized(stack, context, schema, value) {
+  return context.UseUnevaluated() ? BuildItemsUnsizedStandard(stack, context, schema, value) : BuildItemsUnsizedFast(stack, context, schema, value);
 }
 function CheckItemsUnsized(stack, context, schema, value) {
   const offset = IsPrefixItems(schema) ? schema.prefixItems.length : 0;
@@ -13054,14 +13237,14 @@ function IsValid3(schema) {
 function BuildMaxContains(stack, context, schema, value) {
   if (!IsValid3(schema))
     return emit_exports.Constant(true);
-  const [result, item] = [Unique(), Unique()];
-  const count = emit_exports.Call(emit_exports.Member(value, "reduce"), [emit_exports.ArrowFunction([result, item], emit_exports.Ternary(BuildSchema(stack, context, schema.contains, item), emit_exports.PrefixIncrement(result), result)), emit_exports.Constant(0)]);
+  const [item] = [Unique()];
+  const count = emit_exports.Counted(value, [item, "_"], BuildSchema(stack, context, schema.contains, item));
   return emit_exports.IsLessEqualThan(count, emit_exports.Constant(schema.maxContains));
 }
 function CheckMaxContains(stack, context, schema, value) {
   if (!IsValid3(schema))
     return true;
-  const count = value.reduce((result, item) => CheckSchema(stack, context, schema.contains, item) ? ++result : result, 0);
+  const count = guard_exports.Counted(value, (item) => CheckSchema(stack, context, schema.contains, item));
   return guard_exports.IsLessEqualThan(count, schema.maxContains);
 }
 function ErrorMaxContains(stack, context, schemaPath, instancePath, schema, value) {
@@ -13170,17 +13353,25 @@ var init_maxProperties2 = __esm({
 function IsValid4(schema) {
   return IsContains(schema);
 }
+function BuildMinContainsStandard(stack, context, schema, value) {
+  const [item, index3] = [Unique(), Unique()];
+  const count = emit_exports.Counted(value, [item, index3], emit_exports.And(BuildSchema(stack, context, schema.contains, item), context.AddIndex(index3)));
+  return emit_exports.IsGreaterEqualThan(count, emit_exports.Constant(schema.minContains));
+}
+function BuildMinContainsFast(stack, context, schema, value) {
+  const [item] = [Unique()];
+  const count = emit_exports.Counted(value, [item, "_"], BuildSchema(stack, context, schema.contains, item));
+  return emit_exports.IsGreaterEqualThan(count, emit_exports.Constant(schema.minContains));
+}
 function BuildMinContains(stack, context, schema, value) {
   if (!IsValid4(schema))
     return emit_exports.Constant(true);
-  const [result, item] = [Unique(), Unique()];
-  const count = emit_exports.Call(emit_exports.Member(value, "reduce"), [emit_exports.ArrowFunction([result, item], emit_exports.Ternary(BuildSchema(stack, context, schema.contains, item), emit_exports.PrefixIncrement(result), result)), emit_exports.Constant(0)]);
-  return emit_exports.IsGreaterEqualThan(count, emit_exports.Constant(schema.minContains));
+  return context.UseUnevaluated() ? BuildMinContainsStandard(stack, context, schema, value) : BuildMinContainsFast(stack, context, schema, value);
 }
 function CheckMinContains(stack, context, schema, value) {
   if (!IsValid4(schema))
     return true;
-  const count = value.reduce((result, item) => CheckSchema(stack, context, schema.contains, item) ? ++result : result, 0);
+  const count = guard_exports.Counted(value, (item, index3) => CheckSchema(stack, context, schema.contains, item) && context.AddIndex(index3));
   return guard_exports.IsGreaterEqualThan(count, schema.minContains);
 }
 function ErrorMinContains(stack, context, schemaPath, instancePath, schema, value) {
@@ -13306,14 +13497,14 @@ var init_multipleOf2 = __esm({
 });
 
 // node_modules/typebox/build/schema/engine/not.mjs
-function BuildNotUnevaluated(stack, context, schema, value) {
+function BuildNotStandard(stack, context, schema, value) {
   return Reducer(stack, context, [schema.not], value, emit_exports.Not(emit_exports.IsEqual(emit_exports.Member("results", "length"), emit_exports.Constant(1))));
 }
 function BuildNotFast(stack, context, schema, value) {
   return emit_exports.Not(BuildSchema(stack, context, schema.not, value));
 }
 function BuildNot(stack, context, schema, value) {
-  return context.UseUnevaluated() ? BuildNotUnevaluated(stack, context, schema, value) : BuildNotFast(stack, context, schema, value);
+  return context.UseUnevaluated() ? BuildNotStandard(stack, context, schema, value) : BuildNotFast(stack, context, schema, value);
 }
 function CheckNot(stack, context, schema, value) {
   const nextContext = new CheckContext();
@@ -13339,19 +13530,17 @@ var init_not2 = __esm({
 });
 
 // node_modules/typebox/build/schema/engine/oneOf.mjs
-function BuildOneOfUnevaluated(stack, context, schema, value) {
+function BuildOneOfStandard(stack, context, schema, value) {
   return Reducer(stack, context, schema.oneOf, value, emit_exports.IsEqual(emit_exports.Member("results", "length"), emit_exports.Constant(1)));
 }
 function BuildOneOfFast(stack, context, schema, value) {
+  const [result] = [Unique()];
   const results = emit_exports.ArrayLiteral(schema.oneOf.map((schema2) => BuildSchema(stack, context, schema2, value)));
-  const count = emit_exports.Call(emit_exports.Member(results, "reduce"), [
-    emit_exports.ArrowFunction(["count", "result"], emit_exports.Ternary(emit_exports.IsEqual("result", emit_exports.Constant(true)), emit_exports.PrefixIncrement("count"), "count")),
-    emit_exports.Constant(0)
-  ]);
+  const count = emit_exports.Counted(results, [result, "_"], emit_exports.IsEqual(result, emit_exports.Constant(true)));
   return emit_exports.IsEqual(count, emit_exports.Constant(1));
 }
 function BuildOneOf(stack, context, schema, value) {
-  return context.UseUnevaluated() ? BuildOneOfUnevaluated(stack, context, schema, value) : BuildOneOfFast(stack, context, schema, value);
+  return context.UseUnevaluated() ? BuildOneOfStandard(stack, context, schema, value) : BuildOneOfFast(stack, context, schema, value);
 }
 function CheckOneOf(stack, context, schema, value) {
   const passedContexts = schema.oneOf.reduce((result, schema2) => {
@@ -13364,7 +13553,7 @@ function ErrorOneOf(stack, context, schemaPath, instancePath, schema, value) {
   const failedContexts = [];
   const passingSchemas = [];
   const passedContexts = schema.oneOf.reduce((result, schema2, index3) => {
-    const nextContext = new AccumulatedErrorContext();
+    const nextContext = new ErrorContext();
     const nextSchemaPath = `${schemaPath}/oneOf/${index3}`;
     const isSchema = ErrorSchema(stack, nextContext, nextSchemaPath, instancePath, schema2, value);
     if (isSchema)
@@ -13389,16 +13578,17 @@ var init_oneOf2 = __esm({
     init_reducer();
     init_guard2();
     init_schema3();
+    init_unique();
   }
 });
 
 // node_modules/typebox/build/schema/engine/pattern.mjs
 function BuildPattern(_stack, _context, schema, value) {
-  const regexp = CreateVariable(guard_exports.IsString(schema.pattern) ? new RegExp(schema.pattern, "u") : schema.pattern);
+  const regexp = CreateVariable(guard_exports.IsString(schema.pattern) ? UnicodeRegExp(schema.pattern) : schema.pattern);
   return emit_exports.Call(emit_exports.Member(regexp, "test"), [value]);
 }
 function CheckPattern(_stack, _context, schema, value) {
-  const regexp = guard_exports.IsString(schema.pattern) ? new RegExp(schema.pattern, "u") : schema.pattern;
+  const regexp = guard_exports.IsString(schema.pattern) ? UnicodeRegExp(schema.pattern) : schema.pattern;
   return regexp.test(value);
 }
 function ErrorPattern(stack, context, schemaPath, instancePath, schema, value) {
@@ -13409,10 +13599,11 @@ function ErrorPattern(stack, context, schemaPath, instancePath, schema, value) {
     params: { pattern: schema.pattern }
   });
 }
-var init_pattern3 = __esm({
+var init_pattern4 = __esm({
   "node_modules/typebox/build/schema/engine/pattern.mjs"() {
     init_externals();
     init_guard2();
+    init_regexp();
   }
 });
 
@@ -13420,7 +13611,7 @@ var init_pattern3 = __esm({
 function BuildPatternProperties(stack, context, schema, value) {
   return emit_exports.ReduceAnd(guard_exports.Entries(schema.patternProperties).map(([pattern, schema2]) => {
     const [key, prop] = [Unique(), Unique()];
-    const regexp = CreateVariable(new RegExp(pattern, "u"));
+    const regexp = CreateVariable(UnicodeRegExp(pattern));
     const notKey = emit_exports.Not(emit_exports.Call(emit_exports.Member(regexp, "test"), [key]));
     const isSchema = BuildSchemaPushStack(stack, context, schema2, prop);
     const addKey = context.AddKey(key);
@@ -13430,7 +13621,7 @@ function BuildPatternProperties(stack, context, schema, value) {
 }
 function CheckPatternProperties(stack, context, schema, value) {
   return guard_exports.Every(guard_exports.Entries(schema.patternProperties), 0, ([pattern, schema2]) => {
-    const regexp = new RegExp(pattern, "u");
+    const regexp = UnicodeRegExp(pattern);
     return guard_exports.Every(guard_exports.Entries(value), 0, ([key, prop]) => {
       return !regexp.test(key) || CheckSchemaPushStack(stack, context, schema2, prop) && context.AddKey(key);
     });
@@ -13439,7 +13630,7 @@ function CheckPatternProperties(stack, context, schema, value) {
 function ErrorPatternProperties(stack, context, schemaPath, instancePath, schema, value) {
   return guard_exports.EveryAll(guard_exports.Entries(schema.patternProperties), 0, ([pattern, schema2]) => {
     const nextSchemaPath = `${schemaPath}/patternProperties/${pattern}`;
-    const regexp = new RegExp(pattern, "u");
+    const regexp = UnicodeRegExp(pattern);
     return guard_exports.EveryAll(guard_exports.Entries(value), 0, ([key, value2]) => {
       const nextInstancePath = `${instancePath}/${key}`;
       const notKey = !regexp.test(key);
@@ -13451,6 +13642,7 @@ var init_patternProperties2 = __esm({
   "node_modules/typebox/build/schema/engine/patternProperties.mjs"() {
     init_externals();
     init_unique();
+    init_regexp();
     init_guard2();
     init_schema3();
   }
@@ -13555,8 +13747,7 @@ function ErrorPropertyNames(stack, context, schemaPath, instancePath, schema, va
   const isPropertyNames = guard_exports.EveryAll(guard_exports.Keys(value), 0, (key, _index) => {
     const nextInstancePath = `${instancePath}/${key}`;
     const nextSchemaPath = `${schemaPath}/propertyNames`;
-    const nextContext = new AccumulatedErrorContext();
-    const isPropertyName = ErrorSchema(stack, nextContext, nextSchemaPath, nextInstancePath, schema.propertyNames, key);
+    const isPropertyName = ErrorSchema(stack, context, nextSchemaPath, nextInstancePath, schema.propertyNames, key);
     if (!isPropertyName)
       propertyNames.push(key);
     return isPropertyName;
@@ -13571,7 +13762,6 @@ function ErrorPropertyNames(stack, context, schemaPath, instancePath, schema, va
 var init_propertyNames2 = __esm({
   "node_modules/typebox/build/schema/engine/propertyNames.mjs"() {
     init_unique();
-    init_context2();
     init_guard2();
     init_schema3();
   }
@@ -13626,7 +13816,7 @@ function CheckRef(stack, context, schema, value) {
 }
 function ErrorRef(stack, context, _schemaPath, instancePath, schema, value) {
   const target = stack.Ref(schema) ?? false;
-  const nextContext = new AccumulatedErrorContext();
+  const nextContext = new ErrorContext();
   const result = IsSchema2(target) && ErrorSchema(stack, nextContext, "#", instancePath, target, value);
   if (result)
     context.Merge([nextContext]);
@@ -13695,7 +13885,7 @@ function BuildTypeNames(stack, context, typenames, value) {
   return emit_exports.ReduceOr(typenames.map((type) => BuildTypeName(stack, context, type, value)));
 }
 function CheckTypeNames(stack, context, types, schema, value) {
-  return types.some((type) => CheckTypeName(stack, context, type, schema, value));
+  return guard_exports.Some(types, (type) => CheckTypeName(stack, context, type, schema, value));
 }
 function BuildType(stack, context, schema, value) {
   return guard_exports.IsArray(schema.type) ? BuildTypeNames(stack, context, schema.type, value) : BuildTypeName(stack, context, schema.type, value);
@@ -13741,7 +13931,7 @@ function ErrorUnevaluatedItems(stack, context, schemaPath, instancePath, schema,
   const indices = context.GetIndices();
   const unevaluatedItems = [];
   const isUnevaluatedItems = guard_exports.EveryAll(value, 0, (item, index3) => {
-    const nextContext = new AccumulatedErrorContext();
+    const nextContext = new ErrorContext();
     const isEvaluatedItem = (indices.has(index3) || ErrorSchema(stack, nextContext, schemaPath, instancePath, schema.unevaluatedItems, item)) && context.AddIndex(index3);
     if (!isEvaluatedItem)
       unevaluatedItems.push(index3);
@@ -13786,7 +13976,7 @@ function ErrorUnevaluatedProperties(stack, context, schemaPath, instancePath, sc
   const keys = context.GetKeys();
   const unevaluatedProperties = [];
   const isUnevaluatedProperties = guard_exports.EveryAll(guard_exports.Entries(value), 0, ([key, prop]) => {
-    const nextContext = new AccumulatedErrorContext();
+    const nextContext = new ErrorContext();
     const isEvaluatedProperty = keys.has(key) || ErrorSchema(stack, nextContext, schemaPath, instancePath, schema.unevaluatedProperties, prop) && context.AddKey(key);
     if (!isEvaluatedProperty)
       unevaluatedProperties.push(key);
@@ -13860,25 +14050,25 @@ function HasObjectType(schema) {
   return HasTypeName(schema, "object");
 }
 function HasObjectKeywords(schema) {
-  return IsSchemaObject(schema) && (IsAdditionalProperties(schema) || IsDependencies(schema) || IsDependentRequired(schema) || IsDependentSchemas(schema) || IsProperties(schema) || IsPatternProperties(schema) || IsPropertyNames(schema) || IsMinProperties(schema) || IsMaxProperties(schema) || IsRequired(schema) || IsUnevaluatedProperties(schema));
+  return IsSchemaObject2(schema) && (IsAdditionalProperties(schema) || IsDependencies(schema) || IsDependentRequired(schema) || IsDependentSchemas(schema) || IsProperties(schema) || IsPatternProperties(schema) || IsPropertyNames(schema) || IsMinProperties(schema) || IsMaxProperties(schema) || IsRequired(schema) || IsUnevaluatedProperties(schema));
 }
 function HasArrayType(schema) {
   return HasTypeName(schema, "array");
 }
 function HasArrayKeywords(schema) {
-  return IsSchemaObject(schema) && (IsAdditionalItems(schema) || IsItems(schema) || IsContains(schema) || IsMaxContains(schema) || IsMaxItems(schema) || IsMinContains(schema) || IsMinItems(schema) || IsPrefixItems(schema) || IsUnevaluatedItems(schema) || IsUniqueItems(schema));
+  return IsSchemaObject2(schema) && (IsAdditionalItems(schema) || IsItems(schema) || IsContains(schema) || IsMaxContains(schema) || IsMaxItems(schema) || IsMinContains(schema) || IsMinItems(schema) || IsPrefixItems(schema) || IsUnevaluatedItems(schema) || IsUniqueItems(schema));
 }
 function HasStringType(schema) {
   return HasTypeName(schema, "string");
 }
 function HasStringKeywords(schema) {
-  return IsSchemaObject(schema) && (IsMinLength4(schema) || IsMaxLength4(schema) || IsFormat(schema) || IsPattern(schema));
+  return IsSchemaObject2(schema) && (IsMinLength4(schema) || IsMaxLength4(schema) || IsFormat(schema) || IsPattern(schema));
 }
 function HasNumberType(schema) {
   return HasTypeName(schema, "number") || HasTypeName(schema, "bigint");
 }
 function HasNumberKeywords(schema) {
-  return IsSchemaObject(schema) && (IsMinimum(schema) || IsMaximum(schema) || IsExclusiveMaximum(schema) || IsExclusiveMinimum(schema) || IsMultipleOf2(schema));
+  return IsSchemaObject2(schema) && (IsMinimum(schema) || IsMaximum(schema) || IsExclusiveMaximum(schema) || IsExclusiveMinimum(schema) || IsMultipleOf2(schema));
 }
 function BuildSchemaPushStack(stack, context, schema, value) {
   return context.UseUnevaluated() ? emit_exports.And(emit_exports.And(context.Push(), BuildSchema(stack, context, schema, value)), context.Pop()) : BuildSchema(stack, context, schema, value);
@@ -14013,6 +14203,8 @@ function ErrorSchemaPushStack(stack, context, schemaPath, instancePath, schema, 
   return context.Push() && ErrorSchema(stack, context, schemaPath, instancePath, schema, value) && context.Pop();
 }
 function ErrorSchema(stack, context, schemaPath, instancePath, schema, value) {
+  if (context.AtCapacity())
+    return false;
   stack.Push(schema);
   const result = IsSchemaBoolean(schema) ? ErrorSchemaBoolean(stack, context, schemaPath, instancePath, schema, value) : !!(+(!IsType(schema) || ErrorType(stack, context, schemaPath, instancePath, schema, value)) & +(!(guard_exports.IsObject(value) && !guard_exports.IsArray(value)) || !!(+(!IsRequired(schema) || ErrorRequired(stack, context, schemaPath, instancePath, schema, value)) & +(!IsAdditionalProperties(schema) || ErrorAdditionalProperties(stack, context, schemaPath, instancePath, schema, value)) & +(!IsDependencies(schema) || ErrorDependencies(stack, context, schemaPath, instancePath, schema, value)) & +(!IsDependentRequired(schema) || ErrorDependentRequired(stack, context, schemaPath, instancePath, schema, value)) & +(!IsDependentSchemas(schema) || ErrorDependentSchemas(stack, context, schemaPath, instancePath, schema, value)) & +(!IsPatternProperties(schema) || ErrorPatternProperties(stack, context, schemaPath, instancePath, schema, value)) & +(!IsProperties(schema) || ErrorProperties(stack, context, schemaPath, instancePath, schema, value)) & +(!IsPropertyNames(schema) || ErrorPropertyNames(stack, context, schemaPath, instancePath, schema, value)) & +(!IsMinProperties(schema) || ErrorMinProperties(stack, context, schemaPath, instancePath, schema, value)) & +(!IsMaxProperties(schema) || ErrorMaxProperties(stack, context, schemaPath, instancePath, schema, value)))) & +(!guard_exports.IsArray(value) || !!(+(!IsAdditionalItems(schema) || ErrorAdditionalItems(stack, context, schemaPath, instancePath, schema, value)) & +(!IsContains(schema) || ErrorContains(stack, context, schemaPath, instancePath, schema, value)) & +(!IsItems(schema) || ErrorItems(stack, context, schemaPath, instancePath, schema, value)) & +(!IsMaxContains(schema) || ErrorMaxContains(stack, context, schemaPath, instancePath, schema, value)) & +(!IsMaxItems(schema) || ErrorMaxItems(stack, context, schemaPath, instancePath, schema, value)) & +(!IsMinContains(schema) || ErrorMinContains(stack, context, schemaPath, instancePath, schema, value)) & +(!IsMinItems(schema) || ErrorMinItems(stack, context, schemaPath, instancePath, schema, value)) & +(!IsPrefixItems(schema) || ErrorPrefixItems(stack, context, schemaPath, instancePath, schema, value)) & +(!IsUniqueItems(schema) || ErrorUniqueItems(stack, context, schemaPath, instancePath, schema, value)))) & +(!guard_exports.IsString(value) || !!(+(!IsMaxLength4(schema) || ErrorMaxLength(stack, context, schemaPath, instancePath, schema, value)) & +(!IsMinLength4(schema) || ErrorMinLength(stack, context, schemaPath, instancePath, schema, value)) & +(!IsFormat(schema) || ErrorFormat(stack, context, schemaPath, instancePath, schema, value)) & +(!IsPattern(schema) || ErrorPattern(stack, context, schemaPath, instancePath, schema, value)))) & +(!(guard_exports.IsNumber(value) || guard_exports.IsBigInt(value)) || !!(+(!IsExclusiveMaximum(schema) || ErrorExclusiveMaximum(stack, context, schemaPath, instancePath, schema, value)) & +(!IsExclusiveMinimum(schema) || ErrorExclusiveMinimum(stack, context, schemaPath, instancePath, schema, value)) & +(!IsMaximum(schema) || ErrorMaximum(stack, context, schemaPath, instancePath, schema, value)) & +(!IsMinimum(schema) || ErrorMinimum(stack, context, schemaPath, instancePath, schema, value)) & +(!IsMultipleOf2(schema) || ErrorMultipleOf(stack, context, schemaPath, instancePath, schema, value)))) & +(!IsRef2(schema) || ErrorRef(stack, context, schemaPath, instancePath, schema, value)) & +(!IsRecursiveRef(schema) || ErrorRecursiveRef(stack, context, schemaPath, instancePath, schema, value)) & +(!IsDynamicRef(schema) || ErrorDynamicRef(stack, context, schemaPath, instancePath, schema, value)) & +(!IsConst(schema) || ErrorConst(stack, context, schemaPath, instancePath, schema, value)) & +(!IsEnum2(schema) || ErrorEnum(stack, context, schemaPath, instancePath, schema, value)) & +(!IsIf(schema) || ErrorIf(stack, context, schemaPath, instancePath, schema, value)) & +(!IsNot(schema) || ErrorNot(stack, context, schemaPath, instancePath, schema, value)) & +(!IsAllOf(schema) || ErrorAllOf(stack, context, schemaPath, instancePath, schema, value)) & +(!IsAnyOf(schema) || ErrorAnyOf(stack, context, schemaPath, instancePath, schema, value)) & +(!IsOneOf(schema) || ErrorOneOf(stack, context, schemaPath, instancePath, schema, value)) & +(!IsUnevaluatedItems(schema) || (!guard_exports.IsArray(value) || ErrorUnevaluatedItems(stack, context, schemaPath, instancePath, schema, value))) & +(!IsUnevaluatedProperties(schema) || (!guard_exports.IsObject(value) || ErrorUnevaluatedProperties(stack, context, schemaPath, instancePath, schema, value)))) && (!IsRefine2(schema) || ErrorRefine(stack, context, schemaPath, instancePath, schema, value));
   stack.Pop(schema);
@@ -14053,7 +14245,7 @@ var init_schema3 = __esm({
     init_multipleOf2();
     init_not2();
     init_oneOf2();
-    init_pattern3();
+    init_pattern4();
     init_patternProperties2();
     init_prefixItems2();
     init_properties3();
@@ -14070,7 +14262,7 @@ var init_schema3 = __esm({
 
 // node_modules/typebox/build/schema/engine/_functions.mjs
 function NextName() {
-  return hash_exports.Hash(index2[0]++);
+  return `${index2[0]++}`;
 }
 function CreateName(schema, href) {
   if (!names.has(schema))
@@ -14098,7 +14290,7 @@ function GetFunctions() {
   return [...funcs.values()];
 }
 function CreateFunction(stack, context, schema, value) {
-  const name = CreateName(schema, stack.BaseURL().href);
+  const name = CreateName(schema, stack.LexicalBaseURL());
   const call = CreateCallExpression(context, schema, name, value);
   if (funcs.has(name))
     return call;
@@ -14109,7 +14301,6 @@ function CreateFunction(stack, context, schema, value) {
 var index2, names, funcs;
 var init_functions = __esm({
   "node_modules/typebox/build/schema/engine/_functions.mjs"() {
-    init_hashing();
     init_guard2();
     init_schema3();
     index2 = [0];
@@ -14224,15 +14415,56 @@ var init_pointer2 = __esm({
   }
 });
 
-// node_modules/typebox/build/schema/resolve/ref.mjs
-function MatchId(schema, base, ref) {
-  if (schema.$id === ref.hash)
+// node_modules/typebox/build/schema/resolve/resolve.mjs
+var resolve_exports = {};
+__export(resolve_exports, {
+  Base: () => Base2,
+  DefaultBase: () => DefaultBase,
+  DynamicRef: () => DynamicRef,
+  Ref: () => Ref2,
+  ResolveDynamicRef: () => ResolveDynamicRef,
+  ResolveRecursiveRef: () => ResolveRecursiveRef,
+  ResolveRef: () => ResolveRef,
+  Resource: () => Resource
+});
+function FindDynamicAnchor(schema, name) {
+  if (guard_exports.IsObject(schema) && IsDynamicAnchor(schema) && guard_exports.IsEqual(schema.$dynamicAnchor, name)) {
     return schema;
-  const absoluteId = new URL(schema.$id, base.href);
-  const absoluteRef = new URL(ref.href, base.href);
-  if (guard_exports.IsEqual(absoluteId.pathname, absoluteRef.pathname)) {
-    return ref.hash.startsWith("#") ? MatchHash(schema, base, ref) : schema;
   }
+  if (guard_exports.IsObject(schema)) {
+    for (const key of guard_exports.Keys(schema)) {
+      const result = FindDynamicAnchor(schema[key], name);
+      if (result)
+        return result;
+    }
+  }
+  return void 0;
+}
+function FindBase(schema, base, target) {
+  if (guard_exports.IsEqual(schema, target))
+    return base.href;
+  const nextBase = IsSchemaObject2(schema) && IsId(schema) ? new URL(schema.$id, base.href) : base;
+  if (guard_exports.IsArray(schema)) {
+    for (const item of schema) {
+      const result = FindBase(item, nextBase, target);
+      if (!guard_exports.IsUndefined(result))
+        return result;
+    }
+  } else if (guard_exports.IsObject(schema)) {
+    for (const key of guard_exports.Keys(schema)) {
+      const result = FindBase(schema[key], nextBase, target);
+      if (!guard_exports.IsUndefined(result))
+        return result;
+    }
+  }
+  return void 0;
+}
+function MatchId(schema, base, ref) {
+  if (guard_exports.IsEqual(schema.$id, ref.hash))
+    return schema;
+  const absoluteRef = new URL(ref.href, base.href);
+  if (guard_exports.IsEqual(base.pathname, absoluteRef.pathname))
+    return ref.hash.startsWith("#") ? MatchHash(schema, ref) : schema;
   return void 0;
 }
 function MatchAnchor(schema, base, ref) {
@@ -14243,9 +14475,10 @@ function MatchAnchor(schema, base, ref) {
 function MatchDynamicAnchor(schema, base, ref) {
   const absoluteAnchor = new URL(`#${schema.$dynamicAnchor}`, base.href);
   const absoluteRef = new URL(ref.href, base.href);
-  return guard_exports.IsEqual(absoluteAnchor.href, absoluteRef.href) ? schema : void 0;
+  const isMatch = guard_exports.IsEqual(absoluteAnchor.href, absoluteRef.href);
+  return isMatch ? schema : void 0;
 }
-function MatchHash(schema, _base, ref) {
+function MatchHash(schema, ref) {
   if (ref.href.endsWith("#"))
     return schema;
   if (!ref.hash.startsWith("#"))
@@ -14253,7 +14486,8 @@ function MatchHash(schema, _base, ref) {
   const fragment = decodeURIComponent(ref.hash.slice(1));
   if (!fragment.startsWith("/"))
     return void 0;
-  return pointer_exports.Get(schema, fragment);
+  const result = pointer_exports.Get(schema, fragment);
+  return result;
 }
 function Match4(schema, base, ref) {
   if (IsId(schema)) {
@@ -14271,7 +14505,7 @@ function Match4(schema, base, ref) {
     if (!guard_exports.IsUndefined(result))
       return result;
   }
-  return MatchHash(schema, base, ref);
+  return MatchHash(schema, ref);
 }
 function FromArray6(schema, base, ref) {
   return schema.reduce((result, item) => {
@@ -14279,15 +14513,20 @@ function FromArray6(schema, base, ref) {
     return !guard_exports.IsUndefined(match) ? match : result;
   }, void 0);
 }
+function SkipProperty(key) {
+  return guard_exports.IsEqual(key, "const") || guard_exports.IsEqual(key, "enum");
+}
 function FromObject10(schema, base, ref) {
   return guard_exports.Keys(schema).reduce((result, key) => {
+    if (SkipProperty(key))
+      return result;
     const match = FromValue3(schema[key], base, ref);
     return !guard_exports.IsUndefined(match) ? match : result;
   }, void 0);
 }
 function FromValue3(schema, base, ref) {
-  const nextBase = IsSchemaObject(schema) && IsId(schema) ? new URL(schema.$id, base.href) : base;
-  if (IsSchemaObject(schema)) {
+  const nextBase = IsSchemaObject2(schema) && IsId(schema) ? new URL(schema.$id, base.href) : base;
+  if (IsSchemaObject2(schema)) {
     const result = Match4(schema, nextBase, ref);
     if (!guard_exports.IsUndefined(result))
       return result;
@@ -14298,41 +14537,116 @@ function FromValue3(schema, base, ref) {
     return FromObject10(schema, nextBase, ref);
   return void 0;
 }
-function Ref2(schema, ref) {
-  const defaultBase = new URL("http://unknown/");
-  const initialBase = IsId(schema) ? new URL(schema.$id, defaultBase.href) : defaultBase;
-  const initialRef = new URL(ref, initialBase.href);
-  return FromValue3(schema, initialBase, initialRef);
+function Base2(schema, base, target) {
+  return FindBase(schema, new URL(base || ".", DefaultBase), target);
 }
-function DynamicRef(root, base, dynamicRef, dynamicAnchors) {
-  const fragmentTarget = dynamicRef.$dynamicRef.startsWith("#") ? Ref2(base, dynamicRef.$dynamicRef) : Ref2(root, dynamicRef.$dynamicRef);
-  if (guard_exports.IsUndefined(fragmentTarget))
+function Resource(context, schema, base, ref) {
+  const result = Ref2(context, schema, base, ref, false);
+  return IsSchemaObject2(result) && IsId(result) ? result : void 0;
+}
+function CanonicalHref(url) {
+  return url.href.split("#")[0];
+}
+function RefContext(context, ref) {
+  return guard_exports.HasPropertyKey(context, ref) ? context[ref] : void 0;
+}
+function RefLocal(schema, base, ref) {
+  return FromValue3(schema, base, ref);
+}
+function RefRemote(context, base, ref) {
+  const canonicalHref = CanonicalHref(ref);
+  if (guard_exports.IsEqual(canonicalHref, CanonicalHref(base)))
     return void 0;
-  if (!IsSchemaObject(fragmentTarget) || !IsDynamicAnchor(fragmentTarget))
+  if (!guard_exports.HasPropertyKey(context, canonicalHref))
+    return void 0;
+  const remoteSchema = context[canonicalHref];
+  const remoteBase = IsSchemaObject2(remoteSchema) && IsId(remoteSchema) ? new URL(remoteSchema.$id, canonicalHref) : new URL(canonicalHref);
+  const result = guard_exports.IsEqual(ref.hash, "") ? remoteSchema : FromValue3(remoteSchema, remoteBase, ref);
+  return result;
+}
+function LegacyRetrievedResource(root, lexicalSchema, referenceBase, ref, schema) {
+  if (!ref.$ref.startsWith("#"))
+    return void 0;
+  if (guard_exports.HasPropertyKey(root, "$schema"))
+    return void 0;
+  const targetBase = Base2(lexicalSchema, referenceBase, schema);
+  if (guard_exports.IsUndefined(targetBase) || guard_exports.IsEqual(targetBase, referenceBase))
+    return void 0;
+  return { target: schema, base: targetBase, root: lexicalSchema };
+}
+function RemoteRetrievedResource(context, canonical, schema) {
+  const remoteRoot = context[canonical];
+  if (!IsSchemaObject2(remoteRoot))
+    return void 0;
+  return { target: schema, base: canonical, root: remoteRoot };
+}
+function FindRetrievedResource(stackframe, ref, schema, canonical, isRemote) {
+  const remote = isRemote ? RemoteRetrievedResource(stackframe.context, canonical, schema) : void 0;
+  if (!guard_exports.IsUndefined(remote))
+    return remote;
+  return LegacyRetrievedResource(stackframe.root, stackframe.lexicalSchema, stackframe.referenceBase, ref, schema);
+}
+function FindResolvedResource(context, root, referenceBase, canonical, schema, ids) {
+  if (IsId(schema))
+    return void 0;
+  const resource = Resource(context, root, referenceBase, canonical);
+  if (!resource || ids.includes(resource))
+    return void 0;
+  return { target: schema, resource };
+}
+function Ref2(remotes, schema, base, ref, applySchemaId = true) {
+  const initialBase = new URL(base || ".", DefaultBase);
+  const resolvedBase = applySchemaId && IsId(schema) ? new URL(schema.$id, initialBase) : initialBase;
+  const initialRef = new URL(ref, resolvedBase.href);
+  return RefContext(remotes, ref) ?? RefLocal(schema, resolvedBase, initialRef) ?? RefRemote(remotes, resolvedBase, initialRef);
+}
+function DynamicRef(context, root, base, schema, dynamicRef, dynamicAnchors) {
+  const initialBase = new URL(base || ".", DefaultBase);
+  const fragmentRoot = dynamicRef.$dynamicRef.startsWith("#") ? schema : root;
+  const fragmentTarget = Ref2(context, fragmentRoot, base, dynamicRef.$dynamicRef, false);
+  if (guard_exports.IsUndefined(fragmentTarget)) {
+    const fragment2 = new URL(dynamicRef.$dynamicRef, initialBase).hash;
+    if (!fragment2.startsWith("#/") && fragment2.startsWith("#")) {
+      const name = decodeURIComponent(fragment2.slice(1));
+      const anchorTarget2 = dynamicAnchors.find((anchor) => guard_exports.IsEqual(anchor.$dynamicAnchor, name)) ?? FindDynamicAnchor(root, name);
+      return anchorTarget2;
+    }
+    return void 0;
+  }
+  if (!IsSchemaObject2(fragmentTarget) || !IsDynamicAnchor(fragmentTarget))
     return fragmentTarget;
-  const fragment = new URL(dynamicRef.$dynamicRef, "http://unknown/").hash;
+  const fragment = new URL(dynamicRef.$dynamicRef, initialBase).hash;
   if (fragment.startsWith("#/"))
     return fragmentTarget;
-  const anchorTarget = dynamicAnchors.find((anchor) => anchor.$dynamicAnchor === fragmentTarget.$dynamicAnchor);
+  const anchorTarget = dynamicAnchors.find((anchor) => guard_exports.IsEqual(anchor.$dynamicAnchor, fragmentTarget.$dynamicAnchor));
   return anchorTarget ?? fragmentTarget;
 }
-var init_ref5 = __esm({
-  "node_modules/typebox/build/schema/resolve/ref.mjs"() {
+function ResolveRef(stackframe, ref) {
+  const source = stackframe.inRetrievedFrame ? stackframe.lexicalSchema : stackframe.root;
+  const refRoot = ref.$ref.startsWith("#") ? stackframe.lexicalSchema : source;
+  const schema = Ref2(stackframe.context, refRoot, stackframe.referenceBase, ref.$ref, false);
+  if (!schema || !IsSchemaObject2(schema))
+    return { schema };
+  const canonical = new URL(ref.$ref, stackframe.referenceBase).href.split("#")[0];
+  const isRemote = !guard_exports.IsEqual(canonical, stackframe.resourceBase);
+  const retrievedResource = FindRetrievedResource(stackframe, ref, schema, canonical, isRemote);
+  const resolvedResource = isRemote ? FindResolvedResource(stackframe.context, stackframe.root, stackframe.referenceBase, canonical, schema, stackframe.ids) : void 0;
+  return { schema, retrievedResource, resolvedResource };
+}
+function ResolveRecursiveRef(stackframe, recursiveRef) {
+  const refRoot = IsRecursiveAnchorTrue(stackframe.lexicalSchema) ? stackframe.recursiveAnchors[0] : stackframe.lexicalSchema;
+  return Ref2(stackframe.context, refRoot, stackframe.lexicalBase, recursiveRef.$recursiveRef, false);
+}
+function ResolveDynamicRef(stackframe, dynamicRef) {
+  return DynamicRef(stackframe.context, stackframe.root, stackframe.lexicalBase, stackframe.lexicalSchema, dynamicRef, stackframe.dynamicAnchors);
+}
+var DefaultBase;
+var init_resolve2 = __esm({
+  "node_modules/typebox/build/schema/resolve/resolve.mjs"() {
     init_guard2();
     init_pointer2();
     init_types4();
-  }
-});
-
-// node_modules/typebox/build/schema/resolve/resolve.mjs
-var resolve_exports = {};
-__export(resolve_exports, {
-  DynamicRef: () => DynamicRef,
-  Ref: () => Ref2
-});
-var init_resolve2 = __esm({
-  "node_modules/typebox/build/schema/resolve/resolve.mjs"() {
-    init_ref5();
+    DefaultBase = "https://json-schema.org";
   }
 });
 
@@ -14344,7 +14658,7 @@ var init_resolve3 = __esm({
 });
 
 // node_modules/typebox/build/schema/engine/_stack.mjs
-var __classPrivateFieldGet, _Stack_instances, _Stack_PushResourceAnchors, _Stack_PopResourceAnchors, _Stack_FromContext, _Stack_FromRef, Stack;
+var __classPrivateFieldGet, _Stack_instances, _Stack_StackFrame, _Stack_ApplyRefResult, _Stack_BuildBase, _Stack_ResourceBaseURL, _Stack_ReferenceBaseURL, _Stack_LexicalSchema, _Stack_RegisterResourceAnchorArray, _Stack_UnregisterResourceAnchorArray, _Stack_RegisterResourceAnchors, _Stack_UnregisterResourceAnchors, _Stack_RegisterResource, _Stack_UnregisterResource, _Stack_EnterResolvedResource, _Stack_ExitResolvedResource, Stack;
 var init_stack = __esm({
   "node_modules/typebox/build/schema/engine/_stack.mjs"() {
     init_types4();
@@ -14361,69 +14675,147 @@ var init_stack = __esm({
         this.context = context;
         this.schema = schema;
         this.ids = [];
+        this.resourceIds = [];
         this.anchors = [];
         this.recursiveAnchors = [];
         this.dynamicAnchors = [];
+        this.retrievedResources = /* @__PURE__ */ new Map();
+        this.retrievedFrames = [];
+        this.resolvedResources = /* @__PURE__ */ new Map();
+        this.pendingResource = true;
       }
       // ----------------------------------------------------------------
-      // Base
+      // LexicalBaseURL
       // ----------------------------------------------------------------
-      BaseURL() {
-        return this.ids.reduce((result, schema) => new URL(schema.$id, result), new URL("http://unknown"));
-      }
-      Base() {
-        return this.ids[this.ids.length - 1] ?? this.schema;
+      LexicalBaseURL() {
+        return __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_BuildBase).call(this, this.ids);
       }
       // ----------------------------------------------------------------
-      // Stack
+      // Push
       // ----------------------------------------------------------------
       Push(schema) {
-        if (!IsSchemaObject(schema))
+        if (!IsSchemaObject2(schema))
           return;
-        if (IsId(schema)) {
-          this.ids.push(schema);
-          __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_PushResourceAnchors).call(this, schema);
-        }
+        if (IsId(schema))
+          __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_RegisterResource).call(this, schema);
         if (IsAnchor(schema))
           this.anchors.push(schema);
         if (IsRecursiveAnchorTrue(schema))
           this.recursiveAnchors.push(schema);
         if (IsDynamicAnchor(schema))
           this.dynamicAnchors.push(schema);
-      }
-      Pop(schema) {
-        if (!IsSchemaObject(schema))
-          return;
-        if (IsId(schema)) {
-          this.ids.pop();
-          __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_PopResourceAnchors).call(this, schema);
+        const retrievedResource = this.retrievedResources.get(schema);
+        if (retrievedResource) {
+          this.retrievedFrames.push({
+            schema: retrievedResource.root,
+            base: retrievedResource.base,
+            idDepth: this.ids.length,
+            resourceDepth: this.resourceIds.length
+          });
         }
+      }
+      // ----------------------------------------------------------------
+      // Pop
+      // ----------------------------------------------------------------
+      Pop(schema) {
+        if (!IsSchemaObject2(schema))
+          return;
+        if (IsId(schema))
+          __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_UnregisterResource).call(this, schema);
         if (IsAnchor(schema))
           this.anchors.pop();
         if (IsRecursiveAnchorTrue(schema))
           this.recursiveAnchors.pop();
         if (IsDynamicAnchor(schema))
           this.dynamicAnchors.pop();
+        if (this.retrievedResources.has(schema))
+          this.retrievedFrames.pop();
+        __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_ExitResolvedResource).call(this, schema);
       }
+      // ----------------------------------------------------------------
+      // Ref
+      // ----------------------------------------------------------------
       Ref(ref) {
-        return __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_FromContext).call(this, ref) ?? __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_FromRef).call(this, ref);
+        const result = resolve_exports.ResolveRef(__classPrivateFieldGet(this, _Stack_instances, "m", _Stack_StackFrame).call(this), ref);
+        __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_ApplyRefResult).call(this, result);
+        return result.schema;
       }
       // ----------------------------------------------------------------
       // RecursiveRef
       // ----------------------------------------------------------------
       RecursiveRef(recursiveRef) {
-        return IsRecursiveAnchorTrue(this.Base()) ? resolve_exports.Ref(this.recursiveAnchors[0], recursiveRef.$recursiveRef) : resolve_exports.Ref(this.Base(), recursiveRef.$recursiveRef);
+        const result = resolve_exports.ResolveRecursiveRef(__classPrivateFieldGet(this, _Stack_instances, "m", _Stack_StackFrame).call(this), recursiveRef);
+        if (result)
+          this.pendingResource = true;
+        return result;
       }
       // ----------------------------------------------------------------
       // DynamicRef
       // ----------------------------------------------------------------
       DynamicRef(dynamicRef) {
-        const root = this.schema;
-        return resolve_exports.DynamicRef(root, this.Base(), dynamicRef, this.dynamicAnchors);
+        const result = resolve_exports.ResolveDynamicRef(__classPrivateFieldGet(this, _Stack_instances, "m", _Stack_StackFrame).call(this), dynamicRef);
+        if (result)
+          this.pendingResource = true;
+        return result;
       }
     };
-    _Stack_instances = /* @__PURE__ */ new WeakSet(), _Stack_PushResourceAnchors = function _Stack_PushResourceAnchors2(schema, isRoot = true) {
-      if (!IsSchemaObject(schema))
+    _Stack_instances = /* @__PURE__ */ new WeakSet(), _Stack_StackFrame = function _Stack_StackFrame2() {
+      return {
+        context: this.context,
+        root: this.schema,
+        ids: this.ids,
+        lexicalSchema: __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_LexicalSchema).call(this),
+        lexicalBase: this.LexicalBaseURL(),
+        referenceBase: __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_ReferenceBaseURL).call(this),
+        resourceBase: __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_ResourceBaseURL).call(this),
+        recursiveAnchors: this.recursiveAnchors,
+        dynamicAnchors: this.dynamicAnchors,
+        inRetrievedFrame: this.retrievedFrames.length > 0
+      };
+    }, _Stack_ApplyRefResult = function _Stack_ApplyRefResult2(result) {
+      if (!guard_exports.IsUndefined(result.schema))
+        this.pendingResource = true;
+      if (!guard_exports.IsUndefined(result.resolvedResource)) {
+        __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_EnterResolvedResource).call(this, result.resolvedResource.target, result.resolvedResource.resource);
+      }
+      if (!guard_exports.IsUndefined(result.retrievedResource)) {
+        this.retrievedResources.set(result.retrievedResource.target, {
+          base: result.retrievedResource.base,
+          root: result.retrievedResource.root
+        });
+      }
+    }, _Stack_BuildBase = function _Stack_BuildBase2(stack) {
+      const frame = this.retrievedFrames[this.retrievedFrames.length - 1];
+      const base = frame ? new URL(frame.base) : new URL(resolve_exports.DefaultBase);
+      const scoped = frame ? stack.slice(frame.idDepth) : stack;
+      return scoped.reduce((result, schema) => new URL(schema.$id, result), base).href;
+    }, _Stack_ResourceBaseURL = function _Stack_ResourceBaseURL2() {
+      const frame = this.retrievedFrames[this.retrievedFrames.length - 1];
+      if (!frame)
+        return __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_BuildBase).call(this, this.resourceIds);
+      return this.resourceIds.slice(frame.resourceDepth).reduce((result, schema) => new URL(schema.$id, result), new URL(frame.base)).href;
+    }, _Stack_ReferenceBaseURL = function _Stack_ReferenceBaseURL2() {
+      if (this.retrievedFrames.length > 0)
+        return __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_ResourceBaseURL).call(this);
+      const lexical = this.ids[this.ids.length - 1];
+      if (lexical && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(lexical.$id))
+        return this.LexicalBaseURL();
+      return __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_ResourceBaseURL).call(this);
+    }, _Stack_LexicalSchema = function _Stack_LexicalSchema2() {
+      const frame = this.retrievedFrames[this.retrievedFrames.length - 1];
+      if (frame)
+        return this.ids.length > frame.idDepth ? this.ids[this.ids.length - 1] : frame.schema;
+      return this.ids.length > 0 ? this.ids[this.ids.length - 1] : this.schema;
+    }, _Stack_RegisterResourceAnchorArray = function _Stack_RegisterResourceAnchorArray2(schema) {
+      schema.forEach((schema2) => __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_RegisterResourceAnchors).call(this, schema2, false));
+    }, _Stack_UnregisterResourceAnchorArray = function _Stack_UnregisterResourceAnchorArray2(schema) {
+      schema.forEach((schema2) => __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_UnregisterResourceAnchors).call(this, schema2, false));
+    }, _Stack_RegisterResourceAnchors = function _Stack_RegisterResourceAnchors2(schema, isRoot = true) {
+      if (IsSchemaBoolean(schema))
+        return;
+      if (guard_exports.IsArray(schema))
+        return __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_RegisterResourceAnchorArray).call(this, schema);
+      if (!IsSchemaObject2(schema))
         return;
       const current = schema;
       if (!isRoot && IsId(current))
@@ -14431,9 +14823,13 @@ var init_stack = __esm({
       if (!isRoot && IsDynamicAnchor(current))
         this.dynamicAnchors.push(current);
       for (const key of guard_exports.Keys(current))
-        __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_PushResourceAnchors2).call(this, current[key], false);
-    }, _Stack_PopResourceAnchors = function _Stack_PopResourceAnchors2(schema, isRoot = true) {
-      if (!IsSchemaObject(schema))
+        __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_RegisterResourceAnchors2).call(this, current[key], false);
+    }, _Stack_UnregisterResourceAnchors = function _Stack_UnregisterResourceAnchors2(schema, isRoot = true) {
+      if (IsSchemaBoolean(schema))
+        return;
+      if (guard_exports.IsArray(schema))
+        return __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_UnregisterResourceAnchorArray).call(this, schema);
+      if (!IsSchemaObject2(schema))
         return;
       const current = schema;
       if (!isRoot && IsId(current))
@@ -14441,12 +14837,29 @@ var init_stack = __esm({
       if (!isRoot && IsDynamicAnchor(current))
         this.dynamicAnchors.pop();
       for (const key of guard_exports.Keys(current))
-        __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_PopResourceAnchors2).call(this, current[key], false);
-    }, _Stack_FromContext = function _Stack_FromContext2(ref) {
-      return guard_exports.HasPropertyKey(this.context, ref.$ref) ? this.context[ref.$ref] : void 0;
-    }, _Stack_FromRef = function _Stack_FromRef2(ref) {
-      const root = this.schema;
-      return !ref.$ref.startsWith("#") ? resolve_exports.Ref(root, ref.$ref) : resolve_exports.Ref(this.Base(), ref.$ref);
+        __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_UnregisterResourceAnchors2).call(this, current[key], false);
+    }, _Stack_RegisterResource = function _Stack_RegisterResource2(schema) {
+      this.ids.push(schema);
+      const isResource = this.pendingResource;
+      this.pendingResource = false;
+      if (isResource)
+        this.resourceIds.push(schema);
+      __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_RegisterResourceAnchors).call(this, schema, true);
+    }, _Stack_UnregisterResource = function _Stack_UnregisterResource2(schema) {
+      this.ids.pop();
+      const isResource = this.resourceIds.length > 0 && guard_exports.IsEqual(this.resourceIds[this.resourceIds.length - 1], schema);
+      if (isResource)
+        this.resourceIds.pop();
+      __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_UnregisterResourceAnchors).call(this, schema, true);
+    }, _Stack_EnterResolvedResource = function _Stack_EnterResolvedResource2(target, resource) {
+      __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_RegisterResource).call(this, resource);
+      this.resolvedResources.set(target, resource);
+    }, _Stack_ExitResolvedResource = function _Stack_ExitResolvedResource2(target) {
+      if (!this.resolvedResources.has(target))
+        return;
+      const resource = this.resolvedResources.get(target);
+      __classPrivateFieldGet(this, _Stack_instances, "m", _Stack_UnregisterResource).call(this, resource);
+      this.resolvedResources.delete(target);
     };
   }
 });
@@ -14489,7 +14902,7 @@ var init_engine2 = __esm({
     init_multipleOf2();
     init_not2();
     init_oneOf2();
-    init_pattern3();
+    init_pattern4();
     init_patternProperties2();
     init_prefixItems2();
     init_properties3();
@@ -14502,6 +14915,23 @@ var init_engine2 = __esm({
     init_unevaluatedItems2();
     init_unevaluatedProperties2();
     init_uniqueItems2();
+  }
+});
+
+// node_modules/typebox/build/schema/intern/intern.mjs
+var init_intern = __esm({
+  "node_modules/typebox/build/schema/intern/intern.mjs"() {
+    init_system2();
+    init_guard2();
+    init_resolve3();
+    init_types4();
+  }
+});
+
+// node_modules/typebox/build/schema/intern/index.mjs
+var init_intern2 = __esm({
+  "node_modules/typebox/build/schema/intern/index.mjs"() {
+    init_intern();
   }
 });
 
@@ -14617,24 +15047,18 @@ function Errors(...args) {
     3: (context2, schema2, value2) => [context2, schema2, value2],
     2: (schema2, value2) => [{}, schema2, value2]
   });
-  const settings2 = settings_exports.Get();
-  const locale2 = Get2();
-  const errors = [];
   const stack = new Stack(context, schema);
-  const errorContext = new ErrorContext((error) => {
-    if (guard_exports.IsGreaterEqualThan(errors.length, settings2.maxErrors))
-      return;
-    return errors.push({ ...error, message: locale2(error) });
-  });
+  const errorContext = new ErrorContext();
   const result = ErrorSchema(stack, errorContext, "#", "", schema, value);
-  return [result, errors];
+  const errors = errorContext.GetErrors();
+  const locale2 = Get2();
+  const localized = errors.map((error) => ({ ...error, message: locale2(error) }));
+  return [result, localized];
 }
 var init_errors = __esm({
   "node_modules/typebox/build/schema/errors.mjs"() {
     init_arguments2();
-    init_settings2();
     init_config();
-    init_guard2();
     init_engine2();
   }
 });
@@ -14679,6 +15103,7 @@ var init_compile = __esm({
 var init_schema4 = __esm({
   "node_modules/typebox/build/schema/schema.mjs"() {
     init_engine2();
+    init_intern2();
     init_pointer2();
     init_resolve3();
     init_static3();
@@ -15853,13 +16278,13 @@ var init_pipeline2 = __esm({
 function Decode3(_context, type, value) {
   return type["~codec"].decode(value);
 }
-function Encode2(_context, type, value) {
+function Encode3(_context, type, value) {
   return type["~codec"].encode(value);
 }
 function Callback(direction, context, type, value) {
   if (!IsCodec(type))
     return value;
-  return guard_exports.IsEqual(direction, "Decode") ? Decode3(context, type, value) : Encode2(context, type, value);
+  return guard_exports.IsEqual(direction, "Decode") ? Decode3(context, type, value) : Encode3(context, type, value);
 }
 var init_callback = __esm({
   "node_modules/typebox/build/value/codec/callback.mjs"() {
@@ -15877,7 +16302,7 @@ function Decode4(direction, context, type, value) {
   }
   return Callback(direction, context, type, value);
 }
-function Encode3(direction, context, type, value) {
+function Encode4(direction, context, type, value) {
   const exterior = Callback(direction, context, type, value);
   if (!guard_exports.IsArray(exterior))
     return exterior;
@@ -15887,7 +16312,7 @@ function Encode3(direction, context, type, value) {
   return exterior;
 }
 function FromArray10(direction, context, type, value) {
-  return guard_exports.IsEqual(direction, "Decode") ? Decode4(direction, context, type, value) : Encode3(direction, context, type, value);
+  return guard_exports.IsEqual(direction, "Decode") ? Decode4(direction, context, type, value) : Encode4(direction, context, type, value);
 }
 var init_from_array7 = __esm({
   "node_modules/typebox/build/value/codec/from_array.mjs"() {
@@ -15928,7 +16353,7 @@ function Decode5(direction, context, type, value) {
   const exterior = structural ? MergeInteriors(interiors) : NonMatchingInterior(value, interiors);
   return Callback(direction, context, type, exterior);
 }
-function Encode4(direction, context, type, value) {
+function Encode5(direction, context, type, value) {
   if (guard_exports.IsEqual(type.allOf.length, 0))
     return Callback(direction, context, type, value);
   const exterior = Callback(direction, context, type, value);
@@ -15939,7 +16364,7 @@ function Encode4(direction, context, type, value) {
   return NonMatchingInterior(exterior, interiors);
 }
 function FromIntersect9(direction, context, type, value) {
-  return guard_exports.IsEqual(direction, "Decode") ? Decode5(direction, context, type, value) : Encode4(direction, context, type, value);
+  return guard_exports.IsEqual(direction, "Decode") ? Decode5(direction, context, type, value) : Encode5(direction, context, type, value);
 }
 var init_from_intersect9 = __esm({
   "node_modules/typebox/build/value/codec/from_intersect.mjs"() {
@@ -15962,7 +16387,7 @@ function Decode6(direction, context, type, value) {
   }
   return Callback(direction, context, type, value);
 }
-function Encode5(direction, context, type, value) {
+function Encode6(direction, context, type, value) {
   const exterior = Callback(direction, context, type, value);
   if (!guard_exports.IsObjectNotArray(exterior))
     return exterior;
@@ -15974,7 +16399,7 @@ function Encode5(direction, context, type, value) {
   return exterior;
 }
 function FromObject14(direction, context, type, value) {
-  return guard_exports.IsEqual(direction, "Decode") ? Decode6(direction, context, type, value) : Encode5(direction, context, type, value);
+  return guard_exports.IsEqual(direction, "Decode") ? Decode6(direction, context, type, value) : Encode6(direction, context, type, value);
 }
 var init_from_object10 = __esm({
   "node_modules/typebox/build/value/codec/from_object.mjs"() {
@@ -15997,7 +16422,7 @@ function Decode7(direction, context, type, value) {
   }
   return Callback(direction, context, type, value);
 }
-function Encode6(direction, context, type, value) {
+function Encode7(direction, context, type, value) {
   const exterior = Callback(direction, context, type, value);
   if (!guard_exports.IsObjectNotArray(exterior))
     return exterior;
@@ -16010,7 +16435,7 @@ function Encode6(direction, context, type, value) {
   return exterior;
 }
 function FromRecord6(direction, context, type, value) {
-  return guard_exports.IsEqual(direction, "Decode") ? Decode7(direction, context, type, value) : Encode6(direction, context, type, value);
+  return guard_exports.IsEqual(direction, "Decode") ? Decode7(direction, context, type, value) : Encode7(direction, context, type, value);
 }
 var init_from_record5 = __esm({
   "node_modules/typebox/build/value/codec/from_record.mjs"() {
@@ -16022,11 +16447,11 @@ var init_from_record5 = __esm({
 });
 
 // node_modules/typebox/build/value/codec/from_ref.mjs
-function ResolveRef(direction, context, type, value) {
+function ResolveRef2(direction, context, type, value) {
   return guard_exports.HasPropertyKey(context, type.$ref) ? FromType23(direction, context, context[type.$ref], value) : value;
 }
 function FromRef8(direction, context, type, value) {
-  return guard_exports.IsEqual(direction, "Decode") ? Callback(direction, context, type, ResolveRef(direction, context, type, value)) : ResolveRef(direction, context, type, Callback(direction, context, type, value));
+  return guard_exports.IsEqual(direction, "Decode") ? Callback(direction, context, type, ResolveRef2(direction, context, type, value)) : ResolveRef2(direction, context, type, Callback(direction, context, type, value));
 }
 var init_from_ref4 = __esm({
   "node_modules/typebox/build/value/codec/from_ref.mjs"() {
@@ -16045,7 +16470,7 @@ function Decode8(direction, context, type, value) {
   }
   return Callback(direction, context, type, value);
 }
-function Encode7(direction, context, type, value) {
+function Encode8(direction, context, type, value) {
   const exterior = Callback(direction, context, type, value);
   if (!guard_exports.IsArray(exterior))
     return value;
@@ -16055,7 +16480,7 @@ function Encode7(direction, context, type, value) {
   return exterior;
 }
 function FromTuple8(direction, context, type, value) {
-  return guard_exports.IsEqual(direction, "Decode") ? Decode8(direction, context, type, value) : Encode7(direction, context, type, value);
+  return guard_exports.IsEqual(direction, "Decode") ? Decode8(direction, context, type, value) : Encode8(direction, context, type, value);
 }
 var init_from_tuple8 = __esm({
   "node_modules/typebox/build/value/codec/from_tuple.mjs"() {
@@ -16075,7 +16500,7 @@ function Decode9(direction, context, type, value) {
   }
   return value;
 }
-function Encode8(direction, context, type, value) {
+function Encode9(direction, context, type, value) {
   const exterior = Callback(direction, context, type, value);
   for (const schema of type.anyOf) {
     const variant = FromType23(direction, context, schema, Clone2(exterior));
@@ -16086,7 +16511,7 @@ function Encode8(direction, context, type, value) {
   return exterior;
 }
 function FromUnion12(direction, context, type, value) {
-  return guard_exports.IsEqual(direction, "Decode") ? Decode9(direction, context, type, value) : Encode8(direction, context, type, value);
+  return guard_exports.IsEqual(direction, "Decode") ? Decode9(direction, context, type, value) : Encode9(direction, context, type, value);
 }
 var init_from_union10 = __esm({
   "node_modules/typebox/build/value/codec/from_union.mjs"() {
@@ -16174,7 +16599,7 @@ function EncodeUnsafe(context, type, value) {
   const sorted = settings_exports.Get().unionPrioritySort ? UnionPrioritySort(type) : type;
   return FromType23("Encode", context, sorted, value);
 }
-function Encode9(...args) {
+function Encode10(...args) {
   const [context, type, value] = arguments_exports.Match(args, {
     3: (context2, type2, value2) => [context2, type2, value2],
     2: (type2, value2) => [{}, type2, value2]
@@ -16675,7 +17100,7 @@ var init_hash3 = __esm({
 // node_modules/typebox/build/value/parse/parse.mjs
 function Assert4(context, type, value) {
   if (!Check2(context, type, value))
-    throw new ParseError2(value, Errors2(context, type, value));
+    throw new ParseError(value, Errors2(context, type, value));
   return value;
 }
 function Parse(...args) {
@@ -16688,9 +17113,9 @@ function Parse(...args) {
     return value;
   if (settings_exports.Get().correctiveParse)
     return Parser(context, type, value);
-  throw new ParseError2(value, Errors2(context, type, value));
+  throw new ParseError(value, Errors2(context, type, value));
 }
-var ParseError2, Parser;
+var ParseError, Parser;
 var init_parse2 = __esm({
   "node_modules/typebox/build/value/parse/parse.mjs"() {
     init_system();
@@ -16703,7 +17128,7 @@ var init_parse2 = __esm({
     init_convert2();
     init_default3();
     init_pipeline2();
-    ParseError2 = class extends AssertError {
+    ParseError = class extends AssertError {
       constructor(value, errors) {
         super("Parse", value, errors);
       }
@@ -17257,7 +17682,7 @@ __export(value_exports, {
   Decode: () => Decode10,
   Default: () => Default,
   Diff: () => Diff,
-  Encode: () => Encode9,
+  Encode: () => Encode10,
   Equal: () => Equal,
   Errors: () => Errors2,
   HasCodec: () => HasCodec,
@@ -17365,9 +17790,9 @@ var init_validator = __esm({
           return value;
         if (settings_exports.Get().correctiveParse)
           return Parser(this.Context(), this.Type(), value);
-        throw new ParseError2(value, this.Errors(value));
+        throw new ParseError(value, this.Errors(value));
       }
-      /** Inspects a value and returns a detailed list of validation errors. */
+      /** Returns an array of validation errors for the given value. */
       Errors(value) {
         if (this.IsAccelerated() && this.Check(value))
           return [];
@@ -17399,7 +17824,7 @@ var init_validator = __esm({
       }
       /** Encodes a value */
       Encode(value) {
-        const result = this.hasCodec ? Encode9(this.Context(), this.Type(), value) : this.Parse(value);
+        const result = this.hasCodec ? Encode10(this.Context(), this.Type(), value) : this.Parse(value);
         return result;
       }
     };
@@ -17730,6 +18155,7 @@ var dist_exports = {};
 __export(dist_exports, {
   AssistantMessageEventStream: () => AssistantMessageEventStream,
   AssistantMessageFrameEncoder: () => AssistantMessageFrameEncoder,
+  DEFAULT_MAX_AGENT_RETRY_DELAY_MS: () => DEFAULT_MAX_AGENT_RETRY_DELAY_MS,
   EventStream: () => EventStream,
   InMemoryCredentialStore: () => InMemoryCredentialStore,
   InMemoryModelsStore: () => InMemoryModelsStore,
@@ -17740,14 +18166,17 @@ __export(dist_exports, {
   calculateCost: () => calculateCost,
   clampThinkingLevel: () => clampThinkingLevel,
   cleanupSessionResources: () => cleanupSessionResources,
+  collapseSystemMessages: () => collapseSystemMessages,
   contentText: () => contentText,
   createAssistantMessageDiagnostic: () => createAssistantMessageDiagnostic,
   createAssistantMessageEventStream: () => createAssistantMessageEventStream,
   createFauxCore: () => createFauxCore,
   createImagesModels: () => createImagesModels,
   createImagesProvider: () => createImagesProvider,
+  createInitialSystemMessage: () => createInitialSystemMessage,
   createModels: () => createModels,
   createProvider: () => createProvider,
+  declarationsEqual: () => declarationsEqual,
   defaultProviderAuthContext: () => defaultProviderAuthContext,
   envApiKeyAuth: () => envApiKeyAuth,
   extractDiagnosticError: () => extractDiagnosticError,
@@ -17757,9 +18186,18 @@ __export(dist_exports, {
   fauxThinking: () => fauxThinking,
   fauxToolCall: () => fauxToolCall,
   formatThrownValue: () => formatThrownValue,
+  getCurrentSystemMessage: () => getCurrentSystemMessage,
+  getCurrentSystemPrompt: () => getCurrentSystemPrompt,
+  getCurrentTools: () => getCurrentTools,
+  getDeclaredTools: () => getDeclaredTools,
+  getInitialSystemMessage: () => getInitialSystemMessage,
   getOverflowPatterns: () => getOverflowPatterns,
   getSupportedThinkingLevels: () => getSupportedThinkingLevels,
+  getSystemMessageText: () => getSystemMessageText,
+  getToolStateChanges: () => getToolStateChanges,
   hasApi: () => hasApi,
+  hasNonAdditiveToolChanges: () => hasNonAdditiveToolChanges,
+  hasToolRedefinitions: () => hasToolRedefinitions,
   isContextOverflow: () => isContextOverflow,
   isRecoverableLength: () => isRecoverableLength,
   isRetryableAssistantError: () => isRetryableAssistantError,
@@ -17767,15 +18205,22 @@ __export(dist_exports, {
   lazyOAuth: () => lazyOAuth,
   lazyStream: () => lazyStream,
   modelsAreEqual: () => modelsAreEqual,
+  normalizeContext: () => normalizeContext,
   parseJsonWithRepair: () => parseJsonWithRepair,
   parseStreamingJson: () => parseStreamingJson,
   reduceAssistantMessageFrames: () => reduceAssistantMessageFrames,
   registerSessionResourceCleanup: () => registerSessionResourceCleanup,
+  renderSystemMessageUpdate: () => renderSystemMessageUpdate,
   repairJson: () => repairJson,
+  resolveTranscript: () => resolveTranscript,
+  resolveTranscriptTools: () => resolveTranscriptTools,
   retryAssistantCall: () => retryAssistantCall,
+  retryDelayMs: () => retryDelayMs,
+  toToolDeclaration: () => toToolDeclaration,
   uuidv7: () => uuidv7,
   validateToolArguments: () => validateToolArguments,
-  validateToolCall: () => validateToolCall
+  validateToolCall: () => validateToolCall,
+  withoutInitialSystemMessage: () => withoutInitialSystemMessage
 });
 var init_dist = __esm({
   "node_modules/@earendil-works/pi-ai/dist/index.js"() {
@@ -17798,6 +18243,7 @@ var init_dist = __esm({
     init_overflow();
     init_retry();
     init_text();
+    init_transcript();
     init_typebox_helpers();
     init_uuid();
     init_validation();

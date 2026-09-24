@@ -264,13 +264,13 @@ test("enable-only ZAI and Moonshot collapse discrete efforts to enabled", async 
   }
   assert.equal((await validateReasoning(zai, { model: "glm-4.7", reasoningEffort: "low" }, 1500)).ok, true);
 
-  const kimi = await getReasoningChoices(moonshot, "kimi-k2.5");
+  const kimi = await getReasoningChoices(moonshot, "kimi-k2.6");
   assert.equal(kimi.configurable, true);
   assert.equal(choice(kimi, "off")?.effective, "disabled");
   for (const level of ["minimal", "low", "medium", "high"]) {
     assert.equal(choice(kimi, level)?.effective, "enabled", level);
   }
-  assert.equal((await validateReasoning(moonshot, { model: "kimi-k2.5", reasoningEffort: "high" }, 1500)).ok, true);
+  assert.equal((await validateReasoning(moonshot, { model: "kimi-k2.6", reasoningEffort: "high" }, 1500)).ok, true);
 });
 
 test("compatible enable-only zai map does not invent discrete native efforts", async () => {

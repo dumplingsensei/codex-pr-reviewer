@@ -385,10 +385,15 @@ export async function validateReasoning(providerSlot, advisor, maxOutputTokens) 
 /**
  * Compatible Default must not grow thinkingFormat/thinkingLevelMap onto the
  * generation model; those fields change SDK serialization even without effort.
+ * Codex Default keeps omitting reasoning: from SDK 0.87.1 the adapter sends
+ * thinkingLevelMap.off (or "none") when no effort is given, unless off is null.
  *
  * @param {import("@earendil-works/pi-ai").Model} model
  */
 function modelForDefaultGeneration(model) {
+  if (model?.api === "openai-codex-responses" && model.reasoning) {
+    return { ...model, thinkingLevelMap: { ...model.thinkingLevelMap, off: null } };
+  }
   if (model?.provider !== "openai-compatible") return model;
   if (!model.compat?.thinkingFormat && model.thinkingLevelMap == null) return model;
   const compat = { ...model.compat, supportsReasoningEffort: false };
