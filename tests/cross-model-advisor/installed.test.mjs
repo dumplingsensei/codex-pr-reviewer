@@ -16,6 +16,6 @@ test("isolated marketplace install does not npm-bootstrap and ships a license", 
   await runMarketplaceInstallSmoke();
 });
 
-test("cold plugin copy doctor IPC loopback and late advice after Stop", async () => {
+test("cold plugin copy: doctor, on, a prompt snapshot, and a Stop review that sends Claude back", async () => {
   await runColdBundleSmoke();
 });

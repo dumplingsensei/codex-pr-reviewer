@@ -36,5 +36,9 @@
     "maxToolCallsPerReview": 8,
     "maxOutputTokens": 1500,
     "maxReviewsPerAdvisorPerSession": 40
+  },
+  "gate": {
+    "mode": "block",
+    "maxRounds": 2
   }
 }

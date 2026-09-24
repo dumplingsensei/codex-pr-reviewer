@@ -220,13 +220,13 @@ var uuid4;
 var init_uuid = __esm({
   "node_modules/@anthropic-ai/sdk/internal/utils/uuid.mjs"() {
     uuid4 = function() {
-      const { crypto: crypto5 } = globalThis;
-      if (crypto5?.randomUUID) {
-        uuid4 = crypto5.randomUUID.bind(crypto5);
-        return crypto5.randomUUID();
+      const { crypto: crypto4 } = globalThis;
+      if (crypto4?.randomUUID) {
+        uuid4 = crypto4.randomUUID.bind(crypto4);
+        return crypto4.randomUUID();
       }
       const u8 = new Uint8Array(1);
-      const randomByte = crypto5 ? () => crypto5.getRandomValues(u8)[0] : () => Math.random() * 255 & 255;
+      const randomByte = crypto4 ? () => crypto4.getRandomValues(u8)[0] : () => Math.random() * 255 & 255;
       return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) => (+c ^ randomByte() & 15 >> +c / 4).toString(16));
     };
   }
@@ -1187,15 +1187,15 @@ function redactSensitive(body) {
   }
   return null;
 }
-async function checkCredentialsFileSafety(path12, onWarn = (m2) => console.warn(`anthropic-sdk: ${m2}`)) {
+async function checkCredentialsFileSafety(path10, onWarn = (m2) => console.warn(`anthropic-sdk: ${m2}`)) {
   if (typeof process === "undefined" || process.platform === "win32")
     return;
-  const { fs: fs12 } = await Promise.resolve().then(() => (init_node(), node_exports));
-  let resolved = path12;
+  const { fs: fs9 } = await Promise.resolve().then(() => (init_node(), node_exports));
+  let resolved = path10;
   let st;
   try {
-    resolved = await fs12.promises.realpath(path12);
-    st = await fs12.promises.stat(resolved);
+    resolved = await fs9.promises.realpath(path10);
+    st = await fs9.promises.stat(resolved);
   } catch {
     return;
   }
@@ -1211,26 +1211,26 @@ async function checkCredentialsFileSafety(path12, onWarn = (m2) => console.warn(
   }
 }
 async function writeCredentialsFileAtomic(targetPath, data) {
-  const { fs: fs12, path: path12 } = await Promise.resolve().then(() => (init_node(), node_exports));
-  const dir = path12.dirname(targetPath);
-  await fs12.promises.mkdir(dir, { recursive: true, mode: 448 });
+  const { fs: fs9, path: path10 } = await Promise.resolve().then(() => (init_node(), node_exports));
+  const dir = path10.dirname(targetPath);
+  await fs9.promises.mkdir(dir, { recursive: true, mode: 448 });
   const tmpPath = `${targetPath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   try {
-    const fh = await fs12.promises.open(tmpPath, "w", 384);
+    const fh = await fs9.promises.open(tmpPath, "w", 384);
     try {
       await fh.writeFile(JSON.stringify(data, null, 2));
       await fh.sync();
     } finally {
       await fh.close();
     }
-    await fs12.promises.rename(tmpPath, targetPath);
+    await fs9.promises.rename(tmpPath, targetPath);
   } catch (err) {
-    await fs12.promises.unlink(tmpPath).catch(() => {
+    await fs9.promises.unlink(tmpPath).catch(() => {
     });
     throw err;
   }
   try {
-    const dirFh = await fs12.promises.open(dir, "r");
+    const dirFh = await fs9.promises.open(dir, "r");
     try {
       await dirFh.sync();
     } finally {
@@ -1610,11 +1610,11 @@ var init_credentials = __esm({
         return null;
       }
       validateProfileName(profileName);
-      const { fs: fs12, path: path12 } = await Promise.resolve().then(() => (init_node(), node_exports));
-      const configPath = path12.join(rootConfigPath, "configs", `${profileName}.json`);
+      const { fs: fs9, path: path10 } = await Promise.resolve().then(() => (init_node(), node_exports));
+      const configPath = path10.join(rootConfigPath, "configs", `${profileName}.json`);
       let configRaw;
       try {
-        configRaw = await fs12.promises.readFile(configPath, "utf-8");
+        configRaw = await fs9.promises.readFile(configPath, "utf-8");
       } catch (err) {
         if (err?.code !== "ENOENT") {
           throw new Error(`failed to read config file ${configPath}: ${err}`);
@@ -1695,37 +1695,37 @@ var init_credentials = __esm({
         return null;
       }
       validateProfileName(profileName);
-      const { path: path12 } = await Promise.resolve().then(() => (init_node(), node_exports));
-      return path12.join(rootConfigPath, "credentials", `${profileName}.json`);
+      const { path: path10 } = await Promise.resolve().then(() => (init_node(), node_exports));
+      return path10.join(rootConfigPath, "credentials", `${profileName}.json`);
     };
     getRootConfigPath = async () => {
       if (!supportsLocalConfigFiles()) {
         return null;
       }
-      const { path: path12 } = await Promise.resolve().then(() => (init_node(), node_exports));
+      const { path: path10 } = await Promise.resolve().then(() => (init_node(), node_exports));
       const configDir = readEnv("ANTHROPIC_CONFIG_DIR");
       if (configDir) {
         return configDir;
       }
-      const os5 = getPlatformHeaders()["X-Stainless-OS"];
-      if (os5 === "Windows") {
+      const os3 = getPlatformHeaders()["X-Stainless-OS"];
+      if (os3 === "Windows") {
         const appData = readEnv("APPDATA");
         if (appData) {
-          return path12.join(appData, "Anthropic");
+          return path10.join(appData, "Anthropic");
         }
         const userProfile = readEnv("USERPROFILE");
         if (userProfile) {
-          return path12.join(userProfile, "AppData", "Roaming", "Anthropic");
+          return path10.join(userProfile, "AppData", "Roaming", "Anthropic");
         }
         return null;
       }
       const xdgConfigHome = readEnv("XDG_CONFIG_HOME");
       if (xdgConfigHome) {
-        return path12.join(xdgConfigHome, "anthropic");
+        return path10.join(xdgConfigHome, "anthropic");
       }
       const home = readEnv("HOME");
       if (home) {
-        return path12.join(home, ".config", "anthropic");
+        return path10.join(home, ".config", "anthropic");
       }
       return null;
     };
@@ -1742,10 +1742,10 @@ var init_credentials = __esm({
       if (profileName) {
         return profileName;
       }
-      const { fs: fs12, path: path12 } = await Promise.resolve().then(() => (init_node(), node_exports));
-      const filePath = path12.join(rootConfigPath, "active_config");
+      const { fs: fs9, path: path10 } = await Promise.resolve().then(() => (init_node(), node_exports));
+      const filePath = path10.join(rootConfigPath, "active_config");
       try {
-        return (await fs12.promises.readFile(filePath, "utf-8")).trim() || "default";
+        return (await fs9.promises.readFile(filePath, "utf-8")).trim() || "default";
       } catch (err) {
         if (err?.code !== "ENOENT") {
           throw new Error(`failed to read ${filePath}: ${err}`);
@@ -1757,21 +1757,21 @@ var init_credentials = __esm({
 });
 
 // node_modules/@anthropic-ai/sdk/lib/credentials/identity-token.mjs
-function identityTokenFromFile(path12) {
-  if (!path12) {
+function identityTokenFromFile(path10) {
+  if (!path10) {
     throw new AnthropicError("Identity token file path is empty");
   }
   return async () => {
-    const { fs: fs12 } = await Promise.resolve().then(() => (init_node(), node_exports));
+    const { fs: fs9 } = await Promise.resolve().then(() => (init_node(), node_exports));
     let content;
     try {
-      content = await fs12.promises.readFile(path12, "utf-8");
+      content = await fs9.promises.readFile(path10, "utf-8");
     } catch (err) {
-      throw new AnthropicError(`Failed to read identity token file at ${path12}: ${err}`);
+      throw new AnthropicError(`Failed to read identity token file at ${path10}: ${err}`);
     }
     const token = content.trim();
     if (!token) {
-      throw new AnthropicError(`Identity token file at ${path12} is empty`);
+      throw new AnthropicError(`Identity token file at ${path10} is empty`);
     }
     return token;
   };
@@ -1856,11 +1856,11 @@ var init_oidc_federation = __esm({
 // node_modules/@anthropic-ai/sdk/lib/credentials/user-oauth.mjs
 function userOAuthProvider(config) {
   return async (opts) => {
-    const { fs: fs12 } = await Promise.resolve().then(() => (init_node(), node_exports));
+    const { fs: fs9 } = await Promise.resolve().then(() => (init_node(), node_exports));
     await checkCredentialsFileSafety(config.credentialsPath, config.onSafetyWarning);
     let raw;
     try {
-      raw = await fs12.promises.readFile(config.credentialsPath, "utf-8");
+      raw = await fs9.promises.readFile(config.credentialsPath, "utf-8");
     } catch (err) {
       throw new WorkloadIdentityError(`Credentials file not found at ${config.credentialsPath}: ${err}`);
     }
@@ -2032,11 +2032,11 @@ function resolveIdentityTokenProvider(auth) {
 }
 function cachedExchangeProvider(exchange, credentialsPath, onCacheWriteError, onSafetyWarning) {
   return async (opts) => {
-    const { fs: fs12 } = await Promise.resolve().then(() => (init_node(), node_exports));
+    const { fs: fs9 } = await Promise.resolve().then(() => (init_node(), node_exports));
     await checkCredentialsFileSafety(credentialsPath, onSafetyWarning);
     let existing;
     try {
-      const raw = await fs12.promises.readFile(credentialsPath, "utf-8");
+      const raw = await fs9.promises.readFile(credentialsPath, "utf-8");
       existing = JSON.parse(raw);
       const token = existing?.["access_token"];
       if (token && !opts?.forceRefresh) {
@@ -3112,12 +3112,12 @@ var init_path = __esm({
   "node_modules/@anthropic-ai/sdk/internal/utils/path.mjs"() {
     init_error();
     EMPTY = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.create(null));
-    createPathTagFunction = (pathEncoder = encodeURIPath) => function path12(statics, ...params) {
+    createPathTagFunction = (pathEncoder = encodeURIPath) => function path10(statics, ...params) {
       if (statics.length === 1)
         return statics[0];
       let postPath = false;
       const invalidSegments = [];
-      const path13 = statics.reduce((previousValue, currentValue, index) => {
+      const path11 = statics.reduce((previousValue, currentValue, index) => {
         if (/[?#]/.test(currentValue)) {
           postPath = true;
         }
@@ -3134,7 +3134,7 @@ var init_path = __esm({
         }
         return previousValue + currentValue + (index === params.length ? "" : encoded);
       }, "");
-      const pathOnly = path13.split(/[?#]/, 1)[0];
+      const pathOnly = path11.split(/[?#]/, 1)[0];
       const invalidSegmentPattern = /(?<=^|\/)(?:\.|%2e){1,2}(?=\/|$)/gi;
       let match;
       while ((match = invalidSegmentPattern.exec(pathOnly)) !== null) {
@@ -3155,10 +3155,10 @@ var init_path = __esm({
         }, "");
         throw new AnthropicError(`Path parameters result in path with invalid segments:
 ${invalidSegments.map((e2) => e2.error).join("\n")}
-${path13}
+${path11}
 ${underline}`);
       }
-      return path13;
+      return path11;
     };
     path3 = /* @__PURE__ */ createPathTagFunction(encodeURIPath);
   }
@@ -15776,9 +15776,9 @@ var init_client = __esm({
       makeStatusError(status, error, message, headers) {
         return APIError.generate(status, error, message, headers);
       }
-      buildURL(path12, query, defaultBaseURL) {
+      buildURL(path10, query, defaultBaseURL) {
         const baseURL = !__classPrivateFieldGet(this, _BaseAnthropic_instances, "m", _BaseAnthropic_baseURLOverridden).call(this) && defaultBaseURL || this.baseURL;
-        const url = isAbsoluteURL(path12) ? new URL(path12) : new URL(baseURL + (baseURL.endsWith("/") && path12.startsWith("/") ? path12.slice(1) : path12));
+        const url = isAbsoluteURL(path10) ? new URL(path10) : new URL(baseURL + (baseURL.endsWith("/") && path10.startsWith("/") ? path10.slice(1) : path10));
         const defaultQuery = this.defaultQuery();
         const pathQuery = Object.fromEntries(url.searchParams);
         if (!isEmptyObj(defaultQuery) || !isEmptyObj(pathQuery)) {
@@ -15850,24 +15850,24 @@ var init_client = __esm({
       backendMiddleware() {
         return [];
       }
-      get(path12, opts) {
-        return this.methodRequest("get", path12, opts);
+      get(path10, opts) {
+        return this.methodRequest("get", path10, opts);
       }
-      post(path12, opts) {
-        return this.methodRequest("post", path12, opts);
+      post(path10, opts) {
+        return this.methodRequest("post", path10, opts);
       }
-      patch(path12, opts) {
-        return this.methodRequest("patch", path12, opts);
+      patch(path10, opts) {
+        return this.methodRequest("patch", path10, opts);
       }
-      put(path12, opts) {
-        return this.methodRequest("put", path12, opts);
+      put(path10, opts) {
+        return this.methodRequest("put", path10, opts);
       }
-      delete(path12, opts) {
-        return this.methodRequest("delete", path12, opts);
+      delete(path10, opts) {
+        return this.methodRequest("delete", path10, opts);
       }
-      methodRequest(method, path12, opts) {
+      methodRequest(method, path10, opts) {
         return this.request(Promise.resolve(opts).then((opts2) => {
-          return { method, path: path12, ...opts2 };
+          return { method, path: path10, ...opts2 };
         }));
       }
       request(options, remainingRetries = null) {
@@ -15985,8 +15985,8 @@ var init_client = __esm({
         armAbandonmentBackstop(response.body ?? response, controller);
         return { response, options, controller, requestLogID, retryOfRequestLogID, startTime };
       }
-      getAPIList(path12, Page3, opts) {
-        return this.requestAPIList(Page3, opts && "then" in opts ? opts.then((opts2) => ({ method: "get", path: path12, ...opts2 })) : { method: "get", path: path12, ...opts });
+      getAPIList(path10, Page3, opts) {
+        return this.requestAPIList(Page3, opts && "then" in opts ? opts.then((opts2) => ({ method: "get", path: path10, ...opts2 })) : { method: "get", path: path10, ...opts });
       }
       requestAPIList(Page3, options) {
         const request2 = this.makeRequest(options, null, void 0);
@@ -16104,14 +16104,14 @@ var init_client = __esm({
       }
       async buildRequest(inputOptions, { retryCount = 0 } = {}) {
         const options = { ...inputOptions };
-        const { method, path: path12, query, defaultBaseURL } = options;
+        const { method, path: path10, query, defaultBaseURL } = options;
         if (this._authState.resolution) {
           await this._authState.resolution;
         }
         if (!this._baseURLIsExplicit && this._authState.baseURL && this.baseURL !== this._authState.baseURL) {
           this.baseURL = this._authState.baseURL;
         }
-        const url = this.buildURL(path12, query, defaultBaseURL);
+        const url = this.buildURL(path10, query, defaultBaseURL);
         if ("timeout" in options)
           validatePositiveInteger("timeout", options.timeout);
         options.timeout = options.timeout ?? this.timeout;
@@ -18708,13 +18708,13 @@ var init_helpers = __esm({
 var __rewriteRelativeImportExtension, importOAuthModule, bundledLoaders, loadAnthropicOAuth, loadOpenAICodexOAuth, loadGitHubCopilotOAuth, loadOpenRouterOAuth, loadKimiCodingOAuth, loadXaiOAuth;
 var init_load = __esm({
   "node_modules/@earendil-works/pi-ai/dist/auth/oauth/load.js"() {
-    __rewriteRelativeImportExtension = function(path12, preserveJsx) {
-      if (typeof path12 === "string" && /^\.\.?\//.test(path12)) {
-        return path12.replace(/\.(tsx)$|((?:\.d)?)((?:\.[^./]+?)?)\.([cm]?)ts$/i, function(m2, tsx, d, ext, cm) {
+    __rewriteRelativeImportExtension = function(path10, preserveJsx) {
+      if (typeof path10 === "string" && /^\.\.?\//.test(path10)) {
+        return path10.replace(/\.(tsx)$|((?:\.d)?)((?:\.[^./]+?)?)\.([cm]?)ts$/i, function(m2, tsx, d, ext, cm) {
           return tsx ? preserveJsx ? ".jsx" : ".js" : d && (!ext || !cm) ? m2 : d + ext + "." + cm.toLowerCase() + "js";
         });
       }
-      return path12;
+      return path10;
     };
     importOAuthModule = (specifier) => {
       const runtimeSpecifier = import.meta.url.endsWith(".js") ? specifier.replace(/\.ts$/, ".js") : specifier;
@@ -18757,13 +18757,13 @@ var init_load = __esm({
 var __rewriteRelativeImportExtension2, _existsSync, _homedir, _join, dynamicImport, NODE_FS_SPECIFIER, NODE_OS_SPECIFIER, NODE_PATH_SPECIFIER, ANTHROPIC_AUTH_TOKEN_ENV, ANTHROPIC_OAUTH_TOKEN_ENV, ANTHROPIC_API_KEY_ENV;
 var init_env_api_keys = __esm({
   "node_modules/@earendil-works/pi-ai/dist/env-api-keys.js"() {
-    __rewriteRelativeImportExtension2 = function(path12, preserveJsx) {
-      if (typeof path12 === "string" && /^\.\.?\//.test(path12)) {
-        return path12.replace(/\.(tsx)$|((?:\.d)?)((?:\.[^./]+?)?)\.([cm]?)ts$/i, function(m2, tsx, d, ext, cm) {
+    __rewriteRelativeImportExtension2 = function(path10, preserveJsx) {
+      if (typeof path10 === "string" && /^\.\.?\//.test(path10)) {
+        return path10.replace(/\.(tsx)$|((?:\.d)?)((?:\.[^./]+?)?)\.([cm]?)ts$/i, function(m2, tsx, d, ext, cm) {
           return tsx ? preserveJsx ? ".jsx" : ".js" : d && (!ext || !cm) ? m2 : d + ext + "." + cm.toLowerCase() + "js";
         });
       }
-      return path12;
+      return path10;
     };
     _existsSync = null;
     _homedir = null;
@@ -18904,13 +18904,13 @@ var uuid42;
 var init_uuid2 = __esm({
   "node_modules/openai/internal/utils/uuid.mjs"() {
     uuid42 = function() {
-      const { crypto: crypto5 } = globalThis;
-      if (crypto5?.randomUUID) {
-        uuid42 = crypto5.randomUUID.bind(crypto5);
-        return crypto5.randomUUID();
+      const { crypto: crypto4 } = globalThis;
+      if (crypto4?.randomUUID) {
+        uuid42 = crypto4.randomUUID.bind(crypto4);
+        return crypto4.randomUUID();
       }
       const u8 = new Uint8Array(1);
-      const randomByte = crypto5 ? () => crypto5.getRandomValues(u8)[0] : () => Math.random() * 255 & 255;
+      const randomByte = crypto4 ? () => crypto4.getRandomValues(u8)[0] : () => Math.random() * 255 & 255;
       return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) => (+c ^ randomByte() & 15 >> +c / 4).toString(16));
     };
   }
@@ -20816,12 +20816,12 @@ var init_path2 = __esm({
   "node_modules/openai/internal/utils/path.mjs"() {
     init_error3();
     EMPTY2 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.create(null));
-    createPathTagFunction2 = (pathEncoder = encodeURIPath2) => function path12(statics, ...params) {
+    createPathTagFunction2 = (pathEncoder = encodeURIPath2) => function path10(statics, ...params) {
       if (statics.length === 1)
         return statics[0];
       let postPath = false;
       const invalidSegments = [];
-      const path13 = statics.reduce((previousValue, currentValue, index) => {
+      const path11 = statics.reduce((previousValue, currentValue, index) => {
         if (/[?#]/.test(currentValue)) {
           postPath = true;
         }
@@ -20838,7 +20838,7 @@ var init_path2 = __esm({
         }
         return previousValue + currentValue + (index === params.length ? "" : encoded);
       }, "");
-      const pathOnly = path13.split(/[?#]/, 1)[0];
+      const pathOnly = path11.split(/[?#]/, 1)[0];
       const invalidSegmentPattern = /(?<=^|\/)(?:\.|%2e){1,2}(?=\/|$)/gi;
       let match;
       while ((match = invalidSegmentPattern.exec(pathOnly)) !== null) {
@@ -20859,10 +20859,10 @@ var init_path2 = __esm({
         }, "");
         throw new OpenAIError(`Path parameters result in path with invalid segments:
 ${invalidSegments.map((e2) => e2.error).join("\n")}
-${path13}
+${path11}
 ${underline}`);
       }
-      return path13;
+      return path11;
     };
     path5 = /* @__PURE__ */ createPathTagFunction2(encodeURIPath2);
   }
@@ -29372,9 +29372,9 @@ var init_client2 = __esm({
         this.apiKey = token;
         return true;
       }
-      buildURL(path12, query, defaultBaseURL) {
+      buildURL(path10, query, defaultBaseURL) {
         const baseURL = !__classPrivateFieldGet2(this, _OpenAI_instances, "m", _OpenAI_baseURLOverridden).call(this) && defaultBaseURL || this.baseURL;
-        const url = isAbsoluteURL2(path12) ? new URL(path12) : new URL(baseURL + (baseURL.endsWith("/") && path12.startsWith("/") ? path12.slice(1) : path12));
+        const url = isAbsoluteURL2(path10) ? new URL(path10) : new URL(baseURL + (baseURL.endsWith("/") && path10.startsWith("/") ? path10.slice(1) : path10));
         const defaultQuery = this.defaultQuery();
         const pathQuery = Object.fromEntries(url.searchParams);
         if (!isEmptyObj2(defaultQuery) || !isEmptyObj2(pathQuery)) {
@@ -29402,24 +29402,24 @@ var init_client2 = __esm({
        */
       async prepareRequest(request2, { url, options }) {
       }
-      get(path12, opts) {
-        return this.methodRequest("get", path12, opts);
+      get(path10, opts) {
+        return this.methodRequest("get", path10, opts);
       }
-      post(path12, opts) {
-        return this.methodRequest("post", path12, opts);
+      post(path10, opts) {
+        return this.methodRequest("post", path10, opts);
       }
-      patch(path12, opts) {
-        return this.methodRequest("patch", path12, opts);
+      patch(path10, opts) {
+        return this.methodRequest("patch", path10, opts);
       }
-      put(path12, opts) {
-        return this.methodRequest("put", path12, opts);
+      put(path10, opts) {
+        return this.methodRequest("put", path10, opts);
       }
-      delete(path12, opts) {
-        return this.methodRequest("delete", path12, opts);
+      delete(path10, opts) {
+        return this.methodRequest("delete", path10, opts);
       }
-      methodRequest(method, path12, opts) {
+      methodRequest(method, path10, opts) {
         return this.request(Promise.resolve(opts).then((opts2) => {
-          return { method, path: path12, ...opts2 };
+          return { method, path: path10, ...opts2 };
         }));
       }
       request(options, remainingRetries = null) {
@@ -29541,8 +29541,8 @@ var init_client2 = __esm({
         }));
         return { response, options, controller, requestLogID, retryOfRequestLogID, startTime };
       }
-      getAPIList(path12, Page3, opts) {
-        return this.requestAPIList(Page3, opts && "then" in opts ? opts.then((opts2) => ({ method: "get", path: path12, ...opts2 })) : { method: "get", path: path12, ...opts });
+      getAPIList(path10, Page3, opts) {
+        return this.requestAPIList(Page3, opts && "then" in opts ? opts.then((opts2) => ({ method: "get", path: path10, ...opts2 })) : { method: "get", path: path10, ...opts });
       }
       requestAPIList(Page3, options) {
         const request2 = this.makeRequest(options, null, void 0);
@@ -29636,8 +29636,8 @@ var init_client2 = __esm({
       }
       async buildRequest(inputOptions, { retryCount = 0 } = {}) {
         const options = { ...inputOptions };
-        const { method, path: path12, query, defaultBaseURL } = options;
-        const url = this.buildURL(path12, query, defaultBaseURL);
+        const { method, path: path10, query, defaultBaseURL } = options;
+        const url = this.buildURL(path10, query, defaultBaseURL);
         if ("timeout" in options)
           validatePositiveInteger2("timeout", options.timeout);
         options.timeout = options.timeout ?? this.timeout;
@@ -33687,7 +33687,7 @@ var require_dist3 = __commonJS({
     };
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.Agent = void 0;
-    var net2 = __importStar(__require("net"));
+    var net = __importStar(__require("net"));
     var http3 = __importStar(__require("http"));
     var https_1 = __require("https");
     __exportStar(require_helpers(), exports);
@@ -33727,7 +33727,7 @@ var require_dist3 = __commonJS({
         if (!this.sockets[name]) {
           this.sockets[name] = [];
         }
-        const fakeSocket = new net2.Socket({ writable: false });
+        const fakeSocket = new net.Socket({ writable: false });
         this.sockets[name].push(fakeSocket);
         this.totalSocketCount++;
         return fakeSocket;
@@ -33939,7 +33939,7 @@ var require_dist4 = __commonJS({
     };
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.HttpsProxyAgent = void 0;
-    var net2 = __importStar(__require("net"));
+    var net = __importStar(__require("net"));
     var tls = __importStar(__require("tls"));
     var assert_1 = __importDefault(__require("assert"));
     var debug_1 = __importDefault(require_src());
@@ -33948,7 +33948,7 @@ var require_dist4 = __commonJS({
     var parse_proxy_response_1 = require_parse_proxy_response();
     var debug = (0, debug_1.default)("https-proxy-agent");
     var setServernameFromNonIpHost = (options) => {
-      if (options.servername === void 0 && options.host && !net2.isIP(options.host)) {
+      if (options.servername === void 0 && options.host && !net.isIP(options.host)) {
         return {
           ...options,
           servername: options.host
@@ -33988,10 +33988,10 @@ var require_dist4 = __commonJS({
           socket = tls.connect(setServernameFromNonIpHost(this.connectOpts));
         } else {
           debug("Creating `net.Socket`: %o", this.connectOpts);
-          socket = net2.connect(this.connectOpts);
+          socket = net.connect(this.connectOpts);
         }
         const headers = typeof this.proxyHeaders === "function" ? this.proxyHeaders() : { ...this.proxyHeaders };
-        const host = net2.isIPv6(opts.host) ? `[${opts.host}]` : opts.host;
+        const host = net.isIPv6(opts.host) ? `[${opts.host}]` : opts.host;
         let payload = `CONNECT ${host}:${opts.port} HTTP/1.1\r
 `;
         if (proxy.username || proxy.password) {
@@ -34024,7 +34024,7 @@ var require_dist4 = __commonJS({
           return socket;
         }
         socket.destroy();
-        const fakeSocket = new net2.Socket({ writable: false });
+        const fakeSocket = new net.Socket({ writable: false });
         fakeSocket.readable = true;
         req.once("socket", (s2) => {
           debug("Replaying proxy buffer for failed request");
@@ -38857,22 +38857,22 @@ var init_from = __esm({
     init_file();
     init_fetch_blob();
     ({ stat: stat2 } = fs5);
-    blobFromSync = (path12, type) => fromBlob(statSync(path12), path12, type);
-    blobFrom = (path12, type) => stat2(path12).then((stat4) => fromBlob(stat4, path12, type));
-    fileFrom = (path12, type) => stat2(path12).then((stat4) => fromFile(stat4, path12, type));
-    fileFromSync = (path12, type) => fromFile(statSync(path12), path12, type);
-    fromBlob = (stat4, path12, type = "") => new fetch_blob_default([new BlobDataItem({
-      path: path12,
+    blobFromSync = (path10, type) => fromBlob(statSync(path10), path10, type);
+    blobFrom = (path10, type) => stat2(path10).then((stat4) => fromBlob(stat4, path10, type));
+    fileFrom = (path10, type) => stat2(path10).then((stat4) => fromFile(stat4, path10, type));
+    fileFromSync = (path10, type) => fromFile(statSync(path10), path10, type);
+    fromBlob = (stat4, path10, type = "") => new fetch_blob_default([new BlobDataItem({
+      path: path10,
       size: stat4.size,
       lastModified: stat4.mtimeMs,
       start: 0
     })], { type });
-    fromFile = (stat4, path12, type = "") => new file_default([new BlobDataItem({
-      path: path12,
+    fromFile = (stat4, path10, type = "") => new file_default([new BlobDataItem({
+      path: path10,
       size: stat4.size,
       lastModified: stat4.mtimeMs,
       start: 0
-    })], basename(path12), { type, lastModified: stat4.mtimeMs });
+    })], basename(path10), { type, lastModified: stat4.mtimeMs });
     BlobDataItem = class _BlobDataItem {
       #path;
       #start;
@@ -43696,22 +43696,22 @@ var require_crypto2 = __commonJS({
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.NodeCrypto = void 0;
-    var crypto5 = __require("crypto");
+    var crypto4 = __require("crypto");
     var NodeCrypto = class {
       async sha256DigestBase64(str2) {
-        return crypto5.createHash("sha256").update(str2).digest("base64");
+        return crypto4.createHash("sha256").update(str2).digest("base64");
       }
       randomBytesBase64(count) {
-        return crypto5.randomBytes(count).toString("base64");
+        return crypto4.randomBytes(count).toString("base64");
       }
       async verify(pubkey, data, signature) {
-        const verifier = crypto5.createVerify("RSA-SHA256");
+        const verifier = crypto4.createVerify("RSA-SHA256");
         verifier.update(data);
         verifier.end();
         return verifier.verify(pubkey, signature, "base64");
       }
       async sign(privateKey, data) {
-        const signer = crypto5.createSign("RSA-SHA256");
+        const signer = crypto4.createSign("RSA-SHA256");
         signer.update(data);
         signer.end();
         return signer.sign(privateKey, "base64");
@@ -43729,7 +43729,7 @@ var require_crypto2 = __commonJS({
        *   string in hexadecimal encoding.
        */
       async sha256DigestHex(str2) {
-        return crypto5.createHash("sha256").update(str2).digest("hex");
+        return crypto4.createHash("sha256").update(str2).digest("hex");
       }
       /**
        * Computes the HMAC hash of a message using the provided crypto key and the
@@ -43741,7 +43741,7 @@ var require_crypto2 = __commonJS({
        */
       async signWithHmacSha256(key, msg) {
         const cryptoKey = typeof key === "string" ? key : toBuffer(key);
-        return toArrayBuffer(crypto5.createHmac("sha256", cryptoKey).update(msg).digest());
+        return toArrayBuffer(crypto4.createHmac("sha256", cryptoKey).update(msg).digest());
       }
     };
     exports.NodeCrypto = NodeCrypto;
@@ -44030,9 +44030,9 @@ var require_util2 = __commonJS({
     exports.removeUndefinedValuesInObject = removeUndefinedValuesInObject;
     exports.isValidFile = isValidFile;
     exports.getWellKnownCertificateConfigFileLocation = getWellKnownCertificateConfigFileLocation;
-    var fs12 = __require("fs");
-    var os5 = __require("os");
-    var path12 = __require("path");
+    var fs9 = __require("fs");
+    var os3 = __require("os");
+    var path10 = __require("path");
     var WELL_KNOWN_CERTIFICATE_CONFIG_FILE = "certificate_config.json";
     var CLOUDSDK_CONFIG_DIRECTORY = "gcloud";
     function snakeToCamel(str2) {
@@ -44118,18 +44118,18 @@ var require_util2 = __commonJS({
     }
     async function isValidFile(filePath) {
       try {
-        const stats = await fs12.promises.lstat(filePath);
+        const stats = await fs9.promises.lstat(filePath);
         return stats.isFile();
       } catch (e2) {
         return false;
       }
     }
     function getWellKnownCertificateConfigFileLocation() {
-      const configDir = process.env.CLOUDSDK_CONFIG || (_isWindows() ? path12.join(process.env.APPDATA || "", CLOUDSDK_CONFIG_DIRECTORY) : path12.join(process.env.HOME || "", ".config", CLOUDSDK_CONFIG_DIRECTORY));
-      return path12.join(configDir, WELL_KNOWN_CERTIFICATE_CONFIG_FILE);
+      const configDir = process.env.CLOUDSDK_CONFIG || (_isWindows() ? path10.join(process.env.APPDATA || "", CLOUDSDK_CONFIG_DIRECTORY) : path10.join(process.env.HOME || "", ".config", CLOUDSDK_CONFIG_DIRECTORY));
+      return path10.join(configDir, WELL_KNOWN_CERTIFICATE_CONFIG_FILE);
     }
     function _isWindows() {
-      return os5.platform().startsWith("win");
+      return os3.platform().startsWith("win");
     }
   }
 });
@@ -44654,10 +44654,10 @@ var require_oauth2client = __commonJS({
        * https://github.com/googleapis/google-auth-library-nodejs/blob/main/samples/oauth2-codeVerifier.js
        */
       async generateCodeVerifierAsync() {
-        const crypto5 = (0, crypto_1.createCrypto)();
-        const randomString = crypto5.randomBytesBase64(96);
+        const crypto4 = (0, crypto_1.createCrypto)();
+        const randomString = crypto4.randomBytesBase64(96);
         const codeVerifier = randomString.replace(/\+/g, "~").replace(/=/g, "_").replace(/\//g, "-");
-        const unencodedCodeChallenge = await crypto5.sha256DigestBase64(codeVerifier);
+        const unencodedCodeChallenge = await crypto4.sha256DigestBase64(codeVerifier);
         const codeChallenge = unencodedCodeChallenge.split("=")[0].replace(/\+/g, "-").replace(/\//g, "_");
         return { codeVerifier, codeChallenge };
       }
@@ -45098,7 +45098,7 @@ var require_oauth2client = __commonJS({
        * @return Returns a promise resolving to LoginTicket on verification.
        */
       async verifySignedJwtWithCertsAsync(jwt, certs, requiredAudience, issuers, maxExpiry) {
-        const crypto5 = (0, crypto_1.createCrypto)();
+        const crypto4 = (0, crypto_1.createCrypto)();
         if (!maxExpiry) {
           maxExpiry = _OAuth2Client.DEFAULT_MAX_TOKEN_LIFETIME_SECS_;
         }
@@ -45111,7 +45111,7 @@ var require_oauth2client = __commonJS({
         let envelope;
         let payload;
         try {
-          envelope = JSON.parse(crypto5.decodeBase64StringUtf8(segments[0]));
+          envelope = JSON.parse(crypto4.decodeBase64StringUtf8(segments[0]));
         } catch (err) {
           if (err instanceof Error) {
             err.message = `Can't parse token envelope: ${segments[0]}': ${err.message}`;
@@ -45122,7 +45122,7 @@ var require_oauth2client = __commonJS({
           throw new Error("Can't parse token envelope: " + segments[0]);
         }
         try {
-          payload = JSON.parse(crypto5.decodeBase64StringUtf8(segments[1]));
+          payload = JSON.parse(crypto4.decodeBase64StringUtf8(segments[1]));
         } catch (err) {
           if (err instanceof Error) {
             err.message = `Can't parse token payload '${segments[0]}`;
@@ -45139,7 +45139,7 @@ var require_oauth2client = __commonJS({
         if (envelope.alg === "ES256") {
           signature = formatEcdsa.joseToDer(signature, "ES256").toString("base64");
         }
-        const verified = await crypto5.verify(cert, signed, signature);
+        const verified = await crypto4.verify(cert, signed, signature);
         if (!verified) {
           throw new Error("Invalid token signature: " + jwt);
         }
@@ -45514,14 +45514,14 @@ var require_buffer_equal_constant_time = __commonJS({
 var require_jwa = __commonJS({
   "node_modules/jwa/index.js"(exports, module) {
     var Buffer4 = require_safe_buffer().Buffer;
-    var crypto5 = __require("crypto");
+    var crypto4 = __require("crypto");
     var formatEcdsa = require_ecdsa_sig_formatter();
     var util3 = __require("util");
     var MSG_INVALID_ALGORITHM = '"%s" is not a valid algorithm.\n  Supported algorithms are:\n  "HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512" and "none".';
     var MSG_INVALID_SECRET = "secret must be a string or buffer";
     var MSG_INVALID_VERIFIER_KEY = "key must be a string or a buffer";
     var MSG_INVALID_SIGNER_KEY = "key must be a string, a buffer or an object";
-    var supportsKeyObjects = typeof crypto5.createPublicKey === "function";
+    var supportsKeyObjects = typeof crypto4.createPublicKey === "function";
     if (supportsKeyObjects) {
       MSG_INVALID_VERIFIER_KEY += " or a KeyObject";
       MSG_INVALID_SECRET += "or a KeyObject";
@@ -45611,17 +45611,17 @@ var require_jwa = __commonJS({
       return function sign(thing, secret) {
         checkIsSecretKey(secret);
         thing = normalizeInput(thing);
-        var hmac = crypto5.createHmac("sha" + bits, secret);
+        var hmac = crypto4.createHmac("sha" + bits, secret);
         var sig = (hmac.update(thing), hmac.digest("base64"));
         return fromBase642(sig);
       };
     }
     var bufferEqual;
-    var timingSafeEqual = "timingSafeEqual" in crypto5 ? function timingSafeEqual2(a, b) {
+    var timingSafeEqual = "timingSafeEqual" in crypto4 ? function timingSafeEqual2(a, b) {
       if (a.byteLength !== b.byteLength) {
         return false;
       }
-      return crypto5.timingSafeEqual(a, b);
+      return crypto4.timingSafeEqual(a, b);
     } : function timingSafeEqual2(a, b) {
       if (!bufferEqual) {
         bufferEqual = require_buffer_equal_constant_time();
@@ -45638,7 +45638,7 @@ var require_jwa = __commonJS({
       return function sign(thing, privateKey) {
         checkIsPrivateKey(privateKey);
         thing = normalizeInput(thing);
-        var signer = crypto5.createSign("RSA-SHA" + bits);
+        var signer = crypto4.createSign("RSA-SHA" + bits);
         var sig = (signer.update(thing), signer.sign(privateKey, "base64"));
         return fromBase642(sig);
       };
@@ -45648,7 +45648,7 @@ var require_jwa = __commonJS({
         checkIsPublicKey(publicKey);
         thing = normalizeInput(thing);
         signature = toBase64(signature);
-        var verifier = crypto5.createVerify("RSA-SHA" + bits);
+        var verifier = crypto4.createVerify("RSA-SHA" + bits);
         verifier.update(thing);
         return verifier.verify(publicKey, signature, "base64");
       };
@@ -45657,11 +45657,11 @@ var require_jwa = __commonJS({
       return function sign(thing, privateKey) {
         checkIsPrivateKey(privateKey);
         thing = normalizeInput(thing);
-        var signer = crypto5.createSign("RSA-SHA" + bits);
+        var signer = crypto4.createSign("RSA-SHA" + bits);
         var sig = (signer.update(thing), signer.sign({
           key: privateKey,
-          padding: crypto5.constants.RSA_PKCS1_PSS_PADDING,
-          saltLength: crypto5.constants.RSA_PSS_SALTLEN_DIGEST
+          padding: crypto4.constants.RSA_PKCS1_PSS_PADDING,
+          saltLength: crypto4.constants.RSA_PSS_SALTLEN_DIGEST
         }, "base64"));
         return fromBase642(sig);
       };
@@ -45671,12 +45671,12 @@ var require_jwa = __commonJS({
         checkIsPublicKey(publicKey);
         thing = normalizeInput(thing);
         signature = toBase64(signature);
-        var verifier = crypto5.createVerify("RSA-SHA" + bits);
+        var verifier = crypto4.createVerify("RSA-SHA" + bits);
         verifier.update(thing);
         return verifier.verify({
           key: publicKey,
-          padding: crypto5.constants.RSA_PKCS1_PSS_PADDING,
-          saltLength: crypto5.constants.RSA_PSS_SALTLEN_DIGEST
+          padding: crypto4.constants.RSA_PKCS1_PSS_PADDING,
+          saltLength: crypto4.constants.RSA_PSS_SALTLEN_DIGEST
         }, signature, "base64");
       };
     }
@@ -46072,11 +46072,11 @@ var require_getCredentials = __commonJS({
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.getCredentials = getCredentials;
-    var path12 = __require("path");
-    var fs12 = __require("fs");
+    var path10 = __require("path");
+    var fs9 = __require("fs");
     var util_1 = __require("util");
     var errorWithCode_1 = require_errorWithCode();
-    var readFile2 = fs12.readFile ? (0, util_1.promisify)(fs12.readFile) : async () => {
+    var readFile2 = fs9.readFile ? (0, util_1.promisify)(fs9.readFile) : async () => {
       throw new errorWithCode_1.ErrorWithCode("use key rather than keyFile.", "MISSING_CREDENTIALS");
     };
     var ExtensionFiles;
@@ -46144,7 +46144,7 @@ var require_getCredentials = __commonJS({
        * @returns An instance of a class that implements ICredentialsProvider.
        */
       static create(keyFilePath) {
-        const keyFileExtension = path12.extname(keyFilePath);
+        const keyFileExtension = path10.extname(keyFilePath);
         switch (keyFileExtension) {
           case ExtensionFiles.JSON:
             return new JsonCredentialsProvider(keyFilePath);
@@ -47753,12 +47753,12 @@ var require_filesubjecttokensupplier = __commonJS({
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.FileSubjectTokenSupplier = void 0;
     var util_1 = __require("util");
-    var fs12 = __require("fs");
-    var readFile2 = (0, util_1.promisify)(fs12.readFile ?? (() => {
+    var fs9 = __require("fs");
+    var readFile2 = (0, util_1.promisify)(fs9.readFile ?? (() => {
     }));
-    var realpath2 = (0, util_1.promisify)(fs12.realpath ?? (() => {
+    var realpath2 = (0, util_1.promisify)(fs9.realpath ?? (() => {
     }));
-    var lstat = (0, util_1.promisify)(fs12.lstat ?? (() => {
+    var lstat = (0, util_1.promisify)(fs9.lstat ?? (() => {
     }));
     var FileSubjectTokenSupplier = class {
       filePath;
@@ -47876,7 +47876,7 @@ var require_certificatesubjecttokensupplier = __commonJS({
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.CertificateSubjectTokenSupplier = exports.InvalidConfigurationError = exports.CertificateSourceUnavailableError = exports.CERTIFICATE_CONFIGURATION_ENV_VARIABLE = void 0;
     var util_1 = require_util2();
-    var fs12 = __require("fs");
+    var fs9 = __require("fs");
     var crypto_1 = __require("crypto");
     var https2 = __require("https");
     exports.CERTIFICATE_CONFIGURATION_ENV_VARIABLE = "GOOGLE_API_CERTIFICATE_CONFIG";
@@ -47970,7 +47970,7 @@ var require_certificatesubjecttokensupplier = __commonJS({
         const configPath = this.certificateConfigPath;
         let fileContents;
         try {
-          fileContents = await fs12.promises.readFile(configPath, "utf8");
+          fileContents = await fs9.promises.readFile(configPath, "utf8");
         } catch (err) {
           throw new CertificateSourceUnavailableError(`Failed to read certificate config file at: ${configPath}`);
         }
@@ -47995,14 +47995,14 @@ var require_certificatesubjecttokensupplier = __commonJS({
       async #getKeyAndCert(certPath, keyPath) {
         let cert, key;
         try {
-          cert = await fs12.promises.readFile(certPath);
+          cert = await fs9.promises.readFile(certPath);
           new crypto_1.X509Certificate(cert);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           throw new CertificateSourceUnavailableError(`Failed to read certificate file at ${certPath}: ${message}`);
         }
         try {
-          key = await fs12.promises.readFile(keyPath);
+          key = await fs9.promises.readFile(keyPath);
           (0, crypto_1.createPrivateKey)(key);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -48021,7 +48021,7 @@ var require_certificatesubjecttokensupplier = __commonJS({
           return JSON.stringify([leafCert.raw.toString("base64")]);
         }
         try {
-          const chainPems = await fs12.promises.readFile(this.trustChainPath, "utf8");
+          const chainPems = await fs9.promises.readFile(this.trustChainPath, "utf8");
           const pemBlocks = chainPems.match(/-----BEGIN CERTIFICATE-----[^-]+-----END CERTIFICATE-----/g) ?? [];
           const chainCerts = pemBlocks.map((pem, index) => {
             try {
@@ -48252,14 +48252,14 @@ var require_awsrequestsigner = __commonJS({
       }
     };
     exports.AwsRequestSigner = AwsRequestSigner;
-    async function sign(crypto5, key, msg) {
-      return await crypto5.signWithHmacSha256(key, msg);
+    async function sign(crypto4, key, msg) {
+      return await crypto4.signWithHmacSha256(key, msg);
     }
-    async function getSigningKey(crypto5, key, dateStamp, region, serviceName) {
-      const kDate = await sign(crypto5, `AWS4${key}`, dateStamp);
-      const kRegion = await sign(crypto5, kDate, region);
-      const kService = await sign(crypto5, kRegion, serviceName);
-      const kSigning = await sign(crypto5, kService, "aws4_request");
+    async function getSigningKey(crypto4, key, dateStamp, region, serviceName) {
+      const kDate = await sign(crypto4, `AWS4${key}`, dateStamp);
+      const kRegion = await sign(crypto4, kDate, region);
+      const kService = await sign(crypto4, kRegion, serviceName);
+      const kSigning = await sign(crypto4, kService, "aws4_request");
       return kSigning;
     }
     async function generateAuthenticationHeaderMap(options) {
@@ -48723,7 +48723,7 @@ var require_pluggable_auth_handler = __commonJS({
     exports.PluggableAuthHandler = exports.ExecutableError = void 0;
     var executable_response_1 = require_executable_response();
     var childProcess = __require("child_process");
-    var fs12 = __require("fs");
+    var fs9 = __require("fs");
     var ExecutableError = class extends Error {
       /**
        * The exit code returned by the executable.
@@ -48808,14 +48808,14 @@ var require_pluggable_auth_handler = __commonJS({
         }
         let filePath;
         try {
-          filePath = await fs12.promises.realpath(this.outputFile);
+          filePath = await fs9.promises.realpath(this.outputFile);
         } catch {
           return void 0;
         }
-        if (!(await fs12.promises.lstat(filePath)).isFile()) {
+        if (!(await fs9.promises.lstat(filePath)).isFile()) {
           return void 0;
         }
-        const responseString = await fs12.promises.readFile(filePath, {
+        const responseString = await fs9.promises.readFile(filePath, {
           encoding: "utf8"
         });
         if (responseString === "") {
@@ -49225,8 +49225,8 @@ var require_gdchclient = __commonJS({
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.GdchClient = exports.GDCH_SERVICE_ACCOUNT_TYPE = void 0;
-    var crypto5 = __require("crypto");
-    var fs12 = __require("fs");
+    var crypto4 = __require("crypto");
+    var fs9 = __require("fs");
     var https2 = __require("https");
     var oauth2client_1 = require_oauth2client();
     var DEFAULT_LIFETIME_IN_SECONDS = 3600;
@@ -49416,7 +49416,7 @@ var require_gdchclient = __commonJS({
         const encodedHeader = this.base64UrlEncode(JSON.stringify(header));
         const encodedPayload = this.base64UrlEncode(JSON.stringify(payload));
         const signingInput = `${encodedHeader}.${encodedPayload}`;
-        const signature = crypto5.sign("sha256", Buffer.from(signingInput), {
+        const signature = crypto4.sign("sha256", Buffer.from(signingInput), {
           key: this.privateKey,
           dsaEncoding: "ieee-p1363"
         });
@@ -49449,7 +49449,7 @@ var require_gdchclient = __commonJS({
         const currentPath = this.caCertPath;
         this.caAgentPromise = (async () => {
           try {
-            const ca = await fs12.promises.readFile(currentPath);
+            const ca = await fs9.promises.readFile(currentPath);
             return new https2.Agent({ ca });
           } catch (err) {
             if (this.cachedCaCertPath === currentPath) {
@@ -49509,11 +49509,11 @@ var require_googleauth = __commonJS({
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.GoogleAuth = exports.GoogleAuthExceptionMessages = void 0;
     var child_process_1 = __require("child_process");
-    var fs12 = __require("fs");
+    var fs9 = __require("fs");
     var gaxios_1 = (init_src2(), __toCommonJS(src_exports2));
     var gcpMetadata = require_src3();
-    var os5 = __require("os");
-    var path12 = __require("path");
+    var os3 = __require("os");
+    var path10 = __require("path");
     var crypto_1 = require_crypto3();
     var computeclient_1 = require_computeclient();
     var idtokenclient_1 = require_idtokenclient();
@@ -49798,20 +49798,20 @@ var require_googleauth = __commonJS({
         if (!configDir) {
           if (this._isWindows()) {
             if (process.env["APPDATA"]) {
-              configDir = path12.join(process.env["APPDATA"], "gcloud");
+              configDir = path10.join(process.env["APPDATA"], "gcloud");
             }
           } else {
             const home = process.env["HOME"];
             if (home) {
-              configDir = path12.join(home, ".config", "gcloud");
+              configDir = path10.join(home, ".config", "gcloud");
             }
           }
         }
         if (!configDir) {
           return null;
         }
-        const location = path12.join(configDir, "application_default_credentials.json");
-        if (!fs12.existsSync(location)) {
+        const location = path10.join(configDir, "application_default_credentials.json");
+        if (!fs9.existsSync(location)) {
           return null;
         }
         const client = await this._getApplicationCredentialsFromFilePath(location, options);
@@ -49828,8 +49828,8 @@ var require_googleauth = __commonJS({
           throw new Error("The file path is invalid.");
         }
         try {
-          filePath = fs12.realpathSync(filePath);
-          if (!fs12.lstatSync(filePath).isFile()) {
+          filePath = fs9.realpathSync(filePath);
+          if (!fs9.lstatSync(filePath).isFile()) {
             throw new Error();
           }
         } catch (err) {
@@ -49838,7 +49838,7 @@ var require_googleauth = __commonJS({
           }
           throw err;
         }
-        const readStream = fs12.createReadStream(filePath);
+        const readStream = fs9.createReadStream(filePath);
         return this.fromStream(readStream, options);
       }
       /**
@@ -50021,7 +50021,7 @@ var require_googleauth = __commonJS({
        * @api private
        */
       _isWindows() {
-        const sys = os5.platform();
+        const sys = os3.platform();
         if (sys && sys.length >= 3) {
           if (sys.substring(0, 3).toLowerCase() === "win") {
             return true;
@@ -50165,8 +50165,8 @@ var require_googleauth = __commonJS({
         if (this.jsonContent) {
           return this._cacheClientFromJSON(this.jsonContent, this.clientOptions);
         } else if (this.keyFilename) {
-          const filePath = path12.resolve(this.keyFilename);
-          const stream7 = fs12.createReadStream(filePath);
+          const filePath = path10.resolve(this.keyFilename);
+          const stream7 = fs9.createReadStream(filePath);
           return await this.fromStreamAsync(stream7, this.clientOptions);
         } else if (this.apiKey) {
           const client = await this.fromAPIKey(this.apiKey, this.clientOptions);
@@ -50279,24 +50279,24 @@ var require_googleauth = __commonJS({
           const signed = await client.sign(data);
           return signed.signedBlob;
         }
-        const crypto5 = (0, crypto_1.createCrypto)();
+        const crypto4 = (0, crypto_1.createCrypto)();
         if (client instanceof jwtclient_1.JWT && client.key) {
-          const sign = await crypto5.sign(client.key, data);
+          const sign = await crypto4.sign(client.key, data);
           return sign;
         }
         const creds = await this.getCredentials();
         if (!creds.client_email) {
           throw new Error("Cannot sign data without `client_email`.");
         }
-        return this.signBlob(crypto5, creds.client_email, data, endpoint);
+        return this.signBlob(crypto4, creds.client_email, data, endpoint);
       }
-      async signBlob(crypto5, emailOrUniqueId, data, endpoint) {
+      async signBlob(crypto4, emailOrUniqueId, data, endpoint) {
         const url = new URL(endpoint + `${emailOrUniqueId}:signBlob`);
         const res = await this.request({
           method: "POST",
           url: url.href,
           data: {
-            payload: crypto5.encodeBase64StringUtf8(data)
+            payload: crypto4.encodeBase64StringUtf8(data)
           },
           retry: true,
           retryConfig: {
@@ -52949,7 +52949,7 @@ var require_websocket = __commonJS({
     var EventEmitter = __require("events");
     var https2 = __require("https");
     var http3 = __require("http");
-    var net2 = __require("net");
+    var net = __require("net");
     var tls = __require("tls");
     var { randomBytes: randomBytes2, createHash: createHash2 } = __require("crypto");
     var { Duplex, Readable: Readable3 } = __require("stream");
@@ -53693,12 +53693,12 @@ var require_websocket = __commonJS({
     }
     function netConnect(options) {
       options.path = options.socketPath;
-      return net2.connect(options);
+      return net.connect(options);
     }
     function tlsConnect(options) {
       options.path = void 0;
       if (!options.servername && options.servername !== "") {
-        options.servername = net2.isIP(options.host) ? "" : options.host;
+        options.servername = net.isIP(options.host) ? "" : options.host;
       }
       return tls.connect(options);
     }
@@ -66208,7 +66208,7 @@ var init_node3 = __esm({
           params
         );
         const urlParams = body["_url"];
-        const path12 = formatMap("{model}:batchGenerateContent", urlParams);
+        const path10 = formatMap("{model}:batchGenerateContent", urlParams);
         const batch = body["batch"];
         const inputConfig = batch["inputConfig"];
         const requestsWrapper = inputConfig["requests"];
@@ -66229,7 +66229,7 @@ var init_node3 = __esm({
         delete body["config"];
         delete body["_url"];
         delete body["_query"];
-        return { path: path12, body };
+        return { path: path10, body };
       }
       // Helper function to get the first GCS URI
       getGcsUri(src) {
@@ -66285,16 +66285,16 @@ var init_node3 = __esm({
       async createInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = createBatchJobParametersToVertex(this.apiClient, params);
-          path12 = formatMap("batchPredictionJobs", body["_url"]);
+          path10 = formatMap("batchPredictionJobs", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -66309,12 +66309,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = createBatchJobParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{model}:batchGenerateContent", body["_url"]);
+          path10 = formatMap("{model}:batchGenerateContent", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -66339,18 +66339,18 @@ var init_node3 = __esm({
       async createEmbeddingsInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = createEmbeddingsBatchJobParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{model}:asyncBatchEmbedContent", body["_url"]);
+          path10 = formatMap("{model}:asyncBatchEmbedContent", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -66379,16 +66379,16 @@ var init_node3 = __esm({
       async get(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = getBatchJobParametersToVertex(this.apiClient, params);
-          path12 = formatMap("batchPredictionJobs/{name}", body["_url"]);
+          path10 = formatMap("batchPredictionJobs/{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -66403,12 +66403,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = getBatchJobParametersToMldev(this.apiClient, params);
-          path12 = formatMap("batches/{name}", body["_url"]);
+          path10 = formatMap("batches/{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -66436,16 +66436,16 @@ var init_node3 = __esm({
        */
       async cancel(params) {
         var _a6, _b, _c, _d;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = cancelBatchJobParametersToVertex(this.apiClient, params);
-          path12 = formatMap("batchPredictionJobs/{name}:cancel", body["_url"]);
+          path10 = formatMap("batchPredictionJobs/{name}:cancel", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           await this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -66454,12 +66454,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = cancelBatchJobParametersToMldev(this.apiClient, params);
-          path12 = formatMap("batches/{name}:cancel", body["_url"]);
+          path10 = formatMap("batches/{name}:cancel", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           await this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -66471,16 +66471,16 @@ var init_node3 = __esm({
       async listInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = listBatchJobsParametersToVertex(params);
-          path12 = formatMap("batchPredictionJobs", body["_url"]);
+          path10 = formatMap("batchPredictionJobs", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -66503,12 +66503,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = listBatchJobsParametersToMldev(params);
-          path12 = formatMap("batches", body["_url"]);
+          path10 = formatMap("batches", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -66545,16 +66545,16 @@ var init_node3 = __esm({
       async delete(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = deleteBatchJobParametersToVertex(this.apiClient, params);
-          path12 = formatMap("batchPredictionJobs/{name}", body["_url"]);
+          path10 = formatMap("batchPredictionJobs/{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -66575,12 +66575,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = deleteBatchJobParametersToMldev(this.apiClient, params);
-          path12 = formatMap("batches/{name}", body["_url"]);
+          path10 = formatMap("batches/{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -66639,16 +66639,16 @@ var init_node3 = __esm({
       async create(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = createCachedContentParametersToVertex(this.apiClient, params);
-          path12 = formatMap("cachedContents", body["_url"]);
+          path10 = formatMap("cachedContents", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -66662,12 +66662,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = createCachedContentParametersToMldev(this.apiClient, params);
-          path12 = formatMap("cachedContents", body["_url"]);
+          path10 = formatMap("cachedContents", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -66695,16 +66695,16 @@ var init_node3 = __esm({
       async get(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = getCachedContentParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path10 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -66718,12 +66718,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = getCachedContentParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path10 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -66751,16 +66751,16 @@ var init_node3 = __esm({
       async delete(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = deleteCachedContentParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path10 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -66783,12 +66783,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = deleteCachedContentParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path10 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -66828,16 +66828,16 @@ var init_node3 = __esm({
       async update(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = updateCachedContentParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path10 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "PATCH",
@@ -66851,12 +66851,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = updateCachedContentParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path10 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "PATCH",
@@ -66873,16 +66873,16 @@ var init_node3 = __esm({
       async listInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = listCachedContentsParametersToVertex(params);
-          path12 = formatMap("cachedContents", body["_url"]);
+          path10 = formatMap("cachedContents", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -66905,12 +66905,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = listCachedContentsParametersToMldev(params);
-          path12 = formatMap("cachedContents", body["_url"]);
+          path10 = formatMap("cachedContents", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -67241,18 +67241,18 @@ var init_node3 = __esm({
       async listInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = listFilesParametersToMldev(params);
-          path12 = formatMap("files", body["_url"]);
+          path10 = formatMap("files", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -67278,18 +67278,18 @@ var init_node3 = __esm({
       async createInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = createFileParametersToMldev(params);
-          path12 = formatMap("upload/v1beta/files", body["_url"]);
+          path10 = formatMap("upload/v1beta/files", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -67324,18 +67324,18 @@ var init_node3 = __esm({
       async get(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = getFileParametersToMldev(params);
-          path12 = formatMap("files/{file}", body["_url"]);
+          path10 = formatMap("files/{file}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -67365,18 +67365,18 @@ var init_node3 = __esm({
       async delete(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = deleteFileParametersToMldev(params);
-          path12 = formatMap("files/{file}", body["_url"]);
+          path10 = formatMap("files/{file}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -67402,18 +67402,18 @@ var init_node3 = __esm({
       async registerFilesInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = internalRegisterFilesParametersToMldev(params);
-          path12 = formatMap("files:register", body["_url"]);
+          path10 = formatMap("files:register", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -67573,13 +67573,13 @@ var init_node3 = __esm({
           throw new Error("HTTP options are not correctly set.");
         }
       }
-      constructUrl(path12, httpOptions, prependProjectLocation) {
+      constructUrl(path10, httpOptions, prependProjectLocation) {
         const urlElement = [this.getRequestUrlInternal(httpOptions)];
         if (prependProjectLocation) {
           urlElement.push(this.getBaseResourcePath());
         }
-        if (path12 !== "") {
-          urlElement.push(path12);
+        if (path10 !== "") {
+          urlElement.push(path10);
         }
         const url = new URL(`${urlElement.join("/")}`);
         return url;
@@ -67864,8 +67864,8 @@ var init_node3 = __esm({
           file: fileToUpload
         };
         const fileName = this.getFileName(file);
-        const path12 = formatMap("upload/v1beta/files", body["_url"]);
-        const uploadUrl = await this.fetchUploadUrl(path12, fileToUpload.sizeBytes, fileToUpload.mimeType, fileName, body, config === null || config === void 0 ? void 0 : config.httpOptions);
+        const path10 = formatMap("upload/v1beta/files", body["_url"]);
+        const uploadUrl = await this.fetchUploadUrl(path10, fileToUpload.sizeBytes, fileToUpload.mimeType, fileName, body, config === null || config === void 0 ? void 0 : config.httpOptions);
         return uploader.upload(file, uploadUrl, this);
       }
       /**
@@ -67889,13 +67889,13 @@ var init_node3 = __esm({
         if (mimeType === void 0 || mimeType === "") {
           throw new Error("Can not determine mimeType. Please provide mimeType in the config.");
         }
-        const path12 = `upload/v1beta/${fileSearchStoreName}:uploadToFileSearchStore`;
+        const path10 = `upload/v1beta/${fileSearchStoreName}:uploadToFileSearchStore`;
         const fileName = this.getFileName(file);
         const body = {};
         if (config != null) {
           uploadToFileSearchStoreConfigToMldev(config, body);
         }
-        const uploadUrl = await this.fetchUploadUrl(path12, sizeBytes, mimeType, fileName, body, config === null || config === void 0 ? void 0 : config.httpOptions);
+        const uploadUrl = await this.fetchUploadUrl(path10, sizeBytes, mimeType, fileName, body, config === null || config === void 0 ? void 0 : config.httpOptions);
         return uploader.uploadToFileSearchStore(file, uploadUrl, this);
       }
       /**
@@ -67908,7 +67908,7 @@ var init_node3 = __esm({
         const downloader = this.clientOptions.downloader;
         await downloader.download(params, this);
       }
-      async fetchUploadUrl(path12, sizeBytes, mimeType, fileName, body, configHttpOptions) {
+      async fetchUploadUrl(path10, sizeBytes, mimeType, fileName, body, configHttpOptions) {
         var _a6;
         let httpOptions = {};
         if (configHttpOptions) {
@@ -67921,7 +67921,7 @@ var init_node3 = __esm({
           };
         }
         const httpResponse = await this.request({
-          path: path12,
+          path: path10,
           body: JSON.stringify(body),
           httpMethod: "POST",
           httpOptions
@@ -68898,16 +68898,16 @@ var init_node3 = __esm({
       async generateContentInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = generateContentParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:generateContent", body["_url"]);
+          path10 = formatMap("{model}:generateContent", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -68930,12 +68930,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = generateContentParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{model}:generateContent", body["_url"]);
+          path10 = formatMap("{model}:generateContent", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -68961,17 +68961,17 @@ var init_node3 = __esm({
       async generateContentStreamInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = generateContentParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:streamGenerateContent?alt=sse", body["_url"]);
+          path10 = formatMap("{model}:streamGenerateContent?alt=sse", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           const apiClient = this.apiClient;
           response = apiClient.requestStream({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -69007,13 +69007,13 @@ var init_node3 = __esm({
           });
         } else {
           const body = generateContentParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{model}:streamGenerateContent?alt=sse", body["_url"]);
+          path10 = formatMap("{model}:streamGenerateContent?alt=sse", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           const apiClient = this.apiClient;
           response = apiClient.requestStream({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -69073,17 +69073,17 @@ var init_node3 = __esm({
       async embedContentInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = embedContentParametersPrivateToVertex(this.apiClient, params, params);
           const endpointUrl = tIsVertexEmbedContentModel(params.model) ? "{model}:embedContent" : "{model}:predict";
-          path12 = formatMap(endpointUrl, body["_url"]);
+          path10 = formatMap(endpointUrl, body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -69106,12 +69106,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = embedContentParametersPrivateToMldev(this.apiClient, params);
-          path12 = formatMap("{model}:batchEmbedContents", body["_url"]);
+          path10 = formatMap("{model}:batchEmbedContents", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -69140,16 +69140,16 @@ var init_node3 = __esm({
       async generateImagesInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = generateImagesParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:predict", body["_url"]);
+          path10 = formatMap("{model}:predict", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -69172,12 +69172,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = generateImagesParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{model}:predict", body["_url"]);
+          path10 = formatMap("{model}:predict", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -69206,16 +69206,16 @@ var init_node3 = __esm({
       async editImageInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = editImageParametersInternalToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:predict", body["_url"]);
+          path10 = formatMap("{model}:predict", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -69246,16 +69246,16 @@ var init_node3 = __esm({
       async upscaleImageInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = upscaleImageAPIParametersInternalToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:predict", body["_url"]);
+          path10 = formatMap("{model}:predict", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -69307,16 +69307,16 @@ var init_node3 = __esm({
       async recontextImage(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = recontextImageParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:predict", body["_url"]);
+          path10 = formatMap("{model}:predict", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -69358,16 +69358,16 @@ var init_node3 = __esm({
       async segmentImage(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = segmentImageParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:predict", body["_url"]);
+          path10 = formatMap("{model}:predict", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -69397,16 +69397,16 @@ var init_node3 = __esm({
       async get(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = getModelParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path10 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -69421,12 +69421,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = getModelParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path10 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -69444,16 +69444,16 @@ var init_node3 = __esm({
       async listInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = listModelsParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{models_url}", body["_url"]);
+          path10 = formatMap("{models_url}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -69476,12 +69476,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = listModelsParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{models_url}", body["_url"]);
+          path10 = formatMap("{models_url}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -69524,16 +69524,16 @@ var init_node3 = __esm({
       async update(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = updateModelParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}", body["_url"]);
+          path10 = formatMap("{model}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "PATCH",
@@ -69548,12 +69548,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = updateModelParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path10 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "PATCH",
@@ -69582,16 +69582,16 @@ var init_node3 = __esm({
       async delete(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = deleteModelParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path10 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -69614,12 +69614,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = deleteModelParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path10 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -69661,16 +69661,16 @@ var init_node3 = __esm({
       async countTokens(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = countTokensParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:countTokens", body["_url"]);
+          path10 = formatMap("{model}:countTokens", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -69693,12 +69693,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = countTokensParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{model}:countTokens", body["_url"]);
+          path10 = formatMap("{model}:countTokens", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -69742,16 +69742,16 @@ var init_node3 = __esm({
       async computeTokens(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = computeTokensParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:computeTokens", body["_url"]);
+          path10 = formatMap("{model}:computeTokens", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -69782,16 +69782,16 @@ var init_node3 = __esm({
       async generateVideosInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = generateVideosParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:predictLongRunning", body["_url"]);
+          path10 = formatMap("{model}:predictLongRunning", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -69808,12 +69808,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = generateVideosParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{model}:predictLongRunning", body["_url"]);
+          path10 = formatMap("{model}:predictLongRunning", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -69915,16 +69915,16 @@ var init_node3 = __esm({
       async getVideosOperationInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = getOperationParametersToVertex(params);
-          path12 = formatMap("{operationName}", body["_url"]);
+          path10 = formatMap("{operationName}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -69936,12 +69936,12 @@ var init_node3 = __esm({
           return response;
         } else {
           const body = getOperationParametersToMldev(params);
-          path12 = formatMap("{operationName}", body["_url"]);
+          path10 = formatMap("{operationName}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -69956,16 +69956,16 @@ var init_node3 = __esm({
       async fetchPredictVideosOperationInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = fetchPredictOperationParametersToVertex(params);
-          path12 = formatMap("{resourceName}:fetchPredictOperation", body["_url"]);
+          path10 = formatMap("{resourceName}:fetchPredictOperation", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -70071,20 +70071,20 @@ var init_node3 = __esm({
       async create(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("The client.tokens.create method is only supported by the Gemini Developer API.");
         } else {
           const body = createAuthTokenParametersToMldev(this.apiClient, params);
-          path12 = formatMap("auth_tokens", body["_url"]);
+          path10 = formatMap("auth_tokens", body["_url"]);
           queryParams = body["_query"];
           delete body["config"];
           delete body["_url"];
           delete body["_query"];
           const transformedBody = convertBidiSetupToTokenSetup(body, params.config);
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(transformedBody),
             httpMethod: "POST",
@@ -70116,18 +70116,18 @@ var init_node3 = __esm({
       async get(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = getDocumentParametersToMldev(params);
-          path12 = formatMap("{name}", body["_url"]);
+          path10 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -70148,18 +70148,18 @@ var init_node3 = __esm({
        */
       async delete(params) {
         var _a6, _b;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = deleteDocumentParametersToMldev(params);
-          path12 = formatMap("{name}", body["_url"]);
+          path10 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           await this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -70171,18 +70171,18 @@ var init_node3 = __esm({
       async listInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = listDocumentsParametersToMldev(params);
-          path12 = formatMap("{parent}/documents", body["_url"]);
+          path10 = formatMap("{parent}/documents", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -70299,18 +70299,18 @@ var init_node3 = __esm({
       async create(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = createFileSearchStoreParametersToMldev(this.apiClient, params);
-          path12 = formatMap("fileSearchStores", body["_url"]);
+          path10 = formatMap("fileSearchStores", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -70333,18 +70333,18 @@ var init_node3 = __esm({
       async get(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = getFileSearchStoreParametersToMldev(params);
-          path12 = formatMap("{name}", body["_url"]);
+          path10 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -70365,18 +70365,18 @@ var init_node3 = __esm({
        */
       async delete(params) {
         var _a6, _b;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = deleteFileSearchStoreParametersToMldev(params);
-          path12 = formatMap("{name}", body["_url"]);
+          path10 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           await this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -70388,18 +70388,18 @@ var init_node3 = __esm({
       async listInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = listFileSearchStoresParametersToMldev(params);
-          path12 = formatMap("fileSearchStores", body["_url"]);
+          path10 = formatMap("fileSearchStores", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -70419,18 +70419,18 @@ var init_node3 = __esm({
       async uploadToFileSearchStoreInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = uploadToFileSearchStoreParametersToMldev(params);
-          path12 = formatMap("upload/v1beta/{file_search_store_name}:uploadToFileSearchStore", body["_url"]);
+          path10 = formatMap("upload/v1beta/{file_search_store_name}:uploadToFileSearchStore", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -70458,18 +70458,18 @@ var init_node3 = __esm({
       async importFile(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = importFileParametersToMldev(params);
-          path12 = formatMap("{file_search_store_name}:importFile", body["_url"]);
+          path10 = formatMap("{file_search_store_name}:importFile", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -70488,13 +70488,13 @@ var init_node3 = __esm({
       }
     };
     uuid4Internal = function() {
-      const { crypto: crypto5 } = globalThis;
-      if (crypto5 === null || crypto5 === void 0 ? void 0 : crypto5.randomUUID) {
-        uuid4Internal = crypto5.randomUUID.bind(crypto5);
-        return crypto5.randomUUID();
+      const { crypto: crypto4 } = globalThis;
+      if (crypto4 === null || crypto4 === void 0 ? void 0 : crypto4.randomUUID) {
+        uuid4Internal = crypto4.randomUUID.bind(crypto4);
+        return crypto4.randomUUID();
       }
       const u8 = new Uint8Array(1);
-      const randomByte = crypto5 ? () => crypto5.getRandomValues(u8)[0] : () => Math.random() * 255 & 255;
+      const randomByte = crypto4 ? () => crypto4.getRandomValues(u8)[0] : () => Math.random() * 255 & 255;
       return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) => (+c ^ randomByte() & 15 >> +c / 4).toString(16));
     };
     uuid43 = () => uuid4Internal();
@@ -70662,12 +70662,12 @@ var init_node3 = __esm({
     };
     APIResource3._key = [];
     EMPTY3 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.create(null));
-    createPathTagFunction3 = (pathEncoder = encodeURIPath3) => (function path12(statics, ...params) {
+    createPathTagFunction3 = (pathEncoder = encodeURIPath3) => (function path10(statics, ...params) {
       if (statics.length === 1)
         return statics[0];
       let postPath = false;
       const invalidSegments = [];
-      const path13 = statics.reduce((previousValue, currentValue, index) => {
+      const path11 = statics.reduce((previousValue, currentValue, index) => {
         var _a6, _b, _c;
         if (/[?#]/.test(currentValue)) {
           postPath = true;
@@ -70685,7 +70685,7 @@ var init_node3 = __esm({
         }
         return previousValue + currentValue + (index === params.length ? "" : encoded);
       }, "");
-      const pathOnly = path13.split(/[?#]/, 1)[0];
+      const pathOnly = path11.split(/[?#]/, 1)[0];
       const invalidSegmentPattern = /(^|\/)(?:\.|%2e){1,2}(?=\/|$)/gi;
       let match;
       while ((match = invalidSegmentPattern.exec(pathOnly)) !== null) {
@@ -70709,10 +70709,10 @@ var init_node3 = __esm({
         }, "");
         throw new GeminiNextGenAPIClientError(`Path parameters result in path with invalid segments:
 ${invalidSegments.map((e2) => e2.error).join("\n")}
-${path13}
+${path11}
 ${underline}`);
       }
-      return path13;
+      return path11;
     });
     path6 = /* @__PURE__ */ createPathTagFunction3(encodeURIPath3);
     BaseInteractions = class extends APIResource3 {
@@ -71321,9 +71321,9 @@ ${underline}`);
       makeStatusError(status, error, message, headers) {
         return APIError3.generate(status, error, message, headers);
       }
-      buildURL(path12, query, defaultBaseURL) {
+      buildURL(path10, query, defaultBaseURL) {
         const baseURL = !this.baseURLOverridden() && defaultBaseURL || this.baseURL;
-        const url = isAbsoluteURL3(path12) ? new URL(path12) : new URL(baseURL + (baseURL.endsWith("/") && path12.startsWith("/") ? path12.slice(1) : path12));
+        const url = isAbsoluteURL3(path10) ? new URL(path10) : new URL(baseURL + (baseURL.endsWith("/") && path10.startsWith("/") ? path10.slice(1) : path10));
         const defaultQuery = this.defaultQuery();
         const pathQuery = Object.fromEntries(url.searchParams);
         if (!isEmptyObj3(defaultQuery) || !isEmptyObj3(pathQuery)) {
@@ -71352,24 +71352,24 @@ ${underline}`);
        */
       async prepareRequest(request2, { url, options }) {
       }
-      get(path12, opts) {
-        return this.methodRequest("get", path12, opts);
+      get(path10, opts) {
+        return this.methodRequest("get", path10, opts);
       }
-      post(path12, opts) {
-        return this.methodRequest("post", path12, opts);
+      post(path10, opts) {
+        return this.methodRequest("post", path10, opts);
       }
-      patch(path12, opts) {
-        return this.methodRequest("patch", path12, opts);
+      patch(path10, opts) {
+        return this.methodRequest("patch", path10, opts);
       }
-      put(path12, opts) {
-        return this.methodRequest("put", path12, opts);
+      put(path10, opts) {
+        return this.methodRequest("put", path10, opts);
       }
-      delete(path12, opts) {
-        return this.methodRequest("delete", path12, opts);
+      delete(path10, opts) {
+        return this.methodRequest("delete", path10, opts);
       }
-      methodRequest(method, path12, opts) {
+      methodRequest(method, path10, opts) {
         return this.request(Promise.resolve(opts).then((opts2) => {
-          return Object.assign({ method, path: path12 }, opts2);
+          return Object.assign({ method, path: path10 }, opts2);
         }));
       }
       request(options, remainingRetries = null) {
@@ -71543,8 +71543,8 @@ ${underline}`);
       async buildRequest(inputOptions, { retryCount = 0 } = {}) {
         var _b, _c, _d;
         const options = Object.assign({}, inputOptions);
-        const { method, path: path12, query, defaultBaseURL } = options;
-        const url = this.buildURL(path12, query, defaultBaseURL);
+        const { method, path: path10, query, defaultBaseURL } = options;
+        const url = this.buildURL(path10, query, defaultBaseURL);
         if ("timeout" in options)
           validatePositiveInteger3("timeout", options.timeout);
         options.timeout = (_b = options.timeout) !== null && _b !== void 0 ? _b : this.timeout;
@@ -71770,16 +71770,16 @@ ${underline}`);
       async getInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = getTuningJobParametersToVertex(params);
-          path12 = formatMap("{name}", body["_url"]);
+          path10 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -71800,12 +71800,12 @@ ${underline}`);
           });
         } else {
           const body = getTuningJobParametersToMldev(params);
-          path12 = formatMap("{name}", body["_url"]);
+          path10 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -71829,16 +71829,16 @@ ${underline}`);
       async listInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = listTuningJobsParametersToVertex(params);
-          path12 = formatMap("tuningJobs", body["_url"]);
+          path10 = formatMap("tuningJobs", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -71877,16 +71877,16 @@ ${underline}`);
       async cancel(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = cancelTuningJobParametersToVertex(params);
-          path12 = formatMap("{name}:cancel", body["_url"]);
+          path10 = formatMap("{name}:cancel", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -71909,12 +71909,12 @@ ${underline}`);
           });
         } else {
           const body = cancelTuningJobParametersToMldev(params);
-          path12 = formatMap("{name}:cancel", body["_url"]);
+          path10 = formatMap("{name}:cancel", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -71940,16 +71940,16 @@ ${underline}`);
       async tuneInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = createTuningJobParametersPrivateToVertex(params, params);
-          path12 = formatMap("tuningJobs", body["_url"]);
+          path10 = formatMap("tuningJobs", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -71975,18 +71975,18 @@ ${underline}`);
       async tuneMldevInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path10 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = createTuningJobParametersPrivateToMldev(params);
-          path12 = formatMap("tunedModels", body["_url"]);
+          path10 = formatMap("tunedModels", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path10,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -90174,7 +90174,7 @@ var init_terminal_ui = __esm({
 });
 
 // ../../plugins/cross-model-advisor/src/setup-control.mjs
-import { fileURLToPath as fileURLToPath3 } from "node:url";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // ../../plugins/cross-model-advisor/src/setup-store.mjs
 import { createHash, randomBytes } from "node:crypto";
@@ -90233,19 +90233,23 @@ var DEFAULT_LIMITS = Object.freeze({
   maxOutputTokens: 1500,
   maxReviewsPerAdvisorPerSession: 40
 });
+var GATE_MODES = Object.freeze(["block", "report"]);
+var DEFAULT_GATE = Object.freeze({ mode: "block", maxRounds: 2 });
+var GATE_KEYS = Object.freeze(["mode", "maxRounds"]);
 var IDENTIFIER_RE = /^[a-z][a-z0-9-]{0,63}$/;
 var ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 var MIN_NODE = Object.freeze([22, 19, 0]);
 var LIMIT_BOUNDS = Object.freeze({
   maxConcurrentAdvisors: [1, 16],
-  reviewTimeoutSeconds: [1, 600],
+  // The Stop hook's own timeout is 300 seconds; reviews must finish inside it.
+  reviewTimeoutSeconds: [1, 240],
   maxToolCallsPerReview: [1, 100],
   maxOutputTokens: [1, 1e5],
   maxReviewsPerAdvisorPerSession: [1, 1e4]
 });
 var MODEL_INPUTS = /* @__PURE__ */ new Set(["text", "image"]);
 var FORBIDDEN_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
-var CONFIG_KEYS = Object.freeze(["version", "providers", "advisors", "exclude", "limits"]);
+var CONFIG_KEYS = Object.freeze(["version", "providers", "advisors", "exclude", "limits", "gate"]);
 var API_KEYS = Object.freeze(["kind", "provider", "apiKeyEnv"]);
 var COMPAT_KEYS = Object.freeze(["kind", "provider", "apiKeyEnv", "baseUrl", "models"]);
 var OAUTH_KEYS = Object.freeze(["kind", "provider"]);
@@ -90527,6 +90531,21 @@ function assertAdvisor(entry, index, providers, version, names) {
     reasoningEffort
   };
 }
+function assertGate(value) {
+  if (value === void 0) return { ...DEFAULT_GATE };
+  assertPlainObject(value, "gate");
+  assertKnownKeys(value, GATE_KEYS, "gate");
+  const gate = { ...DEFAULT_GATE };
+  if ("mode" in value) {
+    if (!GATE_MODES.includes(value.mode)) fail(`gate.mode must be one of ${GATE_MODES.join(", ")}`);
+    gate.mode = value.mode;
+  }
+  if ("maxRounds" in value) {
+    assertInteger(value.maxRounds, "gate.maxRounds", 1, 5);
+    gate.maxRounds = value.maxRounds;
+  }
+  return gate;
+}
 function validateConfig(value) {
   assertPlainObject(value, "config");
   assertKnownKeys(value, CONFIG_KEYS, "config");
@@ -90561,7 +90580,8 @@ function validateConfig(value) {
     providers,
     advisors,
     exclude: assertExclude(value.exclude),
-    limits: assertLimits(value.limits)
+    limits: assertLimits(value.limits),
+    gate: assertGate(value.gate)
   };
 }
 function configFilePath(env = process.env) {
@@ -90579,45 +90599,8 @@ var CONTROL_COMMANDS = Object.freeze([
   "cross-model-advisor:login",
   "cross-model-advisor:logout"
 ]);
-var CONTROL_OPS = Object.freeze([
-  "on",
-  "off",
-  "status",
-  "doctor",
-  "hook",
-  "ack",
-  "settings",
-  "apply"
-]);
-var SETTINGS_ERRORS = Object.freeze({
-  PROTOCOL: "protocol",
-  STALE: "stale",
-  BUSY: "busy",
-  ROOT: "root",
-  CONFIG: "config",
-  UNAVAILABLE: "unavailable"
-});
-var DRAIN_EVENTS = Object.freeze([
-  "UserPromptSubmit",
-  "PreToolUse",
-  "PostToolUse",
-  "PostToolUseFailure"
-]);
-var SILENT_EVENTS = Object.freeze([
-  "SessionStart",
-  "UserPromptExpansion",
-  "Stop",
-  "StopFailure",
-  "PreCompact",
-  "PostCompact",
-  "SessionEnd"
-]);
 var SEVERITY_ORDER = Object.freeze({ blocker: 0, concern: 1, nit: 2 });
-var WARM_IPC_MS = 200;
-var COLD_START_MS = 1e3;
-var SESSION_END_TIMEOUT_MS = 1e3;
 var USER_TEXT_CAP = 8 * 1024;
-var TRANSCRIPT_TAIL_BYTES = 256 * 1024;
 var MAX_STDIN_BYTES = 1048576;
 var SESSION_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
 var ERROR_LOG_MAX_BYTES = 64 * 1024;
@@ -91132,773 +91115,14 @@ async function main(argv = process.argv.slice(2), env = process.env) {
 }
 
 // ../../plugins/cross-model-advisor/src/setup-menu.mjs
-import { spawn as spawn3 } from "node:child_process";
-import path11 from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
-
-// ../../plugins/cross-model-advisor/src/control.mjs
 import { spawn as spawn2 } from "node:child_process";
-import fs10 from "node:fs";
-import fsPromises from "node:fs/promises";
-import os4 from "node:os";
 import path9 from "node:path";
 import { fileURLToPath } from "node:url";
-
-// ../../plugins/cross-model-advisor/src/session/ipc.mjs
-import crypto4 from "node:crypto";
-import fs8 from "node:fs";
-import net from "node:net";
-var MAX_FRAME = 1048576;
-var PROTOCOL_VERSION = 2;
-function createClientMeta() {
-  return {
-    pid: process.pid,
-    id: crypto4.randomUUID(),
-    protocolVersion: PROTOCOL_VERSION
-  };
-}
-function encodeFrame(value) {
-  return `${JSON.stringify(value)}
-`;
-}
-function splitFrames(buffer) {
-  const frames = [];
-  const errors = [];
-  let offset = 0;
-  while (offset < buffer.length) {
-    const nl = buffer.indexOf(10, offset);
-    if (nl === -1) break;
-    const line = buffer.subarray(offset, nl).toString("utf8").replace(/\r$/, "");
-    offset = nl + 1;
-    if (line.trim() === "") continue;
-    if (line.length > MAX_FRAME) {
-      errors.push("frame too large");
-      continue;
-    }
-    try {
-      const parsed = JSON.parse(line);
-      if (parsed && typeof parsed === "object") frames.push(parsed);
-      else errors.push("frame not an object");
-    } catch {
-      errors.push("invalid json");
-    }
-  }
-  return { frames, rest: buffer.subarray(offset), errors };
-}
-async function requestIpc(socketPath, request2, { timeoutMs = WARM_IPC_MS } = {}) {
-  return new Promise((resolve2, reject) => {
-    const socket = net.createConnection(socketPath);
-    let buf = Buffer.alloc(0);
-    let settled = false;
-    const timer = setTimeout(() => {
-      fail3(new Error("ipc timeout"));
-    }, timeoutMs);
-    const fail3 = (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      socket.destroy();
-      reject(error);
-    };
-    socket.on("connect", () => {
-      socket.write(encodeFrame(request2));
-    });
-    socket.on("data", (chunk) => {
-      buf = Buffer.concat([buf, chunk]);
-      const split = splitFrames(buf);
-      buf = split.rest;
-      const frame = split.frames[0];
-      if (!frame) return;
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      socket.end();
-      resolve2(frame);
-    });
-    socket.on("error", fail3);
-    socket.on("end", () => {
-      if (!settled) fail3(new Error("ipc closed"));
-    });
-  });
-}
-function socketExists(socketPath) {
-  try {
-    return fs8.existsSync(socketPath);
-  } catch {
-    return false;
-  }
-}
-function writeCompleted(stream7, data) {
-  return new Promise((resolve2, reject) => {
-    if (data == null || data === "") {
-      resolve2();
-      return;
-    }
-    let settled = false;
-    const done = (error) => {
-      if (settled) return;
-      settled = true;
-      if (error) reject(error);
-      else resolve2();
-    };
-    try {
-      stream7.write(data, done);
-    } catch (error) {
-      done(error);
-    }
-  });
-}
-
-// ../../plugins/cross-model-advisor/src/session/paths.mjs
-import fs9 from "node:fs/promises";
-import os3 from "node:os";
-import path8 from "node:path";
-var SESSION_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
-function validateSessionId(value) {
-  const id = typeof value === "string" ? value.trim() : "";
-  if (!SESSION_ID_RE.test(id)) {
-    throw new Error("invalid session id");
-  }
-  return id;
-}
-function explicitPluginData(value) {
-  const text = typeof value === "string" ? value.trim() : "";
-  if (!text || text.includes("${") || !path8.isAbsolute(text)) {
-    throw new Error("invalid --plugin-data");
-  }
-  return path8.resolve(text);
-}
-function sessionDir(pluginData, sessionId) {
-  return path8.join(pluginData, "sessions", validateSessionId(sessionId));
-}
-var locatorPath = (dir) => path8.join(dir, "locator.json");
-var statePath = (dir) => path8.join(dir, "state.json");
-function readIdentity(env = process.env, payload = {}) {
-  const sessionId = env.CLAUDE_CODE_SESSION_ID?.trim() || env.CLAUDE_SESSION_ID?.trim() || (typeof payload.session_id === "string" ? payload.session_id.trim() : "");
-  const projectRoot = env.CLAUDE_PROJECT_DIR?.trim() || "";
-  const pluginData = env.CLAUDE_PLUGIN_DATA?.trim() || "";
-  const pluginRoot = env.CLAUDE_PLUGIN_ROOT?.trim() || "";
-  const configDir = env.CLAUDE_CONFIG_DIR?.trim() || path8.join(os3.homedir(), ".claude");
-  return { sessionId, projectRoot, pluginData, pluginRoot, configDir };
-}
-function userConfigPath(env = process.env) {
-  return path8.join(readIdentity(env).configDir, "cross-model-advisor.json");
-}
-async function readLocator(pluginData, sessionId) {
-  const file = locatorPath(sessionDir(pluginData, sessionId));
-  try {
-    const raw = await fs9.readFile(file, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-async function readSessionProjectRoot(pluginData, sessionId) {
-  try {
-    const raw = await fs9.readFile(statePath(sessionDir(pluginData, sessionId)), "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed.projectRoot !== "string" || !path8.isAbsolute(parsed.projectRoot)) {
-      return null;
-    }
-    return parsed.projectRoot;
-  } catch {
-    return null;
-  }
-}
-function pidIsLive(pid) {
-  const n = Number(pid);
-  if (!Number.isInteger(n) || n <= 0) return false;
-  try {
-    process.kill(n, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// ../../plugins/cross-model-advisor/src/control.mjs
-var CONTROL_COMMANDS2 = /* @__PURE__ */ new Set(["on", "off", "status", "doctor", "hook"]);
-var CONTROL_COMMAND_MS = 9e4;
-var STATUS_OFF_MS = 5e3;
-var SETTINGS_ERROR_CODES = /* @__PURE__ */ new Set([
-  "identity",
-  "no-live",
-  "protocol",
-  "stale",
-  "busy",
-  "root",
-  "config",
-  "unavailable"
-]);
-var WORKER_ENV_ALLOW = [
-  "PATH",
-  "Path",
-  "PATHEXT",
-  "HOME",
-  "TMPDIR",
-  "TMP",
-  "TEMP",
-  "USER",
-  "LOGNAME",
-  "LANG",
-  "LC_ALL",
-  "LC_CTYPE",
-  "TZ",
-  "XDG_RUNTIME_DIR",
-  "CLAUDE_CODE_SESSION_ID",
-  "CLAUDE_SESSION_ID",
-  "CLAUDE_PROJECT_DIR",
-  "CLAUDE_PLUGIN_DATA",
-  "CLAUDE_PLUGIN_ROOT",
-  "CLAUDE_CONFIG_DIR"
-];
-var ENV_DENY = /CUSTOM_HEADERS|(?:^|_)LOG$|VERTEX|GOOGLE_GENAI_USE|GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_CLOUD_|GCLOUD_|CLOUDSDK_|GOOGLE_VERTEX|GEMINI_SYSTEM_MD|GOOGLE_GEMINI_BASE_URL|GEMINI_CLI_IDE_|NODE_OPTIONS|^PI_|KIMI_CODE_OAUTH_HOST|KIMI_OAUTH_HOST|CHATGPT_BASE_URL|OPENAI_BASE_URL|OPENAI_ORG_ID|OPENAI_PROJECT_ID|OPENAI_LOG/;
-function readJsonFile(file) {
-  try {
-    return JSON.parse(fs10.readFileSync(file, "utf8"));
-  } catch {
-    return null;
-  }
-}
-function providersFromIdentity(identity, env) {
-  try {
-    const snapshot = readJsonFile(statePath(sessionDir(identity.pluginData, identity.sessionId)));
-    if (snapshot?.activation?.providers) return snapshot.activation.providers;
-  } catch {
-  }
-  const configDir = env.CLAUDE_CONFIG_DIR || identity.configDir || path9.join(os4.homedir(), ".claude");
-  const cfg = readJsonFile(path9.join(configDir, "cross-model-advisor.json"));
-  return cfg?.providers ?? {};
-}
-function workerChildEnv(identity, env = process.env) {
-  const out = /* @__PURE__ */ Object.create(null);
-  for (const name of WORKER_ENV_ALLOW) {
-    if (typeof env[name] === "string" && !ENV_DENY.test(name)) out[name] = env[name];
-  }
-  out.CLAUDE_CODE_SESSION_ID = identity.sessionId;
-  out.CLAUDE_PROJECT_DIR = identity.projectRoot;
-  out.CLAUDE_PLUGIN_DATA = identity.pluginData;
-  if (identity.pluginRoot) out.CLAUDE_PLUGIN_ROOT = identity.pluginRoot;
-  if (identity.configDir) out.CLAUDE_CONFIG_DIR = identity.configDir;
-  const providers = providersFromIdentity(identity, env);
-  const keyNames = /* @__PURE__ */ new Set();
-  for (const provider of Object.values(providers)) {
-    if (typeof provider?.apiKeyEnv === "string") keyNames.add(provider.apiKeyEnv);
-  }
-  for (const name of keyNames) {
-    if (typeof env[name] === "string" && !ENV_DENY.test(name)) out[name] = env[name];
-  }
-  return out;
-}
-function workerExecutablePath(metaUrl = import.meta.url) {
-  const here = path9.dirname(fileURLToPath(metaUrl));
-  if (path9.basename(here) === "modules") return path9.join(here, "..", "worker.mjs");
-  return path9.join(here, "worker.mjs");
-}
-function parseControlArgv(argv) {
-  const op = argv[0];
-  const usage = () => {
-    const error = new Error("usage: control.mjs hook | on|off|status|doctor [--plugin-data <path>]");
-    error.code = "usage";
-    return error;
-  };
-  if (!CONTROL_COMMANDS2.has(op)) throw usage();
-  if (argv.length === 1) return { op, pluginData: null };
-  if (op === "hook" || argv.length !== 3 || argv[1] !== "--plugin-data") throw usage();
-  try {
-    return { op, pluginData: explicitPluginData(argv[2]) };
-  } catch {
-    throw new IdentityError(
-      "Invalid --plugin-data. Run this command through the plugin's skill so Claude Code substitutes the path."
-    );
-  }
-}
-async function readBoundedStdin2(stream7, max = MAX_STDIN_BYTES) {
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of stream7) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += buf.length;
-    if (size > max) {
-      const error = new Error("stdin too large");
-      error.code = "overflow";
-      throw error;
-    }
-    chunks.push(buf);
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-function sleep6(ms) {
-  return new Promise((resolve2) => setTimeout(resolve2, ms));
-}
-function spawnWorkerProcess(identity, { env = process.env, workerPath, spawnImpl = spawn2 } = {}) {
-  const file = workerPath ?? workerExecutablePath();
-  const child = spawnImpl(
-    process.execPath,
-    [file, "--session", identity.sessionId, "--root", identity.projectRoot, "--data", identity.pluginData],
-    {
-      detached: true,
-      stdio: "ignore",
-      env: workerChildEnv(identity, env)
-    }
-  );
-  child.unref();
-  return child;
-}
-function locatorReachable(locator) {
-  return Boolean(
-    locator?.socketPath && locator?.controlCapability && pidIsLive(locator.pid) && socketExists(locator.socketPath)
-  );
-}
-async function waitForLocator(identity, deadlineMs, { isDead } = {}) {
-  const started = Date.now();
-  while (Date.now() - started < deadlineMs) {
-    if (typeof isDead === "function" && isDead()) return null;
-    const locator = await readLocator(identity.pluginData, identity.sessionId);
-    if (locatorReachable(locator)) {
-      return locator;
-    }
-    await sleep6(20);
-  }
-  return null;
-}
-async function ensureWorker(identity, options = {}) {
-  const request2 = options.request ?? requestIpc;
-  let locator = await readLocator(identity.pluginData, identity.sessionId);
-  if (locatorReachable(locator)) {
-    try {
-      const ping = await request2(
-        locator.socketPath,
-        { capability: locator.controlCapability, op: "ping" },
-        { timeoutMs: WARM_IPC_MS }
-      );
-      if (ping?.ok) return { locator, cold: false };
-    } catch {
-    }
-  }
-  const workerPath = options.workerPath ?? workerExecutablePath();
-  const child = spawnWorkerProcess(identity, { ...options, workerPath });
-  let exitInfo = null;
-  const onExit = (code, signal) => {
-    exitInfo = { code, signal };
-  };
-  if (typeof child?.once === "function") child.once("exit", onExit);
-  try {
-    locator = await waitForLocator(identity, COLD_START_MS, { isDead: () => Boolean(exitInfo) });
-  } finally {
-    if (typeof child?.off === "function") child.off("exit", onExit);
-  }
-  if (!locator) {
-    const pid = Number(child?.pid);
-    if (Number.isInteger(pid) && pid > 0) {
-      try {
-        process.kill(-pid, "SIGKILL");
-      } catch {
-      }
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-      }
-    }
-    const locFile = locatorPath(sessionDir(identity.pluginData, identity.sessionId));
-    const error = new Error(
-      exitInfo ? `worker exited before locator (code=${exitInfo.code} signal=${exitInfo.signal}) file=${workerPath} pid=${child?.pid ?? "none"} locator=${locFile}` : `worker startup timeout file=${workerPath} pid=${child?.pid ?? "none"} locator=${locFile}`
-    );
-    error.code = "startup";
-    throw error;
-  }
-  return { locator, cold: true };
-}
-var IdentityError = class extends Error {
-  code = "identity";
-};
-function identityFrom(env, payload, op) {
-  const identity = readIdentity(env, payload);
-  if (!identity.sessionId) {
-    throw new IdentityError("Missing CLAUDE_CODE_SESSION_ID or CLAUDE_SESSION_ID. Run this command inside Claude Code.");
-  }
-  if (!identity.pluginData) {
-    throw new IdentityError("Missing CLAUDE_PLUGIN_DATA. Load the plugin in Claude Code before running this command.");
-  }
-  try {
-    identity.sessionId = validateSessionId(identity.sessionId);
-  } catch {
-    throw new IdentityError("Invalid Claude session id. Start a new Claude Code session.");
-  }
-  if (payload?.session_id && payload.session_id !== identity.sessionId) {
-    throw new IdentityError("Hook session id does not match the Claude session environment.");
-  }
-  let saved;
-  try {
-    saved = JSON.parse(fs10.readFileSync(statePath(sessionDir(identity.pluginData, identity.sessionId)), "utf8"));
-  } catch (error) {
-    if (error?.code !== "ENOENT") {
-      if (error instanceof SyntaxError) {
-        throw new IdentityError("Stored session identity is unreadable. Start a new Claude Code session.");
-      }
-      throw error;
-    }
-  }
-  if (saved !== void 0) {
-    if (!saved || typeof saved.projectRoot !== "string" || !path9.isAbsolute(saved.projectRoot)) {
-      throw new IdentityError("Stored session project root is invalid. Start a new Claude Code session.");
-    }
-    identity.projectRoot = saved.projectRoot;
-  } else if (!identity.projectRoot) {
-    identity.projectRoot = op === "hook" ? typeof payload.cwd === "string" ? payload.cwd : "" : process.cwd();
-  }
-  if (!identity.projectRoot || !path9.isAbsolute(identity.projectRoot)) {
-    throw new IdentityError("Missing or invalid project root. Hooks require cwd; commands must run from the project directory.");
-  }
-  return identity;
-}
-function commandFailure(error) {
-  if (error instanceof IdentityError) return `identity: ${error.message}`;
-  const messages = {
-    startup: "Worker could not start. Check Node 22.19.0+, the built plugin bundle, and plugin-data permissions.",
-    EACCES: "Access denied. Check permissions on the plugin-data and configuration directories.",
-    EPERM: "Operation not permitted. Check plugin-data permissions and local process restrictions.",
-    ENOSPC: "No space left to write plugin state. Free disk space and retry.",
-    ENOENT: "A required path is missing. Check the project directory and plugin installation.",
-    ECONNREFUSED: "Worker connection refused. Retry the command to restart the session worker.",
-    ECONNRESET: "Worker connection closed. Retry the command.",
-    ETIMEDOUT: "Worker communication timed out. Retry the command."
-  };
-  const code = typeof error?.code === "string" && Object.hasOwn(messages, error.code) ? error.code : "control";
-  return `${code}: ${messages[code] ?? "Command failed. Check the runtime, plugin bundle, and plugin-data access."}`;
-}
-function settingsFailure(code) {
-  return { ok: false, error: SETTINGS_ERROR_CODES.has(code) ? code : "protocol" };
-}
-function pathsMatch(left, right) {
-  if (typeof left !== "string" || typeof right !== "string" || !left || !right) return false;
-  const a = path9.resolve(left);
-  const b = path9.resolve(right);
-  if (a === b) return true;
-  try {
-    return fs10.realpathSync(a) === fs10.realpathSync(b);
-  } catch {
-    return false;
-  }
-}
-function sanitizeAdvisor(row) {
-  if (!row || typeof row !== "object" || typeof row.name !== "string") return null;
-  const out = { name: row.name };
-  if (typeof row.enabled === "boolean") out.enabled = row.enabled;
-  if (typeof row.available === "boolean") out.available = row.available;
-  if (typeof row.provider === "string") out.provider = row.provider;
-  if (typeof row.model === "string") out.model = row.model;
-  if (typeof row.kind === "string") out.kind = row.kind;
-  if (typeof row.reasoningEffort === "string") out.reasoningEffort = row.reasoningEffort;
-  if (typeof row.error === "string") out.error = row.error;
-  return out;
-}
-function sanitizeSnapshot(value) {
-  if (!value || typeof value !== "object") return null;
-  if (value.protocolVersion !== PROTOCOL_VERSION) return null;
-  if (typeof value.sessionId !== "string" || !value.sessionId) return null;
-  if (typeof value.projectRoot !== "string" || !path9.isAbsolute(value.projectRoot)) return null;
-  if (typeof value.configPath !== "string" || !value.configPath) return null;
-  if (!Number.isInteger(value.workerGeneration) || !Number.isInteger(value.settingsRevision)) return null;
-  if (typeof value.enabled !== "boolean" || typeof value.paused !== "boolean") return null;
-  if (!Array.isArray(value.advisors)) return null;
-  return {
-    ok: true,
-    protocolVersion: PROTOCOL_VERSION,
-    sessionId: value.sessionId,
-    projectRoot: value.projectRoot,
-    configPath: value.configPath,
-    workerGeneration: value.workerGeneration,
-    settingsRevision: value.settingsRevision,
-    enabled: value.enabled,
-    paused: value.paused,
-    advisors: value.advisors.map(sanitizeAdvisor).filter(Boolean)
-  };
-}
-function mapResultCode(result) {
-  if (result && typeof result.code === "string" && SETTINGS_ERROR_CODES.has(result.code)) return result.code;
-  const error = typeof result?.error === "string" ? result.error : "";
-  if (SETTINGS_ERROR_CODES.has(error)) return error;
-  if (error === "protocol mismatch") return "protocol";
-  if (error === "root mismatch") return "root";
-  if (error === "stale worker generation" || error === "stale settings revision") return "stale";
-  if (error === "api environment unavailable") return "unavailable";
-  if (error === "missing worker generation" || error === "missing settings revision" || error === "missing config revision" || error === "config revision mismatch" || error === "config unavailable" || error === "invalid config") {
-    return "config";
-  }
-  return null;
-}
-function interpretTransportError(error) {
-  if (error === "unknown op" || error === "unauthorized" || error === "protocol mismatch") return "protocol";
-  if (typeof error === "string" && SETTINGS_ERROR_CODES.has(error)) return error;
-  return "no-live";
-}
-function interpretSettingsIpc(response, fallback) {
-  if (!response) return settingsFailure(fallback);
-  if (response.ok !== true) {
-    return settingsFailure(interpretTransportError(response.error) === "protocol" ? "protocol" : SETTINGS_ERROR_CODES.has(response.error) ? response.error : fallback);
-  }
-  const result = response.result;
-  if (!result || typeof result !== "object") return settingsFailure("protocol");
-  if (result.ok === false) {
-    return settingsFailure(mapResultCode(result) ?? fallback);
-  }
-  const snapshot = sanitizeSnapshot(result);
-  if (!snapshot) return settingsFailure("protocol");
-  return snapshot;
-}
-function settingsIdentity(env) {
-  const identity = readIdentity(env, {});
-  if (!identity.sessionId || !identity.pluginData) return settingsFailure("identity");
-  try {
-    identity.sessionId = validateSessionId(identity.sessionId);
-  } catch {
-    return settingsFailure("identity");
-  }
-  identity.configPath = userConfigPath(env);
-  return { ok: true, identity };
-}
-async function readLiveLocator(identity) {
-  let locator;
-  try {
-    locator = await readLocator(identity.pluginData, identity.sessionId);
-  } catch {
-    return settingsFailure("no-live");
-  }
-  if (!locatorReachable(locator)) return settingsFailure("no-live");
-  return { ok: true, locator };
-}
-function verifySnapshotIdentity(snapshot, identity, frozenRoot, targetRoot) {
-  if (snapshot.sessionId !== identity.sessionId) return settingsFailure("identity");
-  if (!pathsMatch(snapshot.configPath, identity.configPath)) return settingsFailure("config");
-  if (frozenRoot && !pathsMatch(snapshot.projectRoot, frozenRoot)) return settingsFailure("root");
-  if (identity.projectRoot && !pathsMatch(snapshot.projectRoot, identity.projectRoot)) {
-    return settingsFailure("root");
-  }
-  if (targetRoot && !pathsMatch(snapshot.projectRoot, targetRoot)) return settingsFailure("root");
-  return snapshot;
-}
-async function getSessionSettings({ env = process.env, request: request2 = requestIpc } = {}) {
-  const parsed = settingsIdentity(env);
-  if (!parsed.ok) return parsed;
-  const { identity } = parsed;
-  const live = await readLiveLocator(identity);
-  if (!live.ok) return live;
-  let response;
-  try {
-    response = await request2(
-      live.locator.socketPath,
-      {
-        capability: live.locator.controlCapability,
-        op: "settings",
-        protocolVersion: PROTOCOL_VERSION
-      },
-      { timeoutMs: STATUS_OFF_MS }
-    );
-  } catch {
-    return settingsFailure("no-live");
-  }
-  const interpreted = interpretSettingsIpc(response, "no-live");
-  if (!interpreted.ok) return interpreted;
-  const frozenRoot = await readSessionProjectRoot(identity.pluginData, identity.sessionId);
-  return verifySnapshotIdentity(interpreted, identity, frozenRoot);
-}
-async function applySessionSettings({
-  env = process.env,
-  target,
-  configRevision,
-  enable,
-  request: request2 = requestIpc
-} = {}) {
-  const parsed = settingsIdentity(env);
-  if (!parsed.ok) return parsed;
-  const { identity } = parsed;
-  if (!target || typeof target !== "object") return settingsFailure("stale");
-  if (target.protocolVersion !== PROTOCOL_VERSION) return settingsFailure("protocol");
-  if (typeof target.sessionId !== "string" || target.sessionId !== identity.sessionId) {
-    return settingsFailure("identity");
-  }
-  if (typeof target.projectRoot !== "string" || !path9.isAbsolute(target.projectRoot)) {
-    return settingsFailure("root");
-  }
-  if (typeof target.configPath !== "string" || !pathsMatch(target.configPath, identity.configPath)) {
-    return settingsFailure("config");
-  }
-  if (!Number.isInteger(target.workerGeneration) || !Number.isInteger(target.settingsRevision)) {
-    return settingsFailure("stale");
-  }
-  if (configRevision === void 0) return settingsFailure("config");
-  const frozenRoot = await readSessionProjectRoot(identity.pluginData, identity.sessionId);
-  if (frozenRoot && !pathsMatch(frozenRoot, target.projectRoot)) return settingsFailure("root");
-  if (identity.projectRoot && !pathsMatch(identity.projectRoot, target.projectRoot)) {
-    return settingsFailure("root");
-  }
-  const live = await readLiveLocator(identity);
-  if (!live.ok) return live;
-  let ping;
-  try {
-    ping = await request2(
-      live.locator.socketPath,
-      { capability: live.locator.controlCapability, op: "ping" },
-      { timeoutMs: WARM_IPC_MS }
-    );
-  } catch {
-    return settingsFailure("no-live");
-  }
-  if (!ping || ping.ok !== true) {
-    return settingsFailure(interpretTransportError(ping?.error));
-  }
-  const pingBody = ping.result;
-  if (!pingBody || pingBody.protocolVersion !== PROTOCOL_VERSION) return settingsFailure("protocol");
-  if (pingBody.sessionId !== identity.sessionId) return settingsFailure("identity");
-  if (!pathsMatch(pingBody.projectRoot, target.projectRoot)) return settingsFailure("root");
-  if (!pathsMatch(pingBody.configPath, identity.configPath) || !pathsMatch(pingBody.configPath, target.configPath)) {
-    return settingsFailure("config");
-  }
-  if (pingBody.workerGeneration !== target.workerGeneration || pingBody.settingsRevision !== target.settingsRevision) {
-    return settingsFailure("stale");
-  }
-  const applyReq = {
-    capability: live.locator.controlCapability,
-    op: "apply",
-    protocolVersion: PROTOCOL_VERSION,
-    workerGeneration: target.workerGeneration,
-    settingsRevision: target.settingsRevision,
-    configRevision
-  };
-  if (enable === true) applyReq.enable = true;
-  let response;
-  try {
-    response = await request2(live.locator.socketPath, applyReq, { timeoutMs: CONTROL_COMMAND_MS });
-  } catch {
-    return settingsFailure("no-live");
-  }
-  const interpreted = interpretSettingsIpc(response, "stale");
-  if (!interpreted.ok) return interpreted;
-  return verifySnapshotIdentity(interpreted, identity, frozenRoot, target.projectRoot);
-}
-async function runControl(options = {}) {
-  const stdout = options.stdout ?? process.stdout;
-  const argv = options.argv ?? process.argv.slice(2);
-  const { op, pluginData } = parseControlArgv(argv);
-  const baseEnv = options.env ?? process.env;
-  const env = pluginData ? { ...baseEnv, CLAUDE_PLUGIN_DATA: pluginData } : baseEnv;
-  const request2 = options.request ?? requestIpc;
-  try {
-    let payload = {};
-    if (op === "hook") {
-      const raw = await readBoundedStdin2(options.stdin ?? process.stdin);
-      if (raw.trim()) payload = JSON.parse(raw);
-    }
-    const identity = identityFrom(env, payload, op);
-    await fsPromises.mkdir(sessionDir(identity.pluginData, identity.sessionId), {
-      recursive: true,
-      mode: 448
-    });
-    const { locator, cold } = await ensureWorker(identity, {
-      env,
-      workerPath: options.workerPath,
-      spawnImpl: options.spawnImpl,
-      request: request2
-    });
-    let ipcTimeout;
-    if (op === "hook") {
-      ipcTimeout = payload.hook_event_name === "SessionEnd" ? SESSION_END_TIMEOUT_MS : cold ? COLD_START_MS : WARM_IPC_MS;
-    } else if (op === "on" || op === "doctor") {
-      ipcTimeout = CONTROL_COMMAND_MS;
-    } else {
-      ipcTimeout = STATUS_OFF_MS;
-    }
-    const client = op === "hook" ? createClientMeta() : void 0;
-    const response = await request2(
-      locator.socketPath,
-      {
-        capability: locator.controlCapability,
-        op,
-        payload: op === "hook" ? payload : void 0,
-        client
-      },
-      { timeoutMs: ipcTimeout }
-    );
-    if (!response?.ok) {
-      if (op === "hook") return { exitCode: 0, stdout: "" };
-      const body2 = `${JSON.stringify({ ok: false, error: response?.error ?? "worker error" }, null, 2)}
-`;
-      stdout.write(body2);
-      return { exitCode: 0, stdout: body2 };
-    }
-    if (op === "hook") {
-      const text = typeof response.result?.stdout === "string" ? response.result.stdout : "";
-      const claimId = response.result?.claimId;
-      if (text) {
-        try {
-          await writeCompleted(stdout, text);
-        } catch {
-          return { exitCode: 0, stdout: text };
-        }
-      }
-      if (text && claimId && client) {
-        try {
-          await request2(
-            locator.socketPath,
-            { capability: locator.controlCapability, op: "ack", claimId, client },
-            { timeoutMs: WARM_IPC_MS }
-          );
-        } catch {
-        }
-      }
-      return { exitCode: 0, stdout: text };
-    }
-    const body = `${JSON.stringify(response.result ?? { ok: true }, null, 2)}
-`;
-    stdout.write(body);
-    return { exitCode: 0, stdout: body };
-  } catch (error) {
-    if (op === "hook") return { exitCode: 0, stdout: "" };
-    throw error;
-  }
-}
-async function main2(argv = process.argv.slice(2), env = process.env) {
-  const op = argv[0];
-  try {
-    if (!CONTROL_COMMANDS2.has(op)) {
-      process.stderr.write("usage: control.mjs hook | on|off|status|doctor [--plugin-data <path>]\n");
-      process.exitCode = 1;
-      return;
-    }
-    await runControl({ argv, env });
-  } catch (error) {
-    if (op === "hook") {
-      process.exitCode = 0;
-      return;
-    }
-    process.stderr.write(`cross-model-advisor: ${commandFailure(error)}
-`);
-    process.exitCode = 1;
-  }
-}
-var realPath = (value) => {
-  try {
-    return fs10.realpathSync(value);
-  } catch {
-    return path9.resolve(value);
-  }
-};
-var invokedDirectly = process.argv[1] && path9.basename(fileURLToPath(import.meta.url)) === "control.mjs" && realPath(process.argv[1]) === realPath(fileURLToPath(import.meta.url));
-if (invokedDirectly) {
-  main2().catch(() => {
-    process.exitCode = process.argv[2] === "hook" ? 0 : 1;
-  });
-}
-
-// ../../plugins/cross-model-advisor/src/setup-menu.mjs
 init_reasoning();
 
 // ../../plugins/cross-model-advisor/src/terminal-command.mjs
-import fs11 from "node:fs";
-import path10 from "node:path";
+import fs8 from "node:fs";
+import path8 from "node:path";
 function posixQuote(value) {
   const text = String(value);
   if (text.length === 0) return "''";
@@ -91907,9 +91131,9 @@ function posixQuote(value) {
 }
 function resolvedPath(value) {
   try {
-    return fs11.realpathSync(value);
+    return fs8.realpathSync(value);
   } catch {
-    return path10.resolve(value);
+    return path8.resolve(value);
   }
 }
 function formatEnvCommand(assignments, argv) {
@@ -91922,26 +91146,8 @@ function formatEnvCommand(assignments, argv) {
   return envText.length > 0 ? `${envText.join(" ")} ${command}` : command;
 }
 function formatMenuCommand({ env = process.env, helperPath }) {
-  const configDir = path10.dirname(path10.resolve(configFilePath(env)));
-  const sessionId = env.CLAUDE_CODE_SESSION_ID?.trim() || env.CLAUDE_SESSION_ID?.trim() || "";
-  const pluginData = env.CLAUDE_PLUGIN_DATA?.trim() || "";
-  let validId = "";
-  try {
-    if (sessionId) validId = validateSessionId(sessionId);
-  } catch {
-    validId = "";
-  }
-  const bind = Boolean(validId && pluginData && path10.isAbsolute(pluginData));
-  return formatEnvCommand(
-    [
-      ["CLAUDE_CONFIG_DIR", configDir],
-      ["CLAUDE_CODE_SESSION_ID", bind ? validId : ""],
-      ["CLAUDE_PLUGIN_DATA", bind ? path10.resolve(pluginData) : ""],
-      ["CLAUDE_SESSION_ID", ""],
-      ["CLAUDE_PROJECT_DIR", ""]
-    ],
-    ["node", helperPath, "menu"]
-  );
+  const configDir = path8.dirname(path8.resolve(configFilePath(env)));
+  return formatEnvCommand([["CLAUDE_CONFIG_DIR", configDir]], ["node", helperPath, "menu"]);
 }
 
 // ../../plugins/cross-model-advisor/src/setup-menu.mjs
@@ -91950,21 +91156,9 @@ var ENV_NAME_RE2 = /^[A-Za-z_][A-Za-z0-9_]*$/;
 var FORBIDDEN_KEYS2 = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
 var ACTION_ADD = "Add advisor";
 var ACTION_PROVIDERS = "Provider accounts";
-var ACTION_SAVE = "Save defaults";
-var ACTION_SAVE_APPLY = "Save & Apply";
-var ACTION_ENABLE = "Enable";
+var ACTION_SAVE = "Save";
 var ACTION_QUIT = "Quit";
 var AUTH_CHILD_KILL_MS = 2e3;
-var SETTINGS_MESSAGES = Object.freeze({
-  identity: "Session identity is missing or invalid. Apply is unavailable. You can still edit saved defaults.",
-  "no-live": "No live worker for this session. The menu will not start one. Defaults editing remains available. After ordinary Claude activity, return home to refresh this same target.",
-  protocol: "This session's worker is incompatible. Start a new Claude session. Apply is unavailable.",
-  stale: "Session settings changed. Return home to refresh this target before Apply. The menu will not retry against a replacement worker.",
-  busy: "The session is busy publishing a previous review. Wait, then return home to refresh before Apply.",
-  root: "Frozen project root does not match this terminal. Apply refused. Defaults editing remains available.",
-  config: "Config path does not match this session. Apply refused.",
-  unavailable: "This session cannot see a required API key variable. Export the variable name in your own terminal and start a new Claude session. The menu will not move keys over IPC or replace the worker."
-});
 function isAbortError4(error) {
   return Boolean(
     error && (error.code === "abort" || error.name === "AbortError" || error.code === "ABORT_ERR")
@@ -91994,13 +91188,9 @@ function emptyConfig() {
   };
 }
 function siblingExecutable(name, fromUrl = import.meta.url) {
-  const here = path11.dirname(fileURLToPath2(fromUrl));
-  if (path11.basename(here) === "modules") return path11.join(here, "..", name);
-  return path11.join(here, name);
-}
-function applyErrorText(error) {
-  const code = typeof error === "string" ? error : "";
-  return SETTINGS_MESSAGES[code] || "Apply is unavailable.";
+  const here = path9.dirname(fileURLToPath(fromUrl));
+  if (path9.basename(here) === "modules") return path9.join(here, "..", name);
+  return path9.join(here, name);
 }
 function effortLabel(choices, value) {
   const found = choices.find((choice) => choice.value === value);
@@ -92037,61 +91227,11 @@ function usedSlotIds(ctx) {
 function usedAdvisorNames(ctx) {
   return new Set(ctx.draft.advisors.map((advisor) => advisor.name));
 }
-async function refreshTarget(ctx) {
-  const sessionId = ctx.env.CLAUDE_CODE_SESSION_ID?.trim() || ctx.env.CLAUDE_SESSION_ID?.trim() || "";
-  const pluginData = ctx.env.CLAUDE_PLUGIN_DATA?.trim() || "";
-  ctx.hasSessionEnv = Boolean(sessionId && pluginData);
-  if (!ctx.hasSessionEnv) {
-    ctx.target = null;
-    ctx.targetError = null;
-    return;
-  }
-  try {
-    const result = await ctx.getSessionSettings({ env: ctx.env });
-    if (result?.ok === true) {
-      ctx.target = result;
-      ctx.targetError = null;
-      return;
-    }
-    ctx.target = null;
-    ctx.targetError = typeof result?.error === "string" ? result.error : "no-live";
-  } catch {
-    ctx.target = null;
-    ctx.targetError = "no-live";
-  }
-}
-function runtimeLabel(ctx) {
-  if (!ctx.hasSessionEnv) return "Apply unavailable";
-  if (ctx.targetError) {
-    if (ctx.targetError === "no-live") return "Unavailable";
-    if (ctx.targetError === "protocol") return "Incompatible";
-    if (ctx.targetError === "stale") return "Stale";
-    if (ctx.targetError === "busy") return "Busy";
-    if (ctx.targetError === "root") return "Root mismatch";
-    if (ctx.targetError === "config") return "Config mismatch";
-    if (ctx.targetError === "unavailable") return "Key variables unavailable";
-    if (ctx.targetError === "identity") return "Apply unavailable";
-    return "Unavailable";
-  }
-  if (!ctx.target) return "Unavailable";
-  if (ctx.target.enabled !== true) return "Off";
-  if (ctx.target.paused === true) return "Paused";
-  return "Running";
-}
 function homeTitle(ctx) {
   const dirty = isDirty(ctx) ? "Unsaved changes" : "Saved";
-  const defaults3 = `Defaults (${dirty}): ${display(ctx.configPath)}`;
-  let target = "Target: (defaults only)    Apply unavailable";
-  if (ctx.hasSessionEnv) {
-    const session = display(ctx.target?.sessionId || ctx.env.CLAUDE_CODE_SESSION_ID || ctx.env.CLAUDE_SESSION_ID || "");
-    const root = display(ctx.target?.projectRoot || "");
-    target = `Target (${runtimeLabel(ctx)}): ${session}`;
-    if (root) target += `
-Project: ${root}`;
-  }
   return `Cross-model advisors
-${defaults3}
-${target}`;
+Settings (${dirty}): ${display(ctx.configPath)}
+Saved settings apply from the next reviewed turn in every session.`;
 }
 function advisorDescription(ctx, advisor) {
   const lines = [
@@ -92099,17 +91239,6 @@ function advisorDescription(ctx, advisor) {
   ];
   if (ctx.staleEffort.has(advisor.name)) {
     lines.push("Reasoning effort needs reselection before save.");
-  }
-  const live = ctx.target?.ok ? ctx.target.advisors.find((row) => row.name === advisor.name) : null;
-  if (live) {
-    const liveEffort = live.reasoningEffort || "default";
-    if (live.model !== advisor.model || liveEffort !== advisor.reasoningEffort) {
-      lines.push(`Active in session: ${live.model} · ${liveEffort}`);
-    }
-    if (typeof live.error === "string" && live.error) lines.push(display(live.error));
-    if (live.enabled === true && live.available === false) {
-      lines.push("Unavailable in this session");
-    }
   }
   return lines.join("\n");
 }
@@ -92122,12 +91251,6 @@ function homeItems(ctx) {
   items.push({ value: ACTION_ADD, label: ACTION_ADD });
   items.push({ value: ACTION_PROVIDERS, label: ACTION_PROVIDERS });
   items.push({ value: ACTION_SAVE, label: ACTION_SAVE });
-  if (ctx.target?.ok) {
-    items.push({ value: ACTION_SAVE_APPLY, label: ACTION_SAVE_APPLY });
-    if (ctx.target.enabled !== true) {
-      items.push({ value: ACTION_ENABLE, label: ACTION_ENABLE });
-    }
-  }
   items.push({ value: ACTION_QUIT, label: ACTION_QUIT });
   return items;
 }
@@ -92219,84 +91342,7 @@ async function saveDraft(ctx) {
 async function saveDefaults(ctx) {
   const saved = await saveDraft(ctx);
   if (!saved) return;
-  await ctx.ui.notice({ title: "Saved defaults", text: "Saved defaults." });
-}
-async function rememberApply(ctx, result) {
-  if (result?.ok === true) {
-    ctx.target = result;
-    ctx.targetError = null;
-    return;
-  }
-  ctx.targetError = typeof result?.error === "string" ? result.error : "stale";
-  ctx.target = null;
-}
-async function saveAndApply(ctx) {
-  const saved = await saveDraft(ctx);
-  if (!saved) return;
-  if (!ctx.target?.ok) {
-    await ctx.ui.notice({
-      title: "Saved; not applied",
-      text: `Saved; not applied: ${applyErrorText(ctx.targetError)}`
-    });
-    return;
-  }
-  let result;
-  try {
-    result = await ctx.applySessionSettings({
-      env: ctx.env,
-      target: ctx.target,
-      configRevision: saved.revision
-    });
-  } catch {
-    result = { ok: false, error: "no-live" };
-  }
-  await rememberApply(ctx, result);
-  if (!result || result.ok !== true) {
-    await ctx.ui.notice({
-      title: "Saved; not applied",
-      text: `Saved; not applied: ${applyErrorText(result?.error)}`
-    });
-    return;
-  }
-  await ctx.ui.notice({ title: "Saved and applied", text: "Saved and applied." });
-}
-async function enableSession(ctx) {
-  if (isDirty(ctx)) {
-    await ctx.ui.notice({ title: "Enable", text: "Save defaults first." });
-    return;
-  }
-  if (!ctx.target?.ok) {
-    await ctx.ui.notice({ title: "Enable", text: applyErrorText(ctx.targetError) });
-    return;
-  }
-  if (ctx.revision == null) {
-    await ctx.ui.notice({ title: "Enable", text: "Save defaults first." });
-    return;
-  }
-  let result;
-  try {
-    result = await ctx.applySessionSettings({
-      env: ctx.env,
-      target: ctx.target,
-      configRevision: ctx.revision,
-      enable: true
-    });
-  } catch {
-    result = { ok: false, error: "no-live" };
-  }
-  await rememberApply(ctx, result);
-  if (!result || result.ok !== true) {
-    await ctx.ui.notice({
-      title: "Enable",
-      text: applyErrorText(result?.error)
-    });
-    return;
-  }
-  if (result.enabled !== true) {
-    await ctx.ui.notice({ title: "Enable", text: "Session remains off." });
-    return;
-  }
-  await ctx.ui.notice({ title: "Enable", text: "Enabled this session." });
+  await ctx.ui.notice({ title: "Saved", text: "Saved. Applies from the next reviewed turn." });
 }
 async function promptText(ctx, spec) {
   const raw = await ctx.ui.text({
@@ -93076,14 +92122,6 @@ async function homeLoop(ctx) {
       await saveDefaults(ctx);
       continue;
     }
-    if (value === ACTION_SAVE_APPLY) {
-      await saveAndApply(ctx);
-      continue;
-    }
-    if (value === ACTION_ENABLE) {
-      await enableSession(ctx);
-      continue;
-    }
     if (value === ACTION_QUIT) {
       if (await confirmDiscard(ctx)) return 0;
       continue;
@@ -93095,7 +92133,7 @@ async function homeLoop(ctx) {
 async function defaultLogin(options) {
   const signal = options.signal;
   if (signal?.aborted) throw abortError2(signal.reason);
-  const child = spawn3(process.execPath, [options.authHelperPath, options.command, options.slot], {
+  const child = spawn2(process.execPath, [options.authHelperPath, options.command, options.slot], {
     stdio: [options.stdin, options.stdout, options.stderr],
     env: options.env
   });
@@ -93186,8 +92224,6 @@ async function runSetupMenu(options = {}) {
     saveConfig: options.saveConfig ?? saveConfig,
     getModels: options.getModels ?? getModels,
     getProviderCatalog: options.getProviderCatalog ?? getProviderCatalog,
-    getSessionSettings: options.getSessionSettings ?? getSessionSettings,
-    applySessionSettings: options.applySessionSettings ?? applySessionSettings,
     getReasoningChoices: options.getReasoningChoices ?? getReasoningChoices,
     draft: emptyConfig(),
     saved: null,
@@ -93195,9 +92231,6 @@ async function runSetupMenu(options = {}) {
     configPath: "",
     configError: null,
     staleEffort: /* @__PURE__ */ new Set(),
-    target: null,
-    targetError: null,
-    hasSessionEnv: false,
     catalog: []
   };
   try {
@@ -93220,7 +92253,6 @@ async function runSetupMenu(options = {}) {
     } catch {
       ctx.catalog = [];
     }
-    await refreshTarget(ctx);
     return await homeLoop(ctx);
   } catch (error) {
     if (isAbortError4(error)) return 0;
@@ -93231,7 +92263,7 @@ async function runSetupMenu(options = {}) {
 }
 
 // ../../plugins/cross-model-advisor/src/setup-control.mjs
-var USAGE2 = "usage: setup-control.mjs catalog|models <provider-id>|save|menu|menu-command [--plugin-data <path>]";
+var USAGE2 = "usage: setup-control.mjs catalog|models <provider-id>|save|menu|menu-command";
 var MAX_ERROR_CHARS2 = 500;
 function writeFailure2(stderr, error) {
   if (error instanceof SetupError) {
@@ -93246,24 +92278,13 @@ function writeFailure2(stderr, error) {
 function isAbortError5(error) {
   return Boolean(error && (error.code === "abort" || error.name === "AbortError" || error.code === "ABORT_ERR"));
 }
-async function main3(argv = process.argv.slice(2), env = process.env) {
+async function main2(argv = process.argv.slice(2), env = process.env) {
   const command = argv[0];
-  const helperPath = resolvedPath(fileURLToPath3(import.meta.url));
+  const helperPath = resolvedPath(fileURLToPath2(import.meta.url));
   if (command === "menu-command") {
     try {
-      let launchEnv = env;
-      if (argv.length === 3 && argv[1] === "--plugin-data") {
-        let pluginData;
-        try {
-          pluginData = explicitPluginData(argv[2]);
-        } catch {
-          throw new SetupError("usage", USAGE2);
-        }
-        launchEnv = { ...env, CLAUDE_PLUGIN_DATA: pluginData };
-      } else if (argv.length !== 1) {
-        throw new SetupError("usage", USAGE2);
-      }
-      process.stdout.write(`${formatMenuCommand({ env: launchEnv, helperPath })}
+      if (argv.length !== 1) throw new SetupError("usage", USAGE2);
+      process.stdout.write(`${formatMenuCommand({ env, helperPath })}
 `);
     } catch (error) {
       writeFailure2(process.stderr, error);
@@ -93297,12 +92318,12 @@ async function main3(argv = process.argv.slice(2), env = process.env) {
 `);
   process.exitCode = 1;
 }
-var invokedDirectly2 = process.argv[1] && resolvedPath(process.argv[1]) === resolvedPath(fileURLToPath3(import.meta.url));
-if (invokedDirectly2) {
-  main3().catch(() => {
+var invokedDirectly = process.argv[1] && resolvedPath(process.argv[1]) === resolvedPath(fileURLToPath2(import.meta.url));
+if (invokedDirectly) {
+  main2().catch(() => {
     process.exitCode = 1;
   });
 }
 export {
-  main3 as main
+  main2 as main
 };

@@ -6,10 +6,10 @@
  *   1. Isolated `claude plugin marketplace add/install` with an npm/bun/yarn
  *      trap on PATH — Claude must not bootstrap dependencies, and the cached
  *      copy must ship LICENSE plus the four dist executables.
- *   2. Doctor/control IPC, a loopback OpenAI-compatible read→advise review,
- *      Stop with empty stdout while that review is still in flight, drain on
- *      the next real prompt, cold resolution of provider/auth/menu modules,
- *      and opening the real bundled menu in a PTY.
+ *   2. doctor, on, a prompt snapshot, and a Stop review of a real git change
+ *      by a loopback OpenAI-compatible advisor that reads the file and sends
+ *      Claude back with an evidence-backed concern; then cold resolution of
+ *      provider/auth/menu modules and the real bundled menu in a PTY.
  *
  * Invoked by tests/cross-model-advisor/installed.test.mjs or directly:
  *   node tests/cross-model-advisor/fixtures/installed-smoke.mjs
@@ -28,7 +28,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
 const pluginSource = path.join(repoRoot, "plugins", "cross-model-advisor");
 
-const EXECUTABLES = ["control.mjs", "worker.mjs", "auth-control.mjs", "setup-control.mjs"];
+const EXECUTABLES = ["control.mjs", "gate.mjs", "auth-control.mjs", "setup-control.mjs"];
 const SKIP_COPY = new Set([
   "src",
   "node_modules",
@@ -68,6 +68,7 @@ const APP_SOURCE = [
   "}",
   ""
 ].join("\n");
+const APP_BEFORE = APP_SOURCE.replace("i <= items.length", "i < items.length");
 const APP_BUG_LINE = 3;
 const FINDING_NOTE = "smoke-finding: loop upper bound includes items.length";
 
@@ -137,28 +138,24 @@ export async function runColdBundleSmoke() {
   requireBuiltPlugin(pluginSource);
   const world = makeWorld("cma-bundle-");
   const loopback = new LoopbackAdvisor();
+  loopback.releaseAdvise();
   try {
     const pluginDir = path.join(world.root, "plugin");
     copyColdPlugin(pluginSource, pluginDir);
     assertColdTree(pluginDir);
     assertLicense(pluginDir);
 
-    const projectDirRaw = path.join(world.root, "project");
-    const pluginDataRaw = path.join(world.root, "plugin-data");
-    const configDirRaw = path.join(world.root, "claude-config");
-    const homeDirRaw = path.join(world.root, "home");
-    fs.mkdirSync(path.join(projectDirRaw, "src"), { recursive: true });
-    fs.mkdirSync(pluginDataRaw, { recursive: true });
-    fs.mkdirSync(configDirRaw, { recursive: true });
-    fs.mkdirSync(homeDirRaw, { recursive: true });
-    const projectDir = fs.realpathSync(projectDirRaw);
-    const pluginData = fs.realpathSync(pluginDataRaw);
-    const configDir = fs.realpathSync(configDirRaw);
-    const homeDir = fs.realpathSync(homeDirRaw);
-    fs.writeFileSync(path.join(projectDir, "src", "app.mjs"), APP_SOURCE);
-
-    const transcriptPath = path.join(world.root, "transcript.jsonl");
-    fs.writeFileSync(transcriptPath, "");
+    const projectDir = fs.realpathSync(fs.mkdirSync(path.join(world.root, "project"), { recursive: true }));
+    const pluginData = fs.realpathSync(fs.mkdirSync(path.join(world.root, "plugin-data"), { recursive: true }));
+    const configDir = fs.realpathSync(fs.mkdirSync(path.join(world.root, "claude-config"), { recursive: true }));
+    const homeDir = fs.realpathSync(fs.mkdirSync(path.join(world.root, "home"), { recursive: true }));
+    fs.mkdirSync(path.join(projectDir, "src"));
+    fs.writeFileSync(path.join(projectDir, "src", "app.mjs"), APP_BEFORE);
+    const gitArgs = ["-c", "user.name=smoke", "-c", "user.email=smoke@example.invalid", "-c", "commit.gpgsign=false"];
+    for (const args of [["init", "-q"], ["add", "-A"], ["commit", "-qm", "init"]]) {
+      const done = await runProcess("git", [...gitArgs, ...args], { env: process.env, cwd: projectDir, timeoutMs: 10_000 });
+      assert.equal(done.status, 0, done.stderr);
+    }
 
     const { port, close: closeLoopback } = await loopback.listen();
     world.defer(closeLoopback);
@@ -168,7 +165,7 @@ export async function runColdBundleSmoke() {
       path.join(configDir, "cross-model-advisor.json"),
       `${JSON.stringify(
         {
-          version: 1,
+          version: 2,
           providers: {
             loopback: {
               kind: "api",
@@ -176,12 +173,7 @@ export async function runColdBundleSmoke() {
               apiKeyEnv,
               baseUrl: `http://127.0.0.1:${port}/v1`,
               models: {
-                "smoke-model": {
-                  contextWindow: 16_000,
-                  maxTokens: 2_048,
-                  reasoning: false,
-                  input: ["text"]
-                }
+                "smoke-model": { contextWindow: 16_000, maxTokens: 2_048, reasoning: false, input: ["text"] }
               }
             }
           },
@@ -190,7 +182,9 @@ export async function runColdBundleSmoke() {
               name: "correctness",
               provider: "loopback",
               model: "smoke-model",
-              instructions: "Look for observable correctness failures and missed edge cases."
+              instructions: "Look for observable correctness failures and missed edge cases.",
+              enabled: true,
+              reasoningEffort: "default"
             }
           ],
           exclude: [],
@@ -200,7 +194,8 @@ export async function runColdBundleSmoke() {
             maxToolCallsPerReview: 8,
             maxOutputTokens: 1_500,
             maxReviewsPerAdvisorPerSession: 40
-          }
+          },
+          gate: { mode: "block", maxRounds: 2 }
         },
         null,
         2
@@ -208,170 +203,90 @@ export async function runColdBundleSmoke() {
     );
 
     const sessionId = "cma-installed-smoke";
-    const env = isolatedPluginEnv({
+    // Hooks get CLAUDE_PLUGIN_DATA from the host. Skills name it with
+    // --plugin-data, so their environment carries a decoy that must lose.
+    const hookEnv = isolatedPluginEnv({
       CLAUDE_CODE_SESSION_ID: sessionId,
-      CLAUDE_SESSION_ID: sessionId,
       CLAUDE_PROJECT_DIR: projectDir,
       CLAUDE_PLUGIN_DATA: pluginData,
       CLAUDE_CONFIG_DIR: configDir,
       HOME: homeDir,
       [apiKeyEnv]: "sk-smoke-not-a-real-key"
     });
+    const skillEnv = { ...hookEnv, CLAUDE_PLUGIN_DATA: path.join(world.root, "other-plugin-data") };
+    const skill = (script, op) =>
+      runProcess(process.execPath, [path.join(pluginDir, "dist", script), op, "--plugin-data", pluginData], {
+        env: skillEnv,
+        cwd: projectDir,
+        timeoutMs: 15_000,
+        label: `${script} ${op}`
+      });
 
-    world.defer(() => shutdownSession(pluginDir, env));
-
-    const doctor = await runControl(pluginDir, env, ["doctor"], { timeoutMs: 8_000 });
+    const doctor = await skill("gate.mjs", "doctor");
     assert.equal(doctor.status, 0, `doctor failed:\n${doctor.stderr}\n${doctor.stdout}`);
     const doctorJson = parseJsonOutput(doctor.stdout);
     assertDoctorBundleHealthy(doctorJson, doctor.stderr);
-    assert.equal(doctorJson?.config?.ok, true, `doctor config:\n${fmt(doctorJson)}\n${doctor.stderr}`);
-    assert.equal(doctorJson?.ipc?.ok, true, `doctor ipc:\n${fmt(doctorJson)}\n${doctor.stderr}`);
-    const doctorKey = (doctorJson?.keys ?? []).find((item) => item?.name === apiKeyEnv);
-    assert.equal(doctorKey?.present, true, `doctor keys:\n${fmt(doctorJson?.keys)}`);
+    assert.equal(doctorJson?.git?.ok, true, fmt(doctorJson));
+    assert.equal((doctorJson?.keys ?? []).find((item) => item?.name === apiKeyEnv)?.present, true, fmt(doctorJson));
 
-    const locator = await waitFor(
-      () => {
-        const file = path.join(pluginData, "sessions", sessionId, "locator.json");
-        if (!fs.existsSync(file)) return null;
-        const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-        if (!parsed?.socketPath || !parsed?.controlCapability) return null;
-        if (!pidIsLive(parsed.pid)) return null;
-        return parsed;
-      },
-      { timeoutMs: 3_000, label: "worker locator.json with live pid and socket after doctor" }
-    );
-
-    const start = await runControl(pluginDir, env, ["hook"], {
-      stdin: hookPayload({
-        sessionId,
-        transcriptPath,
-        cwd: projectDir,
-        hook_event_name: "SessionStart",
-        source: "startup"
-      }),
-      timeoutMs: 3_000
-    });
-    assert.equal(start.status, 0, `SessionStart failed:\n${start.stderr}`);
-    assertSilentHook(start.stdout, "SessionStart");
-
-    const on = await runControl(pluginDir, env, ["on"], { timeoutMs: 8_000 });
-    assert.equal(on.status, 0, `on failed:\n${on.stderr}\n${on.stdout}`);
-    const onJson = parseJsonOutput(on.stdout);
-    assert.equal(onJson?.enabled, true, `on did not enable:\n${fmt(onJson)}\n${on.stderr}`);
-
-    const statusOn = statusView(
-      parseJsonOutput((await runControl(pluginDir, env, ["status"], { timeoutMs: 3_000 })).stdout)
-    );
-    const advisors = statusOn?.advisors;
-    assert.ok(Array.isArray(advisors) && advisors.length >= 1, `status after on: ${fmt(statusOn)}`);
-    assert.notEqual(advisors[0]?.state, "disabled", `advisor disabled after on: ${fmt(statusOn)}`);
+    const on = parseJsonOutput((await skill("gate.mjs", "on")).stdout);
+    assert.equal(on?.enabled, true, `on did not enable:\n${fmt(on)}`);
+    assert.equal(on?.projectRoot, projectDir);
+    assert.equal(fs.existsSync(path.join(world.root, "other-plugin-data", "sessions")), false);
 
     const promptId = "11111111-1111-4111-8111-111111111111";
-    const submit = await runControl(pluginDir, env, ["hook"], {
+    const submit = await runControl(pluginDir, hookEnv, ["hook"], {
       stdin: hookPayload({
         sessionId,
-        transcriptPath,
         cwd: projectDir,
         hook_event_name: "UserPromptSubmit",
         prompt_id: promptId,
-        prompt: "Please inspect src/app.mjs for correctness bugs."
+        prompt: "Make total() sum every item."
       }),
-      timeoutMs: 3_000
+      timeoutMs: 15_000
     });
-    assert.equal(submit.status, 0, `UserPromptSubmit failed:\n${submit.stderr}`);
+    assert.equal(submit.status, 0, submit.stderr);
+    assert.equal(submit.stdout.trim(), "", "the prompt hook never adds context");
 
-    await waitForLoopback(loopback.firstRequest.promise, 5_000, "loopback first chat/completions (read)", {
-      pluginDir,
-      env,
-      sessionId
+    fs.writeFileSync(path.join(projectDir, "src", "app.mjs"), APP_SOURCE);
+
+    const stop = await runProcess(process.execPath, [path.join(pluginDir, "dist", "gate.mjs"), "stop"], {
+      env: hookEnv,
+      cwd: projectDir,
+      timeoutMs: 60_000,
+      stdin: `${JSON.stringify(
+        hookPayload({
+          sessionId,
+          cwd: projectDir,
+          hook_event_name: "Stop",
+          prompt_id: promptId,
+          stop_hook_active: false,
+          last_assistant_message: "total() now sums every item."
+        })
+      )}\n`,
+      label: "gate stop"
     });
-    await waitForLoopback(loopback.adviseRequest.promise, 5_000, "loopback advise chat/completions", {
-      pluginDir,
-      env,
-      sessionId
-    });
-
-    const stop = await runControl(pluginDir, env, ["hook"], {
-      stdin: hookPayload({
-        sessionId,
-        transcriptPath,
-        cwd: projectDir,
-        hook_event_name: "Stop",
-        stop_hook_active: false,
-        last_assistant_message: "Finished looking at src/app.mjs."
-      }),
-      timeoutMs: 3_000
-    });
-    assert.equal(stop.status, 0, `Stop failed:\n${stop.stderr}`);
-    assertSilentHook(stop.stdout, "Stop");
-    assert.equal(stop.stdout.trim(), "");
-
-    const midStatus = statusView(
-      parseJsonOutput((await runControl(pluginDir, env, ["status"], { timeoutMs: 3_000 })).stdout)
-    );
-    assert.equal(
-      inboxHasNote(midStatus, FINDING_NOTE),
-      false,
-      "staged advise must not be drainable before the backend turn finishes"
-    );
-
-    loopback.releaseAdvise();
-
-    const pending = await waitFor(
-      async () => {
-        const raw = await runControl(pluginDir, env, ["status"], { timeoutMs: 3_000 });
-        const view = statusView(parseJsonOutput(raw.stdout));
-        return inboxHasNote(view, FINDING_NOTE) ? view : null;
-      },
-      { timeoutMs: 8_000, label: "inbox pending finding after late advise" }
-    );
-    const pendingItem = (pending.inbox ?? []).find((item) => String(item?.note ?? "").includes(FINDING_NOTE));
-    assert.ok(pendingItem, fmt(pending));
-    assert.equal(pendingItem.status, "pending");
-    assert.equal(pendingItem.severity, "concern");
-
-    const nextPrompt = await runControl(pluginDir, env, ["hook"], {
-      stdin: hookPayload({
-        sessionId,
-        transcriptPath,
-        cwd: projectDir,
-        hook_event_name: "UserPromptSubmit",
-        prompt_id: "22222222-2222-4222-8222-222222222222",
-        prompt: "Continue with the next task in src/app.mjs."
-      }),
-      timeoutMs: 3_000
-    });
-    assert.equal(nextPrompt.status, 0, `drain prompt failed:\n${nextPrompt.stderr}`);
-    const drained = parseJsonOutput(nextPrompt.stdout);
-    const specific = drained?.hookSpecificOutput;
-    assert.equal(specific?.hookEventName, "UserPromptSubmit");
-    assert.equal(typeof specific?.additionalContext, "string");
-    assert.ok(
-      specific.additionalContext.includes(FINDING_NOTE),
-      `drain missing finding note:\n${specific.additionalContext}`
-    );
-    assert.ok(
-      specific.additionalContext.includes("src/app.mjs"),
-      `drain missing evidence path:\n${specific.additionalContext}`
-    );
-    assert.ok(
-      /\bconcern\b/i.test(specific.additionalContext),
-      `drain missing severity:\n${specific.additionalContext}`
-    );
-    assert.equal(specific.permissionDecision, undefined);
-    assert.notEqual(drained?.continue, false);
-    assert.equal(drained?.asyncRewake, undefined);
+    assert.equal(stop.status, 0, stop.stderr);
+    const decision = parseJsonOutput(stop.stdout);
+    assert.equal(decision?.decision, "block", `Stop did not send Claude back:\n${stop.stdout}\n${stop.stderr}`);
+    assert.ok(decision.reason.includes(FINDING_NOTE), decision.reason);
+    assert.ok(decision.reason.includes(`src/app.mjs:${APP_BUG_LINE}`), decision.reason);
+    assert.match(decision.reason, /not the user/);
 
     const names = loopback.toolNamesFromFirstRequest();
     assert.ok(names.includes("read") && names.includes("advise"), `tools: ${names.join(",")}`);
-    assert.ok(
-      loopback.sawFileContents(),
-      "loopback never received read tool output; review did not actually read the project"
-    );
+    assert.ok(loopback.sawFileContents(), "the advisor never received the file it read");
+    const firstUser = JSON.stringify(loopback.requests[0]?.messages ?? []);
+    assert.ok(firstUser.includes("i <= items.length"), "the advisor never received the turn's diff");
+    assert.ok(firstUser.includes("Make total() sum every item."), "the advisor never received the request");
+
+    const status = parseJsonOutput((await skill("control.mjs", "status")).stdout);
+    assert.equal(status?.lastReview?.outcome, "blocked", fmt(status));
+    assert.equal(status?.lastReview?.findings?.[0]?.note, FINDING_NOTE);
 
     await assertModulesResolve(pluginDir);
     const configBefore = fs.readFileSync(path.join(configDir, "cross-model-advisor.json"), "utf8");
-    const opened = await openAndQuitMenu({ pluginDir, env, cwd: projectDir });
+    const opened = await openAndQuitMenu({ pluginDir, env: hookEnv, cwd: projectDir });
     assertTermiosRestored(opened.termios);
     assert.match(opened.screen || opened.transcript, /Cross-model advisors/);
     assert.equal(
@@ -379,10 +294,7 @@ export async function runColdBundleSmoke() {
       configBefore,
       "opening the cold menu must not write config"
     );
-    assert.equal(typeof locator.controlCapability, "string");
-    assert.ok(locator.controlCapability.length > 0);
   } finally {
-    loopback.releaseAdvise();
     await world.close();
   }
 }
@@ -572,8 +484,11 @@ async function assertExecutablesResolve(pluginDir, world) {
     CMA_SMOKE_API_KEY: "sk-smoke-not-a-real-key"
   });
   delete env.CLAUDE_PROJECT_DIR;
-  world.defer(() => shutdownSession(pluginDir, env));
-  const result = await runControl(pluginDir, env, ["doctor"], { cwd: projectDir, timeoutMs: 8_000 });
+  const result = await runProcess(
+    process.execPath,
+    [path.join(pluginDir, "dist", "gate.mjs"), "doctor", "--plugin-data", pluginData],
+    { env, cwd: projectDir, timeoutMs: 8_000 }
+  );
   const combined = `${result.stdout}\n${result.stderr}`;
   assert.doesNotMatch(
     combined,
@@ -581,11 +496,16 @@ async function assertExecutablesResolve(pluginDir, world) {
     `marketplace-installed doctor could not resolve runtime imports:\n${combined}`
   );
   assert.equal(result.status, 0, combined);
-  assertDoctorBundleHealthy(parseJsonOutput(result.stdout), result.stderr);
-  const status = await runControl(pluginDir, env, ["status"], { cwd: homeDir });
+  const doctorJson = parseJsonOutput(result.stdout);
+  assert.equal(doctorJson?.bundle?.ok, true, `doctor bundle:\n${fmt(doctorJson)}`);
+  assert.equal(doctorJson?.config?.ok, true, `doctor config:\n${fmt(doctorJson)}`);
+  const status = await runProcess(
+    process.execPath,
+    [path.join(pluginDir, "dist", "control.mjs"), "status", "--plugin-data", pluginData],
+    { env, cwd: homeDir, timeoutMs: 8_000 }
+  );
   assert.equal(status.status, 0, status.stderr);
-  assert.equal(JSON.parse(status.stdout).projectRoot, fs.realpathSync(projectDir),
-    "changing Bash cwd must not rebind the existing session root");
+  assert.equal(JSON.parse(status.stdout).ok, true);
   const authControl = path.join(pluginDir, "dist", "auth-control.mjs");
   const listed = await runProcess(process.execPath, [authControl, "list"], {
     env, cwd: projectDir, timeoutMs: 8_000
@@ -885,43 +805,13 @@ function completionPayload({ model, finish_reason, tool_calls, content }) {
 
 
 
-function hookPayload({ sessionId, transcriptPath, cwd, ...rest }) {
+function hookPayload({ sessionId, cwd, ...rest }) {
   return {
     session_id: sessionId,
-    transcript_path: transcriptPath,
     cwd,
     permission_mode: "default",
     ...rest
   };
-}
-
-function assertSilentHook(stdout, eventName) {
-  const text = String(stdout ?? "").trim();
-  if (!text) return;
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    assert.fail(`${eventName} printed non-JSON: ${text}`);
-  }
-  assert.equal(
-    parsed?.hookSpecificOutput?.additionalContext,
-    undefined,
-    `${eventName} must not drain advice`
-  );
-  assert.equal(parsed?.hookSpecificOutput?.asyncRewake, undefined);
-  assert.notEqual(parsed?.continue, false);
-}
-
-function inboxHasNote(status, note) {
-  return (status?.inbox ?? []).some((item) => String(item?.note ?? "").includes(note));
-}
-
-function statusView(parsed) {
-  if (parsed && typeof parsed === "object" && parsed.result && typeof parsed.result === "object") {
-    return parsed.result;
-  }
-  return parsed;
 }
 
 function parseJsonOutput(stdout) {
@@ -1008,58 +898,6 @@ function runProcess(command, args, { env, cwd, timeoutMs, stdin, label } = {}) {
       else child.stdin.end();
     }
   });
-}
-
-async function shutdownSession(_pluginDir, env) {
-  const locatorFile = path.join(
-    env.CLAUDE_PLUGIN_DATA,
-    "sessions",
-    env.CLAUDE_CODE_SESSION_ID,
-    "locator.json"
-  );
-  let locator = null;
-  try {
-    locator = JSON.parse(fs.readFileSync(locatorFile, "utf8"));
-  } catch {
-    locator = null;
-  }
-  if (locator?.pid) killTree(locator.pid);
-  removeWorkerSocket(locator?.socketPath);
-  const deadline = Date.now() + 400;
-  while (locator?.pid && pidIsLive(locator.pid) && Date.now() < deadline) {
-    killTree(locator.pid);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  try {
-    const latest = JSON.parse(fs.readFileSync(locatorFile, "utf8"));
-    if (latest?.pid && latest.pid !== locator?.pid) killTree(latest.pid);
-    if (latest?.socketPath && latest.socketPath !== locator?.socketPath) {
-      removeWorkerSocket(latest.socketPath);
-    }
-  } catch {
-    // locator already gone
-  }
-}
-
-function removeWorkerSocket(socketPath) {
-  if (typeof socketPath !== "string" || !socketPath) return;
-  try {
-    fs.rmSync(socketPath, { force: true });
-  } catch {
-    // gone
-  }
-  const dir = path.dirname(socketPath);
-  const tmp = os.tmpdir();
-  if (
-    path.basename(dir).startsWith("cma") &&
-    (dir === tmp || dir.startsWith(`${tmp}${path.sep}`))
-  ) {
-    try {
-      fs.rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // gone
-    }
-  }
 }
 
 function closeServer(server, timeoutMs = 500) {
@@ -1159,52 +997,6 @@ function waitWithTimeout(promise, timeoutMs, label) {
       }
     );
   });
-}
-
-async function waitForLoopback(promise, timeoutMs, label, { pluginDir, env, sessionId }) {
-  try {
-    return await waitWithTimeout(promise, timeoutMs, label);
-  } catch (error) {
-    const dump = await sessionDiagnostics(pluginDir, env, sessionId);
-    throw new Error(`${error instanceof Error ? error.message : error}\n${dump}`);
-  }
-}
-
-function redactDiagnostics(text) {
-  return String(text ?? "").replace(/sk-[A-Za-z0-9._-]+/g, "sk-[redacted]");
-}
-
-async function sessionDiagnostics(pluginDir, env, sessionId) {
-  const dir = path.join(env.CLAUDE_PLUGIN_DATA, "sessions", sessionId);
-  let status = null;
-  try {
-    const raw = await runControl(pluginDir, env, ["status"], { timeoutMs: 2_000 });
-    status = parseJsonOutput(raw.stdout) ?? { exit: raw.status, stderr: raw.stderr };
-  } catch (error) {
-    status = { error: String(error?.message ?? error) };
-  }
-  const view = statusView(status);
-  const advisor = view?.advisors?.[0];
-  let state = null;
-  try {
-    state = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
-  } catch (error) {
-    state = { error: String(error?.message ?? error) };
-  }
-  let errors = "";
-  try {
-    errors = fs.readFileSync(path.join(dir, "errors.log"), "utf8").slice(-4_000);
-  } catch {
-    errors = "";
-  }
-  return redactDiagnostics(
-    [
-      `status.enabled=${view?.enabled} paused=${view?.paused} reason=${view?.reason}`,
-      `advisor.state=${advisor?.state} lastError=${advisor?.lastError ?? ""}`,
-      `snapshot.enabled=${state?.enabled} paused=${state?.paused} pauseReason=${state?.pauseReason} cwdOutsideRoot=${state?.cwdOutsideRoot} primaryIdle=${state?.primaryIdle} contextUnavailable=${state?.contextUnavailable} latestTask=${Boolean(state?.latestTask)} projectRoot=${state?.projectRoot}`,
-      errors ? `errors.log:\n${errors}` : "errors.log: (empty)"
-    ].join("\n")
-  );
 }
 
 async function waitFor(fn, { timeoutMs, label, intervalMs = 50 }) {

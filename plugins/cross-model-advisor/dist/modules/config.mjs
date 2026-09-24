@@ -52,19 +52,23 @@ var DEFAULT_LIMITS = Object.freeze({
   maxOutputTokens: 1500,
   maxReviewsPerAdvisorPerSession: 40
 });
+var GATE_MODES = Object.freeze(["block", "report"]);
+var DEFAULT_GATE = Object.freeze({ mode: "block", maxRounds: 2 });
+var GATE_KEYS = Object.freeze(["mode", "maxRounds"]);
 var IDENTIFIER_RE = /^[a-z][a-z0-9-]{0,63}$/;
 var ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 var MIN_NODE = Object.freeze([22, 19, 0]);
 var LIMIT_BOUNDS = Object.freeze({
   maxConcurrentAdvisors: [1, 16],
-  reviewTimeoutSeconds: [1, 600],
+  // The Stop hook's own timeout is 300 seconds; reviews must finish inside it.
+  reviewTimeoutSeconds: [1, 240],
   maxToolCallsPerReview: [1, 100],
   maxOutputTokens: [1, 1e5],
   maxReviewsPerAdvisorPerSession: [1, 1e4]
 });
 var MODEL_INPUTS = /* @__PURE__ */ new Set(["text", "image"]);
 var FORBIDDEN_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
-var CONFIG_KEYS = Object.freeze(["version", "providers", "advisors", "exclude", "limits"]);
+var CONFIG_KEYS = Object.freeze(["version", "providers", "advisors", "exclude", "limits", "gate"]);
 var API_KEYS = Object.freeze(["kind", "provider", "apiKeyEnv"]);
 var COMPAT_KEYS = Object.freeze(["kind", "provider", "apiKeyEnv", "baseUrl", "models"]);
 var OAUTH_KEYS = Object.freeze(["kind", "provider"]);
@@ -346,6 +350,21 @@ function assertAdvisor(entry, index, providers, version, names) {
     reasoningEffort
   };
 }
+function assertGate(value) {
+  if (value === void 0) return { ...DEFAULT_GATE };
+  assertPlainObject(value, "gate");
+  assertKnownKeys(value, GATE_KEYS, "gate");
+  const gate = { ...DEFAULT_GATE };
+  if ("mode" in value) {
+    if (!GATE_MODES.includes(value.mode)) fail(`gate.mode must be one of ${GATE_MODES.join(", ")}`);
+    gate.mode = value.mode;
+  }
+  if ("maxRounds" in value) {
+    assertInteger(value.maxRounds, "gate.maxRounds", 1, 5);
+    gate.maxRounds = value.maxRounds;
+  }
+  return gate;
+}
 function validateConfig(value) {
   assertPlainObject(value, "config");
   assertKnownKeys(value, CONFIG_KEYS, "config");
@@ -380,7 +399,8 @@ function validateConfig(value) {
     providers,
     advisors,
     exclude: assertExclude(value.exclude),
-    limits: assertLimits(value.limits)
+    limits: assertLimits(value.limits),
+    gate: assertGate(value.gate)
   };
 }
 function configFilePath(env = process.env) {
@@ -482,7 +502,9 @@ export {
   CONFIG_FILENAME,
   CONFIG_VERSION,
   CONFIG_VERSION_V1,
+  DEFAULT_GATE,
   DEFAULT_LIMITS,
+  GATE_MODES,
   OAUTH_PROVIDERS,
   REASONING_EFFORTS,
   THINKING_FORMATS,

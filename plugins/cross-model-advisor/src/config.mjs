@@ -63,12 +63,22 @@ export const DEFAULT_LIMITS = Object.freeze({
   maxReviewsPerAdvisorPerSession: 40
 });
 
+/**
+ * Stop-gate behaviour. `block` sends Claude back to address concerns and
+ * blockers; `report` only shows findings to the user. `maxRounds` bounds how
+ * many times one prompt can be sent back.
+ */
+export const GATE_MODES = Object.freeze(["block", "report"]);
+export const DEFAULT_GATE = Object.freeze({ mode: "block", maxRounds: 2 });
+const GATE_KEYS = Object.freeze(["mode", "maxRounds"]);
+
 const IDENTIFIER_RE = /^[a-z][a-z0-9-]{0,63}$/;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MIN_NODE = Object.freeze([22, 19, 0]);
 const LIMIT_BOUNDS = Object.freeze({
   maxConcurrentAdvisors: [1, 16],
-  reviewTimeoutSeconds: [1, 600],
+  // The Stop hook's own timeout is 300 seconds; reviews must finish inside it.
+  reviewTimeoutSeconds: [1, 240],
   maxToolCallsPerReview: [1, 100],
   maxOutputTokens: [1, 100_000],
   maxReviewsPerAdvisorPerSession: [1, 10_000]
@@ -76,7 +86,7 @@ const LIMIT_BOUNDS = Object.freeze({
 const MODEL_INPUTS = new Set(["text", "image"]);
 const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
-const CONFIG_KEYS = Object.freeze(["version", "providers", "advisors", "exclude", "limits"]);
+const CONFIG_KEYS = Object.freeze(["version", "providers", "advisors", "exclude", "limits", "gate"]);
 const API_KEYS = Object.freeze(["kind", "provider", "apiKeyEnv"]);
 const COMPAT_KEYS = Object.freeze(["kind", "provider", "apiKeyEnv", "baseUrl", "models"]);
 const OAUTH_KEYS = Object.freeze(["kind", "provider"]);
@@ -452,6 +462,25 @@ function assertAdvisor(entry, index, providers, version, names) {
 }
 
 /**
+ * @param {unknown} value
+ */
+function assertGate(value) {
+  if (value === undefined) return { ...DEFAULT_GATE };
+  assertPlainObject(value, "gate");
+  assertKnownKeys(value, GATE_KEYS, "gate");
+  const gate = { ...DEFAULT_GATE };
+  if ("mode" in value) {
+    if (!GATE_MODES.includes(value.mode)) fail(`gate.mode must be one of ${GATE_MODES.join(", ")}`);
+    gate.mode = value.mode;
+  }
+  if ("maxRounds" in value) {
+    assertInteger(value.maxRounds, "gate.maxRounds", 1, 5);
+    gate.maxRounds = value.maxRounds;
+  }
+  return gate;
+}
+
+/**
  * Strict nested validation. Unknown keys and malformed entries throw.
  * Version 1 is accepted and normalized in memory to version 2 (enabled true,
  * reasoningEffort default). Version 2 allows empty providers/advisors when
@@ -462,7 +491,8 @@ function assertAdvisor(entry, index, providers, version, names) {
  *   providers: Record<string, object>,
  *   advisors: object[],
  *   exclude: string[],
- *   limits: typeof DEFAULT_LIMITS
+ *   limits: typeof DEFAULT_LIMITS,
+ *   gate: { mode: "block" | "report", maxRounds: number }
  * }}
  */
 export function validateConfig(value) {
@@ -501,7 +531,8 @@ export function validateConfig(value) {
     providers,
     advisors,
     exclude: assertExclude(value.exclude),
-    limits: assertLimits(value.limits)
+    limits: assertLimits(value.limits),
+    gate: assertGate(value.gate)
   };
 }
 

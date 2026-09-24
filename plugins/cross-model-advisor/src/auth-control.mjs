@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Terminal-owned OAuth login, logout, status, and configured-slot listing.
- * Interactive login is not a hook or control-worker path; run it in the
+ * Interactive login never runs from a hook or a session command; run it in the
  * user's own terminal.
  */
 

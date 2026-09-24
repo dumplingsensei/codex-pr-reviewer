@@ -1,6 +1,7 @@
 /**
- * Shared read-only review tools. The worker owns publication; this module
- * only stages one candidate and never follows links out of the frozen root.
+ * Shared read-only review tools. The gate decides what happens to findings;
+ * this module only stages evidence-checked candidates and never follows links
+ * out of the frozen root.
  */
 
 import { Buffer, isUtf8 } from "node:buffer";
@@ -291,7 +292,7 @@ export const toolSchemas = Object.freeze([
   Object.freeze({
     name: "advise",
     description:
-      "Stage one evidence-backed finding. severity is nit, concern, or blocker. note at most 2000 characters. evidence is 1-5 file or observation references. The host publishes only after the review completes successfully.",
+      "Record one evidence-backed finding; call once per distinct problem. severity is nit, concern, or blocker. note at most 2000 characters. evidence is 1-5 references: a file line you read with the read tool, or an observation eventId from the review context (request, final, or diff:<path>). The host reports findings only after the review completes successfully.",
     inputSchema: Object.freeze({
       type: "object",
       additionalProperties: false,
@@ -331,7 +332,8 @@ export const toolSchemas = Object.freeze([
  *   signal?: AbortSignal,
  *   pluginData?: string,
  *   credentialDir?: string,
- *   secrets?: string[]
+ *   secrets?: string[],
+ *   maxFindings?: number
  * }} options
  */
 export async function createReviewTools({
@@ -343,7 +345,8 @@ export async function createReviewTools({
   signal,
   pluginData,
   credentialDir,
-  secrets = []
+  secrets = [],
+  maxFindings = 1
 } = {}) {
   const frozenRoot = await validateRoot(root, { follow: false });
   const liveRoot = await fs.lstat(frozenRoot);
@@ -416,8 +419,9 @@ export async function createReviewTools({
   const gitignoreCache = new Map();
   /** @type {Map<string, { hash: string, lines: Set<number> }>} */
   const reads = new Map();
-  /** @type {null | { severity: string, note: string, evidence: object[] }} */
-  let staged = null;
+  const findingLimit = Number.isInteger(maxFindings) && maxFindings > 0 ? maxFindings : 1;
+  /** @type {{ severity: string, note: string, evidence: object[] }[]} */
+  const staged = [];
 
   function checkAbort() {
     if (signal?.aborted) {
@@ -895,7 +899,7 @@ export async function createReviewTools({
   async function toolAdvise(args) {
     const parsed = objectArgs(args, ["severity", "note", "evidence"]);
     if (!parsed) return denied("invalid arguments");
-    if (staged) return denied("finding already staged");
+    if (staged.length >= findingLimit) return denied("finding limit reached");
     if (!SEVERITIES.has(parsed.severity)) return denied("invalid arguments");
     if (typeof parsed.note !== "string" || parsed.note.length === 0 || parsed.note.length > MAX_NOTE_CHARS) {
       return denied("invalid arguments");
@@ -912,11 +916,11 @@ export async function createReviewTools({
       if (!valid) return denied("invalid evidence");
       evidence.push(valid);
     }
-    staged = {
+    staged.push({
       severity: parsed.severity,
       note: sanitizeText(parsed.note, secretList),
       evidence
-    };
+    });
     fingerprints.add(normalized);
     return "staged";
   }
@@ -972,8 +976,16 @@ export async function createReviewTools({
   return {
     call,
     isFresh,
+    /** The same exclusion rules the read/list/search tools apply. */
+    excluded: (relPosix) => isExcluded(relPosix, false),
     get candidate() {
-      return staged ? structuredClone(staged) : null;
+      return staged.length ? structuredClone(staged[0]) : null;
+    },
+    get candidates() {
+      return structuredClone(staged);
+    },
+    get done() {
+      return staged.length >= findingLimit;
     },
     guidance
   };

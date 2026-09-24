@@ -555,7 +555,51 @@ function renderObservations(observations, secret) {
  * @param {{ observations?: unknown, latestTask?: unknown, compactSummary?: unknown }} parts
  * @param {string | undefined} secret
  */
-function renderTaskContext({ observations, latestTask, compactSummary }, secret) {
+/**
+ * A completed Claude turn: the request, Claude's final message, and the diff
+ * the host measured. Each part carries the eventId that `advise` may cite.
+ *
+ * @param {{
+ *   request?: string,
+ *   final?: string,
+ *   round?: number,
+ *   diff?: { files?: { eventId: string, path: string, status: string, oldPath?: string, text: string }[], omitted?: string[], unshown?: string[] },
+ *   previous?: { severity: string, advisor: string, note: string }[]
+ * }} turn
+ * @param {string | undefined} secret
+ */
+function renderTurn(turn, secret) {
+  const parts = [];
+  if (typeof turn.request === "string" && turn.request.trim()) {
+    parts.push(`[eventId: request] The user's request for this turn:\n${turn.request}`);
+  }
+  if (typeof turn.final === "string" && turn.final.trim()) {
+    parts.push(`[eventId: final] Claude's final message for this turn (its claim, not evidence):\n${turn.final}`);
+  }
+  if (Array.isArray(turn.previous) && turn.previous.length) {
+    const lines = turn.previous.map((item) => `- [${item.severity}] ${item.advisor}: ${item.note}`);
+    parts.push(
+      `This is review round ${turn.round ?? 2}. Findings from the previous round, which Claude was asked to address or rebut:\n${lines.join("\n")}`
+    );
+  }
+  const files = Array.isArray(turn.diff?.files) ? turn.diff.files : [];
+  const header = `Changes made during this turn, measured by git (${files.length} file${files.length === 1 ? "" : "s"}):`;
+  const bodies = files.map((file) => {
+    const label = file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path;
+    return `[eventId: ${file.eventId}] ${file.status} ${label}\n${file.text}`;
+  });
+  parts.push([header, ...bodies].join("\n\n"));
+  if (Array.isArray(turn.diff?.omitted) && turn.diff.omitted.length) {
+    parts.push(`Changed but excluded from review by policy (content withheld): ${turn.diff.omitted.join(", ")}`);
+  }
+  if (Array.isArray(turn.diff?.unshown) && turn.diff.unshown.length) {
+    parts.push(`Changed but not shown (diff size limit); read them if they matter: ${turn.diff.unshown.join(", ")}`);
+  }
+  return redactSecret(parts.join("\n\n"), secret);
+}
+
+function renderTaskContext({ observations, latestTask, compactSummary, turn }, secret) {
+  if (turn && typeof turn === "object") return renderTurn(turn, secret);
   const parts = [];
   const compactText = compactSummary && typeof compactSummary === "object" ? compactSummary.text : compactSummary;
   if (typeof compactText === "string" && compactText.trim()) {
@@ -641,6 +685,17 @@ function stagedCandidate(tools) {
   if (!tools) return null;
   if (typeof tools.candidate === "function") return tools.candidate();
   return tools.candidate ?? null;
+}
+
+/**
+ * Tools that accept several findings say when they are full; otherwise one
+ * staged finding ends the review.
+ *
+ * @param {{ done?: unknown, candidate?: unknown }} tools
+ */
+function reviewDone(tools) {
+  if (typeof tools?.done === "boolean") return tools.done;
+  return Boolean(stagedCandidate(tools));
 }
 
 /**
@@ -878,8 +933,8 @@ export async function validateApi({
 
 /**
  * Run one API review. Success is returned only after the full tool batch is
- * validated and dispatched. Findings stay staged on `tools` until the worker
- * publishes.
+ * validated and dispatched. Findings stay staged on `tools`; the caller
+ * reports them only after this returns.
  *
  * @param {{
  *   provider: unknown,
@@ -888,6 +943,7 @@ export async function validateApi({
  *   history?: unknown[],
  *   latestTask?: { text?: string, promptId?: unknown, at?: unknown, generation?: unknown },
  *   compactSummary?: { text?: string, promptId?: unknown, at?: unknown, generation?: unknown },
+ *   turn?: object,
  *   systemPrompt?: string,
  *   tools: { call: Function, candidate?: unknown, isFresh?: Function, guidance?: string },
  *   limits?: { maxToolCallsPerReview?: number, maxOutputTokens?: number, reviewTimeoutSeconds?: number },
@@ -903,6 +959,7 @@ export async function reviewApi({
   history = [],
   latestTask,
   compactSummary,
+  turn,
   systemPrompt = "",
   tools,
   limits = {},
@@ -935,7 +992,7 @@ export async function reviewApi({
   const system = [systemPrompt, guidance].filter((part) => typeof part === "string" && part.length > 0).join("\n\n");
   const currentUser = {
     role: "user",
-    content: renderTaskContext({ observations, latestTask, compactSummary }, apiKey),
+    content: renderTaskContext({ observations, latestTask, compactSummary, turn }, apiKey),
     timestamp: Date.now()
   };
   const messages = [...copyHistory(history), currentUser];
@@ -1037,7 +1094,7 @@ export async function reviewApi({
       }
 
       if (signal?.aborted) fail(abortCode(signal), "review aborted");
-      if (stagedCandidate(tools)) break;
+      if (reviewDone(tools)) break;
     }
   } catch (error) {
     const wrapped = wrapThrown(error, signal, apiKey, kind);

@@ -1669,3 +1669,71 @@ test("Copilot Chat Completions effort is rejected before transport", async (t) =
     false
   );
 });
+
+test("a completed-turn review renders the turn and continues past the first finding", async (t) => {
+  let round = 0;
+  const harness = await startServer(async (record, res) => {
+    round += 1;
+    const advise = (id, note) =>
+      writeSse(
+        res,
+        chunk({
+          toolCalls: [
+            {
+              id,
+              name: "advise",
+              arguments: JSON.stringify({
+                severity: "concern",
+                note,
+                evidence: [{ kind: "observation", eventId: "diff:src/a.js", detail: "in the diff" }]
+              })
+            }
+          ]
+        })
+      );
+    if (round === 1) return advise("call_one", "first problem");
+    if (round === 2) return advise("call_two", "second problem");
+    writeSse(res, chunk({ text: "done" }));
+  });
+  t.after(() => harness.close());
+
+  const staged = [];
+  const tools = {
+    async call(name, args) {
+      if (name === "advise") staged.push(args);
+      return "staged";
+    },
+    get done() {
+      return staged.length >= 5;
+    },
+    guidance: ""
+  };
+  await reviewApi({
+    provider: compatibleProvider(harness.baseUrl),
+    advisor,
+    turn: {
+      request: "make last() safe",
+      final: "Fixed it.",
+      round: 1,
+      previous: [],
+      diff: {
+        files: [{ eventId: "diff:src/a.js", path: "src/a.js", status: "M", text: "-a\n+b" }],
+        omitted: [".env"],
+        unshown: []
+      }
+    },
+    systemPrompt: "Review the turn.",
+    tools,
+    limits: { maxToolCallsPerReview: 8, maxOutputTokens: 1500 },
+    env: { [KEY_ENV]: CONFIGURED_KEY }
+  });
+
+  assert.deepEqual(staged.map((item) => item.note), ["first problem", "second problem"]);
+  assert.equal(harness.requests.length, 3);
+  const user = harness.requests[0].body.messages.find((msg) => msg.role === "user");
+  const text = typeof user.content === "string" ? user.content : JSON.stringify(user.content);
+  assert.match(text, /\[eventId: request\][^]*make last\(\) safe/);
+  assert.match(text, /\[eventId: final\][^]*Fixed it\./);
+  assert.match(text, /\[eventId: diff:src\/a\.js\] M src\/a\.js/);
+  assert.match(text, /excluded from review by policy[^]*\.env/);
+});

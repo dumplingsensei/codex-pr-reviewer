@@ -1067,7 +1067,7 @@ var toolSchemas = Object.freeze([
   }),
   Object.freeze({
     name: "advise",
-    description: "Stage one evidence-backed finding. severity is nit, concern, or blocker. note at most 2000 characters. evidence is 1-5 file or observation references. The host publishes only after the review completes successfully.",
+    description: "Record one evidence-backed finding; call once per distinct problem. severity is nit, concern, or blocker. note at most 2000 characters. evidence is 1-5 references: a file line you read with the read tool, or an observation eventId from the review context (request, final, or diff:<path>). The host reports findings only after the review completes successfully.",
     inputSchema: Object.freeze({
       type: "object",
       additionalProperties: false,
@@ -1105,7 +1105,8 @@ async function createReviewTools({
   signal,
   pluginData,
   credentialDir,
-  secrets = []
+  secrets = [],
+  maxFindings = 1
 } = {}) {
   const frozenRoot = await validateRoot(root, { follow: false });
   const liveRoot = await fs.lstat(frozenRoot);
@@ -1170,7 +1171,8 @@ async function createReviewTools({
   }
   const gitignoreCache = /* @__PURE__ */ new Map();
   const reads = /* @__PURE__ */ new Map();
-  let staged = null;
+  const findingLimit = Number.isInteger(maxFindings) && maxFindings > 0 ? maxFindings : 1;
+  const staged = [];
   function checkAbort() {
     if (signal?.aborted) {
       const reason = signal.reason;
@@ -1616,7 +1618,7 @@ ${TRUNCATED_MARKER}` : TRUNCATED_MARKER;
   async function toolAdvise(args) {
     const parsed = objectArgs(args, ["severity", "note", "evidence"]);
     if (!parsed) return denied("invalid arguments");
-    if (staged) return denied("finding already staged");
+    if (staged.length >= findingLimit) return denied("finding limit reached");
     if (!SEVERITIES.has(parsed.severity)) return denied("invalid arguments");
     if (typeof parsed.note !== "string" || parsed.note.length === 0 || parsed.note.length > MAX_NOTE_CHARS) {
       return denied("invalid arguments");
@@ -1633,11 +1635,11 @@ ${TRUNCATED_MARKER}` : TRUNCATED_MARKER;
       if (!valid) return denied("invalid evidence");
       evidence.push(valid);
     }
-    staged = {
+    staged.push({
       severity: parsed.severity,
       note: sanitizeText(parsed.note, secretList),
       evidence
-    };
+    });
     fingerprints.add(normalized);
     return "staged";
   }
@@ -1682,8 +1684,16 @@ ${TRUNCATED_MARKER}` : TRUNCATED_MARKER;
   return {
     call,
     isFresh,
+    /** The same exclusion rules the read/list/search tools apply. */
+    excluded: (relPosix) => isExcluded(relPosix, false),
     get candidate() {
-      return staged ? structuredClone(staged) : null;
+      return staged.length ? structuredClone(staged[0]) : null;
+    },
+    get candidates() {
+      return structuredClone(staged);
+    },
+    get done() {
+      return staged.length >= findingLimit;
     },
     guidance
   };

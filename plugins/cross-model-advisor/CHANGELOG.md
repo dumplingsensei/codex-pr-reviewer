@@ -6,6 +6,35 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.0.0
+
+The plugin now reviews Claude's work after a turn instead of watching it
+live. Claude Code's hooks cannot stream a turn to another model or steer it
+mid-run, so live observation only ever delivered advice at the next tool call
+or prompt, often after Claude had finished.
+
+- **When.** A prompt records a git snapshot of the working tree through a
+  private temporary index (the user's index, HEAD, and stash are untouched).
+  When Claude finishes, the Stop hook snapshots again and reviews the
+  difference. Turns that change nothing, diffs already reviewed, plugin
+  commands, and subagents are not reviewed.
+- **What advisors see.** The request, Claude's final message as a claim, and
+  the turn's diff minus excluded paths, plus the existing read-only tools. Up
+  to five evidence-backed findings per advisor; advisors run in parallel and
+  duplicates merge.
+- **What happens.** `gate.mode: "block"` (default) sends Claude back on any
+  concern or blocker, labelled as unverified claims from other models to fix
+  or rebut; the next Stop re-reviews the whole turn with the earlier findings,
+  up to `gate.maxRounds` (default 2). Nits, and `gate.mode: "report"`, are
+  shown to the user instead. Failures let Claude stop and say the turn was not
+  reviewed.
+- **Removed.** The per-session worker and its socket, transcript following,
+  mid-run injection, the delivery barrier, and settings epochs. The settings
+  menu has Save only: the gate reads configuration at every Stop, so there is
+  nothing to apply to a live session. `limits.reviewTimeoutSeconds` is now at
+  most 240, inside the Stop hook's 300-second timeout.
+- **Requires git.** `on` refuses a project outside a git work tree.
+
 ## 1.2.0
 
 The session skills (`on`, `off`, `status`, `doctor`) and `setup`'s

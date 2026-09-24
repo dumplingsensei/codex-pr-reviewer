@@ -93476,19 +93476,23 @@ var DEFAULT_LIMITS = Object.freeze({
   maxOutputTokens: 1500,
   maxReviewsPerAdvisorPerSession: 40
 });
+var GATE_MODES = Object.freeze(["block", "report"]);
+var DEFAULT_GATE = Object.freeze({ mode: "block", maxRounds: 2 });
+var GATE_KEYS = Object.freeze(["mode", "maxRounds"]);
 var IDENTIFIER_RE = /^[a-z][a-z0-9-]{0,63}$/;
 var ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 var MIN_NODE = Object.freeze([22, 19, 0]);
 var LIMIT_BOUNDS = Object.freeze({
   maxConcurrentAdvisors: [1, 16],
-  reviewTimeoutSeconds: [1, 600],
+  // The Stop hook's own timeout is 300 seconds; reviews must finish inside it.
+  reviewTimeoutSeconds: [1, 240],
   maxToolCallsPerReview: [1, 100],
   maxOutputTokens: [1, 1e5],
   maxReviewsPerAdvisorPerSession: [1, 1e4]
 });
 var MODEL_INPUTS = /* @__PURE__ */ new Set(["text", "image"]);
 var FORBIDDEN_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
-var CONFIG_KEYS = Object.freeze(["version", "providers", "advisors", "exclude", "limits"]);
+var CONFIG_KEYS = Object.freeze(["version", "providers", "advisors", "exclude", "limits", "gate"]);
 var API_KEYS = Object.freeze(["kind", "provider", "apiKeyEnv"]);
 var COMPAT_KEYS = Object.freeze(["kind", "provider", "apiKeyEnv", "baseUrl", "models"]);
 var OAUTH_KEYS = Object.freeze(["kind", "provider"]);
@@ -93770,6 +93774,21 @@ function assertAdvisor(entry, index3, providers, version, names2) {
     reasoningEffort
   };
 }
+function assertGate(value) {
+  if (value === void 0) return { ...DEFAULT_GATE };
+  assertPlainObject(value, "gate");
+  assertKnownKeys(value, GATE_KEYS, "gate");
+  const gate = { ...DEFAULT_GATE };
+  if ("mode" in value) {
+    if (!GATE_MODES.includes(value.mode)) fail(`gate.mode must be one of ${GATE_MODES.join(", ")}`);
+    gate.mode = value.mode;
+  }
+  if ("maxRounds" in value) {
+    assertInteger(value.maxRounds, "gate.maxRounds", 1, 5);
+    gate.maxRounds = value.maxRounds;
+  }
+  return gate;
+}
 function validateConfig(value) {
   assertPlainObject(value, "config");
   assertKnownKeys(value, CONFIG_KEYS, "config");
@@ -93804,7 +93823,8 @@ function validateConfig(value) {
     providers,
     advisors,
     exclude: assertExclude(value.exclude),
-    limits: assertLimits(value.limits)
+    limits: assertLimits(value.limits),
+    gate: assertGate(value.gate)
   };
 }
 function configFilePath(env = process.env) {
@@ -93846,42 +93866,8 @@ var CONTROL_COMMANDS = Object.freeze([
   "cross-model-advisor:login",
   "cross-model-advisor:logout"
 ]);
-var CONTROL_OPS = Object.freeze([
-  "on",
-  "off",
-  "status",
-  "doctor",
-  "hook",
-  "ack",
-  "settings",
-  "apply"
-]);
-var SETTINGS_ERRORS = Object.freeze({
-  PROTOCOL: "protocol",
-  STALE: "stale",
-  BUSY: "busy",
-  ROOT: "root",
-  CONFIG: "config",
-  UNAVAILABLE: "unavailable"
-});
-var DRAIN_EVENTS = Object.freeze([
-  "UserPromptSubmit",
-  "PreToolUse",
-  "PostToolUse",
-  "PostToolUseFailure"
-]);
-var SILENT_EVENTS = Object.freeze([
-  "SessionStart",
-  "UserPromptExpansion",
-  "Stop",
-  "StopFailure",
-  "PreCompact",
-  "PostCompact",
-  "SessionEnd"
-]);
 var SEVERITY_ORDER = Object.freeze({ blocker: 0, concern: 1, nit: 2 });
 var USER_TEXT_CAP = 8 * 1024;
-var TRANSCRIPT_TAIL_BYTES = 256 * 1024;
 var SESSION_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
 var ERROR_LOG_MAX_BYTES = 64 * 1024;
 var DIR_MODE = 448;

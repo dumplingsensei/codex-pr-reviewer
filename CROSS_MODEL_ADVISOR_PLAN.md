@@ -1,4 +1,36 @@
-# Continuous cross-model advisors for Claude Code
+# Cross-model review gate for Claude Code
+
+> **Current design (2.0.0).** The plugin reviews Claude's finished turn at the Stop hook. The live-observation design below it, including the terminal-settings Apply protocol, is superseded and kept only as history.
+
+## Why the design changed
+
+Oh My Pi's advisor runs inside the agent harness: it receives every transcript delta, including reasoning, and can steer or resume a running turn. Claude Code's hooks allow neither. Hooks see events and visible text, and advice can only enter at the next prompt or tool call, so a fast turn finished before its advice arrived (observed in a live run: the only finding reached Claude one turn late). Reviewing the finished turn fits what the host actually allows, and it deletes the machinery that only live watching needed.
+
+## Decisions (user, 2026-09-24)
+
+- **Block**, with a `report` alternative: concerns and blockers send Claude back.
+- **Follow-up to #11**: build on the terminal-settings branch, land after it.
+- **Subagents out**: only the main session's turns are reviewed.
+
+## Flow
+
+1. `UserPromptSubmit` (light helper, no SDK): when enabled, write a tree object of the working tree through a private temporary index (real index copied only for its stat cache). Control commands clear the snapshot.
+2. `Stop` (gate): skip when off, subagent, no snapshot for this prompt, no change, diff already reviewed, or round limit reached (then tell the user). Otherwise diff the two trees, filtered through the review tools' exclusions.
+3. Review: every enabled, offline-valid advisor in parallel under `limits.reviewTimeoutSeconds` (at most 240, inside the hook's 300 s). Input: request, final message as a claim, diff with eventIds, previous round's findings. Read-only tools; up to five evidence-backed findings each; merged by severity, duplicates dropped.
+4. Decide: block with a reason that labels findings as unverified claims from other models (fix or rebut); otherwise a user-visible `systemMessage` for nits or report mode; silent pass. Every failure fails open and says the turn was not reviewed.
+
+State per session is one small file: enabled, frozen git root, this prompt's snapshot, round count, reviewed diff keys, last review, last skip, per-advisor usage.
+
+## Verification
+
+- `tests/cross-model-advisor/gate.test.mjs`: real temporary repositories and real review tools with a scripted model: no-change skip, block with evidence, rebuttal accepted, later rounds see earlier findings, round limit, nits and report mode, fail-open, exclusions never sent, control commands/subagents/foreign prompts/off, parallel merge, evidence validation, and snapshots that leave index/HEAD/stash untouched.
+- `api.test.mjs`: a real SDK transport renders the turn and continues past the first finding.
+- `installed.test.mjs`: cold plugin copy runs doctor, on, a prompt snapshot, and a Stop review that blocks, with a decoy `CLAUDE_PLUGIN_DATA` in the skills' environment.
+- `claude-host-smoke.mjs --run` (authenticated): in real Claude Code, a concern blocks and Claude continues; a no-change turn makes no advisor request; `off` stops reviews; nothing lands in a decoy plugin-data directory.
+
+---
+
+# Superseded: continuous cross-model advisors for Claude Code
 
 > Planning update: the terminal-settings replacement at the end of this document supersedes the conversational setup and reconfiguration design below. The original implementation plan is retained for context. The terminal replacement is implemented and locally verified.
 
