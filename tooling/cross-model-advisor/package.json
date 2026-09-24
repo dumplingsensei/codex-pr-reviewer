@@ -11,7 +11,7 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-ai": "0.86.1",
     "ignore": "7.0.8"
   },
   "devDependencies": {
