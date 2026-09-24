@@ -6,6 +6,15 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.2
+
+- **Failed advisors are named when the others found something.** When some
+  advisors failed and the rest sent Claude back, the findings went to Claude
+  and nothing told you part of the review was missing. A notice now names the
+  advisors that did not review the turn and why. It is shown to you, not
+  Claude. In `report` mode the same line comes first in the findings summary,
+  so truncating a long summary cannot drop it.
+
 ## 2.1.1
 
 - **Partial failures are shown.** When some advisors fail and the rest find

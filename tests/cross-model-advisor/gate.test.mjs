@@ -247,6 +247,47 @@ test("a partial failure with no findings is not reported as a silent pass", asyn
   assert.equal((await w.status()).lastReview.outcome, "passed");
 });
 
+test("a failed advisor is named to the user when the rest send Claude back or report findings", async () => {
+  const advisor = (name) => ({ name, provider: "local", model: "gpt-test", instructions: name, enabled: true, reasoningEffort: "default" });
+  const failBeta = (w) => {
+    const reviewApi = w.deps.reviewApi;
+    w.deps.reviewApi = async (args) => {
+      if (args.advisor.name === "alpha") return reviewApi(args);
+      const error = new Error("rate limited");
+      error.code = "rate_limit";
+      throw error;
+    };
+  };
+
+  const blocked = await world({ advisors: [advisor("alpha"), advisor("beta")] });
+  await blocked.prompt("change");
+  await fs.appendFile(path.join(blocked.root, "src", "a.js"), "// x\n");
+  blocked.setScript(concern("real bug"));
+  failBeta(blocked);
+  const out = await blocked.stop();
+  assert.equal(out.decision, "block");
+  assert.match(out.reason, /real bug/);
+  assert.doesNotMatch(out.reason, /rate_limit/);
+  assert.match(out.systemMessage, /one advisor did not review this turn \(beta: rate_limit:.*\)\. Claude was sent back with the findings from the rest\./);
+
+  const reported = await world({ advisors: [advisor("alpha"), advisor("beta")], gate: { mode: "report", maxRounds: 2 } });
+  await reported.prompt("change");
+  await fs.appendFile(path.join(reported.root, "src", "a.js"), "// x\n");
+  reported.setScript(concern("real bug"));
+  failBeta(reported);
+  const summary = (await reported.stop()).systemMessage.split("\n");
+  assert.match(summary[1], /^- one advisor did not review this turn \(beta: rate_limit:/);
+  assert.match(summary[2], /\[concern\] alpha: real bug/);
+
+  const clean = await world({ advisors: [advisor("alpha"), advisor("beta")] });
+  await clean.prompt("change");
+  await fs.appendFile(path.join(clean.root, "src", "a.js"), "// x\n");
+  clean.setScript(concern("real bug"));
+  const cleanOut = await clean.stop();
+  assert.equal(cleanOut.decision, "block");
+  assert.equal(cleanOut.systemMessage, undefined);
+});
+
 test("queued advisors share the Stop hook's time, so a late one is recorded instead of the hook being killed", async () => {
   const advisor = (name) => ({ name, provider: "local", model: "gpt-test", instructions: name, enabled: true, reasoningEffort: "default" });
   const w = await world({ advisors: [advisor("alpha"), advisor("beta")], limits: { maxConcurrentAdvisors: 1, reviewTimeoutSeconds: 240 } });

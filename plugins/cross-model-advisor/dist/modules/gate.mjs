@@ -158,17 +158,19 @@ function formatBlockReason(findings, { round, maxRounds }) {
   }
   return truncateLabeled(sanitizeText(lines.join("\n")), MAX_REASON_CHARS);
 }
-function formatUserSummary(findings) {
+function formatUserSummary(findings, failed = []) {
   const lines = [`cross-model-advisor: ${findings.length} finding${findings.length === 1 ? "" : "s"} on this turn`];
+  if (failed.length) lines.push(`- ${notReviewedBy(failed)}`);
   for (const item of findings) lines.push(`- [${item.severity}] ${item.advisor}: ${item.note}`);
   return truncateLabeled(sanitizeText(lines.join("\n")), USER_SUMMARY_CHARS);
 }
-function formatPartialFailure(failed) {
+function notReviewedBy(failed) {
   const detail = failed.map((result) => `${result.name}: ${result.error}`).join("; ");
-  return truncateLabeled(
-    sanitizeText(`cross-model-advisor: no findings, but ${failed.length === 1 ? "one advisor" : `${failed.length} advisors`} did not review this turn (${detail})`),
-    USER_SUMMARY_CHARS
-  );
+  return `${failed.length === 1 ? "one advisor" : `${failed.length} advisors`} did not review this turn (${detail})`;
+}
+function formatPartialFailure(failed, { blocked = false } = {}) {
+  const text = blocked ? `cross-model-advisor: ${notReviewedBy(failed)}. Claude was sent back with the findings from the rest.` : `cross-model-advisor: no findings, but ${notReviewedBy(failed)}`;
+  return truncateLabeled(sanitizeText(text), USER_SUMMARY_CHARS);
 }
 function collectFindings(results) {
   const seen = /* @__PURE__ */ new Set();
@@ -377,12 +379,16 @@ async function runStop(payload, { env = process.env, deps: overrides = {} } = {}
   if (gate.mode === "block" && findings.some((item) => item.severity !== "nit")) {
     state.rounds.count = round;
     await record("blocked", "concerns or blockers found", { round, findings, advisors });
-    return `${JSON.stringify({ decision: "block", reason: formatBlockReason(findings, { round, maxRounds: gate.maxRounds }) })}
+    return `${JSON.stringify({
+      decision: "block",
+      reason: formatBlockReason(findings, { round, maxRounds: gate.maxRounds }),
+      ...failed.length ? { systemMessage: formatPartialFailure(failed, { blocked: true }) } : {}
+    })}
 `;
   }
   if (findings.length) {
     await record("reported", "findings shown to the user", { round, findings, advisors });
-    return `${JSON.stringify({ systemMessage: formatUserSummary(findings) })}
+    return `${JSON.stringify({ systemMessage: formatUserSummary(findings, failed) })}
 `;
   }
   if (failed.length === results.length) {

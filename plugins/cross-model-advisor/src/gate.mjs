@@ -233,24 +233,35 @@ export function formatBlockReason(findings, { round, maxRounds }) {
  *
  * @param {ReturnType<typeof collectFindings>} findings
  */
-export function formatUserSummary(findings) {
+export function formatUserSummary(findings, failed = []) {
   const lines = [`cross-model-advisor: ${findings.length} finding${findings.length === 1 ? "" : "s"} on this turn`];
+  // Before the findings, so truncating a long summary cannot drop it.
+  if (failed.length) lines.push(`- ${notReviewedBy(failed)}`);
   for (const item of findings) lines.push(`- [${item.severity}] ${item.advisor}: ${item.note}`);
   return truncateLabeled(sanitizeText(lines.join("\n")), USER_SUMMARY_CHARS);
 }
 
 /**
- * What the user sees when the advisors that completed found nothing but others
- * failed: not a pass, because part of the review never happened.
- *
  * @param {{ name: string, error?: string }[]} failed
  */
-export function formatPartialFailure(failed) {
+function notReviewedBy(failed) {
   const detail = failed.map((result) => `${result.name}: ${result.error}`).join("; ");
-  return truncateLabeled(
-    sanitizeText(`cross-model-advisor: no findings, but ${failed.length === 1 ? "one advisor" : `${failed.length} advisors`} did not review this turn (${detail})`),
-    USER_SUMMARY_CHARS
-  );
+  return `${failed.length === 1 ? "one advisor" : `${failed.length} advisors`} did not review this turn (${detail})`;
+}
+
+/**
+ * What the user sees when some advisors failed and the rest found nothing, or
+ * found enough to send Claude back. The block reason goes to Claude, not the
+ * user, so without this a failed advisor would go unmentioned.
+ *
+ * @param {{ name: string, error?: string }[]} failed
+ * @param {{ blocked?: boolean }} [options]
+ */
+export function formatPartialFailure(failed, { blocked = false } = {}) {
+  const text = blocked
+    ? `cross-model-advisor: ${notReviewedBy(failed)}. Claude was sent back with the findings from the rest.`
+    : `cross-model-advisor: no findings, but ${notReviewedBy(failed)}`;
+  return truncateLabeled(sanitizeText(text), USER_SUMMARY_CHARS);
 }
 
 /**
@@ -505,11 +516,15 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
   if (gate.mode === "block" && findings.some((item) => item.severity !== "nit")) {
     state.rounds.count = round;
     await record("blocked", "concerns or blockers found", { round, findings, advisors });
-    return `${JSON.stringify({ decision: "block", reason: formatBlockReason(findings, { round, maxRounds: gate.maxRounds }) })}\n`;
+    return `${JSON.stringify({
+      decision: "block",
+      reason: formatBlockReason(findings, { round, maxRounds: gate.maxRounds }),
+      ...(failed.length ? { systemMessage: formatPartialFailure(failed, { blocked: true }) } : {})
+    })}\n`;
   }
   if (findings.length) {
     await record("reported", "findings shown to the user", { round, findings, advisors });
-    return `${JSON.stringify({ systemMessage: formatUserSummary(findings) })}\n`;
+    return `${JSON.stringify({ systemMessage: formatUserSummary(findings, failed) })}\n`;
   }
   if (failed.length === results.length) {
     await record("failed", "every advisor failed", { round, findings, advisors });
