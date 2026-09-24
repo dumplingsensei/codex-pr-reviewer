@@ -28,6 +28,7 @@ import {
   MAX_STDIN_BYTES,
   SESSION_RETENTION_MS,
   SEVERITY_ORDER,
+  STOP_REVIEW_BUDGET_MS,
   USER_TEXT_CAP
 } from "./session/constants.mjs";
 import { createErrorLog } from "./session/errors.mjs";
@@ -239,6 +240,20 @@ export function formatUserSummary(findings) {
 }
 
 /**
+ * What the user sees when the advisors that completed found nothing but others
+ * failed: not a pass, because part of the review never happened.
+ *
+ * @param {{ name: string, error?: string }[]} failed
+ */
+export function formatPartialFailure(failed) {
+  const detail = failed.map((result) => `${result.name}: ${result.error}`).join("; ");
+  return truncateLabeled(
+    sanitizeText(`cross-model-advisor: no findings, but ${failed.length === 1 ? "one advisor" : `${failed.length} advisors`} did not review this turn (${detail})`),
+    USER_SUMMARY_CHARS
+  );
+}
+
+/**
  * Merge advisors' findings: most severe first, duplicates across advisors
  * dropped.
  *
@@ -306,6 +321,7 @@ const defaultDeps = {
  */
 export async function runStop(payload, { env = process.env, deps: overrides = {} } = {}) {
   const deps = { ...defaultDeps, ...overrides };
+  const deadline = deps.now() + STOP_REVIEW_BUDGET_MS;
   if (!payload || typeof payload !== "object" || payload.agent_id) return "";
   const session = sessionFrom(env, payload);
   const state = await loadState(session.dir);
@@ -424,9 +440,19 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
       const provider = config.providers[advisor.provider];
       const base = { name: advisor.name, provider: advisor.provider, model: advisor.model, findings: [] };
       const stats = (state.advisors[advisor.name] ??= { reviews: 0, usage: null, lastError: null });
+      // Advisors queued behind maxConcurrentAdvisors share one budget, so their
+      // timeouts cannot add up past the point where Claude Code kills the hook.
+      const remaining = deadline - deps.now();
+      if (remaining <= 0) {
+        stats.lastError = "timeout: the Stop hook's review time ran out before this advisor started";
+        return { ...base, ok: false, error: stats.lastError };
+      }
       stats.reviews += 1;
       const abort = new AbortController();
-      const timer = setTimeout(() => abort.abort({ code: "timeout" }), limits.reviewTimeoutSeconds * 1000);
+      const timer = setTimeout(
+        () => abort.abort({ code: "timeout" }),
+        Math.min(limits.reviewTimeoutSeconds * 1000, remaining)
+      );
       try {
         const tools = await deps.createReviewTools({
           root: state.projectRoot,
@@ -495,7 +521,7 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
     findings,
     advisors
   });
-  return "";
+  return failed.length ? `${JSON.stringify({ systemMessage: formatPartialFailure(failed) })}\n` : "";
 }
 
 /**

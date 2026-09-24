@@ -6,6 +6,20 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.1
+
+- **Partial failures are shown.** When some advisors fail and the rest find
+  nothing, the turn used to end silently, like a clean pass. It now shows
+  which advisors did not review it and why. The outcome in `status` is
+  still `passed`.
+- **Advisors share the Stop hook's time.** Advisors queued behind
+  `limits.maxConcurrentAdvisors` could add up past the hook's 300 seconds;
+  for example, three advisors one at a time at `reviewTimeoutSeconds: 120`.
+  Claude Code then killed the hook before it saved anything. All advisors
+  now share a 270-second budget. Each one's timeout is cut to what remains,
+  and one that would start after it runs out is recorded as a timeout.
+  Existing configurations stay valid.
+
 ## 2.1.0
 
 The offline model catalog moves to `@earendil-works/pi-ai` 0.87.1.

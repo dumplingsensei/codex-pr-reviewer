@@ -43,7 +43,7 @@ function git(cwd, ...args) {
 /**
  * A repository with one commit, plugin data, and a config directory.
  */
-async function world({ gate, advisors } = {}) {
+async function world({ gate, advisors, limits } = {}) {
   const root = await scratch("cma-gate-repo-");
   const data = await scratch("cma-gate-data-");
   const configDir = await scratch("cma-gate-cfg-");
@@ -60,7 +60,8 @@ async function world({ gate, advisors } = {}) {
       { name: "correctness", provider: "local", model: "gpt-test", instructions: "check", enabled: true, reasoningEffort: "default" }
     ],
     exclude: [],
-    ...(gate ? { gate } : {})
+    ...(gate ? { gate } : {}),
+    ...(limits ? { limits } : {})
   });
   const sessionId = `gate-${Math.random().toString(16).slice(2)}`;
   const env = {
@@ -225,6 +226,43 @@ test("a failed review fails open and says so", async () => {
   const status = await w.status();
   assert.equal(status.lastReview.outcome, "failed");
   assert.match(status.advisors.correctness.lastError, /^auth:/);
+});
+
+test("a partial failure with no findings is not reported as a silent pass", async () => {
+  const advisor = (name) => ({ name, provider: "local", model: "gpt-test", instructions: name, enabled: true, reasoningEffort: "default" });
+  const w = await world({ advisors: [advisor("alpha"), advisor("beta")] });
+  await w.prompt("change");
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+  const reviewApi = w.deps.reviewApi;
+  w.deps.reviewApi = async (args) => {
+    if (args.advisor.name === "alpha") return reviewApi(args);
+    const error = new Error("rate limited");
+    error.code = "rate_limit";
+    throw error;
+  };
+  const out = await w.stop();
+  assert.equal(out.decision, undefined);
+  assert.match(out.systemMessage, /no findings, but one advisor did not review this turn \(beta: rate_limit:/);
+  assert.doesNotMatch(out.systemMessage, /alpha/);
+  assert.equal((await w.status()).lastReview.outcome, "passed");
+});
+
+test("queued advisors share the Stop hook's time, so a late one is recorded instead of the hook being killed", async () => {
+  const advisor = (name) => ({ name, provider: "local", model: "gpt-test", instructions: name, enabled: true, reasoningEffort: "default" });
+  const w = await world({ advisors: [advisor("alpha"), advisor("beta")], limits: { maxConcurrentAdvisors: 1, reviewTimeoutSeconds: 240 } });
+  let clock = 1_000_000;
+  w.deps.now = () => clock;
+  await w.prompt("change");
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+  w.setScript(async () => {
+    clock += 271_000;
+  });
+  const out = await w.stop();
+  assert.deepEqual(w.reviews.map((args) => args.advisor.name), ["alpha"]);
+  assert.match(out.systemMessage, /beta: timeout: the Stop hook's review time ran out/);
+  const status = await w.status();
+  assert.equal(status.advisors.beta.reviews, 0);
+  assert.match(status.advisors.beta.lastError, /^timeout:/);
 });
 
 test("excluded files are never sent, and an excluded-only change is not reviewed", async () => {

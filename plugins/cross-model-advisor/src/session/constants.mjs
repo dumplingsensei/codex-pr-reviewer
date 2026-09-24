@@ -25,6 +25,12 @@ export const HISTORY_CHAR_BOUND = 60_000;
 /** Characters of findings handed back to Claude in a block reason. */
 export const MAX_REASON_CHARS = 8_000;
 export const MAX_STDIN_BYTES = 1_048_576;
+/**
+ * Time the Stop hook gives all advisors together. hooks/hooks.json allows the
+ * hook 300 seconds; the rest is left for snapshots, the diff, and saving state,
+ * because a hook Claude Code kills records nothing.
+ */
+export const STOP_REVIEW_BUDGET_MS = 270_000;
 export const SESSION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const ERROR_LOG_INTERVAL_MS = 5_000;
 export const ERROR_LOG_MAX_BYTES = 64 * 1024;
