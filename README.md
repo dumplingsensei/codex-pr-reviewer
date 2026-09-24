@@ -10,7 +10,7 @@ Claude Code plugins. Install the marketplace once, then each plugin separately:
 
 | Plugin | What it does |
 |---|---|
-| [cross-model-advisor](#cross-model-advisor) | Independent advisors observe the current Claude session, inspect the project themselves, and send findings back while you work. |
+| [cross-model-advisor](#cross-model-advisor) | When Claude finishes a turn that changed files, advisors from other model families review the diff and send Claude back to address their concerns. |
 | [codex-pr-reviewer](#codex-pr-reviewer) | Fetch a GitHub PR into an isolated worktree and review it with Codex. |
 
 Each plugin's manifest defines its version; marketplace metadata is versioned separately. Changing one plugin does not move the other.
@@ -26,15 +26,15 @@ Written for my own use, published in case it is useful. It is tested and it work
 
 # cross-model-advisor
 
-Independent advisors observe the ongoing primary Claude session, investigate the project for themselves through read-only tools, and send concise findings back while Claude is working. This is not another pull-request reviewer and not a Stop-hook completion gate.
+A review gate built from models of other families. When Claude finishes a turn that changed files, the advisors you configure review what git measured for that turn (your request, Claude's final message, and the diff), inspect the surrounding code through read-only tools, and send Claude back to fix or rebut evidence-backed concerns. Turns that change nothing are not reviewed.
 
-The useful combination is from Oh My Pi's advisors: session-bound reviewers with their own inspection, not a forwarded transcript and not a general shell. This plugin does not copy OMP's prompt corpus or vendor its agent framework.
+The idea of a second model from another family comes from Oh My Pi's advisors. Claude Code's hooks cannot stream a turn to an outside model or steer it mid-run, so this plugin reviews the finished turn instead. It does not copy OMP's prompts or vendor its agent framework.
 
-Shipped documentation, including configuration examples: [plugins/cross-model-advisor/README.md](plugins/cross-model-advisor/README.md). Changelog: [plugins/cross-model-advisor/CHANGELOG.md](plugins/cross-model-advisor/CHANGELOG.md).
+Shipped documentation, including how the gate works and configuration examples: [plugins/cross-model-advisor/README.md](plugins/cross-model-advisor/README.md). Changelog: [plugins/cross-model-advisor/CHANGELOG.md](plugins/cross-model-advisor/CHANGELOG.md).
 
 ## Runtime
 
-**Claude Code 2.1.252 or newer; Node 22.19.0 or newer; macOS and Linux.** Unsupported Node/host/OS is a `doctor` error; ordinary hooks stay fail-open and do not start providers. Windows is not tested and not supported.
+**Claude Code 2.1.252 or newer; Node 22.19.0 or newer; git; macOS and Linux.** The project must be a git work tree. Unsupported Node/host/OS is a `doctor` error; hooks fail open. Windows is not tested and not supported.
 
 Users install the bundled plugin without `npm install`, a build, or network bootstrap. From a local checkout:
 
@@ -46,28 +46,28 @@ claude --plugin-dir ./plugins/cross-model-advisor
 
 | Command | What it does |
 |---|---|
-| `/cross-model-advisor:on` | Validate configuration and enable configured advisors for this session. Reports provider/model names, project root, limits, and external-provider disclosure. Does not call an advisor model just to run the command. |
-| `/cross-model-advisor:off` | Cancel running reviews, stop future reviews, and discard pending injection candidates. Accepted findings stay in the local inbox. |
-| `/cross-model-advisor:status` | Show enabled/paused/busy state per advisor, pending/emitted findings, usage when reported, and sanitized last errors. “Emitted” is locally acknowledged hook output, not confirmed receipt by Claude. |
-| `/cross-model-advisor:doctor` | Check runtime versions, configuration, key-variable presence, local OAuth availability, bundle completeness, and IPC access. No model request, token refresh, login flow, installation, or key printing. |
+| `/cross-model-advisor:on` | Validate configuration and turn the gate on for this session. Reports the git project root, gate mode, each advisor's availability, and what is sent to external providers. Makes no model request. |
+| `/cross-model-advisor:off` | Turn the gate off for this session. The last review stays visible in `status`. |
+| `/cross-model-advisor:status` | Show the last review (outcome, round, findings with evidence, each advisor's result), the last skipped turn and why, and per-advisor usage and errors. |
+| `/cross-model-advisor:doctor` | Check the runtime, configuration, git, key-variable presence, advisor availability, and bundle. No model request, token refresh, or login. |
 | `/cross-model-advisor:setup` | Print the exact terminal command for the settings menu. Does not open the menu inside Claude or edit configuration. |
 | `/cross-model-advisor:login [provider-slot]` | Choose a configured OAuth provider, or name its slot directly, then get the terminal login command. Complete authorization in your terminal, not in Claude's transcript. |
 | `/cross-model-advisor:logout <provider-slot>` | Delete that slot's local OAuth credential. |
 
-The four session commands run this helper by full path:
+The session commands run the plugin's helpers by full path, naming the plugin-data directory that Claude Code substitutes into the skill (it is not exported to Bash commands, and another plugin may export its own):
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" on --plugin-data "${CLAUDE_PLUGIN_DATA}"
+node "${CLAUDE_PLUGIN_ROOT}/dist/gate.mjs" on --plugin-data "${CLAUDE_PLUGIN_DATA}"
 node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" off --plugin-data "${CLAUDE_PLUGIN_DATA}"
 node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" status --plugin-data "${CLAUDE_PLUGIN_DATA}"
-node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" doctor --plugin-data "${CLAUDE_PLUGIN_DATA}"
+node "${CLAUDE_PLUGIN_ROOT}/dist/gate.mjs" doctor --plugin-data "${CLAUDE_PLUGIN_DATA}"
 ```
 
 ## Configuration and provider selection
 
-Start with `/cross-model-advisor:setup`: it prints a safely quoted `menu-command` for your own terminal (one line pinning `CLAUDE_CONFIG_DIR`, optional validated `CLAUDE_CODE_SESSION_ID`/`CLAUDE_PLUGIN_DATA`, empty `CLAUDE_SESSION_ID`/`CLAUDE_PROJECT_DIR` so a leftover shell cannot retarget Apply, then `node <abs>/setup-control.mjs menu`; no extra flags). Reusing that command does not cost another Claude turn and does not infer a session from the working directory. The menu's home actions are **Add advisor**, **Provider accounts**, **Save defaults**, **Save & Apply**, **Enable** (only when the live session is off), and **Quit**. **Save defaults** writes user defaults only. **Save & Apply** targets the named live session and preserves on/off. Manual JSON remains supported. Setup neither collects key values nor starts OAuth by itself. When adding API slots or changing key-variable names, export the keys in your own terminal and start a new Claude session before `/cross-model-advisor:on` or **Save & Apply**; the existing worker cannot inherit new variable names.
+Start with `/cross-model-advisor:setup`: it prints a safely quoted command for your own terminal that opens the settings menu (`CLAUDE_CONFIG_DIR=<dir> node <abs>/setup-control.mjs menu`). Its home actions are **Add advisor**, **Provider accounts**, **Save**, and **Quit**. The gate reads the saved file at every Stop, so a save applies from the next reviewed turn in every session. Manual JSON remains supported. Setup neither collects key values nor starts OAuth by itself. When adding API slots or changing key-variable names, export the keys in your own terminal and start a new Claude session: hooks inherit Claude's environment from when it started.
 
-One trusted user file: `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cross-model-advisor.json`. Schema version is `2`. Version-1 files open without being rewritten; the first explicit Save publishes version 2. An older plugin cannot read version 2. Unknown keys are rejected. There is no silent default provider or model, and the plugin never uses Claude's current credentials. `/on` snapshots the file; edits take effect on the next explicit `on` or a successful Apply to that session.
+One trusted user file: `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cross-model-advisor.json`. Schema version is `2`. Version-1 files open without being rewritten; the first explicit Save publishes version 2. Unknown keys are rejected. There is no silent default provider or model, and the plugin never uses Claude's current credentials. `gate.mode` is `block` (default: concerns and blockers send Claude back) or `report` (findings are only shown to you); `gate.maxRounds` (default 2) bounds how many times one prompt is sent back.
 
 Choose providers yourself:
 
@@ -78,17 +78,15 @@ Kimi API (`moonshotai`) and Kimi Coding are separate services. `google` is the G
 
 Advisors name a configured provider, a user-chosen model id, literal instructions, `enabled`, and `reasoningEffort` (`default` preserves the previous request; `off` is offered only where thinking can actually be disabled). Compatible thinking budgets cannot raise `limits.maxOutputTokens`. The Codex adapter does not forward a hard remote output-token ceiling. Example and schema: `plugins/cross-model-advisor/config/`. `WATCHDOG.md` and `.cross-model-advisorignore` in a project may narrow review focus and tool access; they cannot select providers, credentials, binaries, or auto-enable the plugin.
 
-## Security, credentials, no-wake, receipt
+## Security and credentials
 
-Observations and source the advisor tools read go to the **external provider you configured**. Exclusions block tool access to `.git`, `.env` / `.env.*`, keys, `.claude` / `.codex` / `.gemini`, `node_modules`, and ignore files. They do not strip secrets from prose in a prompt or from an allowed file.
+For every reviewed turn, your request, Claude's final message, the diff, and source the advisor tools read go to the **external providers you configured**. Exclusions block tool access to `.git`, `.env` / `.env.*`, keys, `.claude` / `.codex` / `.gemini`, `node_modules`, and ignore files, and the same rules filter the diff: an excluded file that changed is named but its content is never sent. They do not strip secrets from prose in a prompt or from an allowed file.
 
-The worker and bundled SDK are trusted local code under the same OS user. Model-visible investigation is restricted to `read` / `list` / `search` / `advise`; no native advisor shell or MCP bridge is exposed.
+The hook helpers and bundled SDK are trusted local code under the same OS user. Model-visible investigation is restricted to `read` / `list` / `search` / `advise`; no advisor shell, write access, or MCP bridge is exposed.
 
-OAuth credentials live under `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cross-model-advisor/credentials` (normally outside the project), with private directory/file permissions and atomic serialized writes. They are not encrypted against your OS user and are never copied from Claude, OMP, or other tools. Provider conversation context stays in memory; the plugin inbox has seven-day retention. External providers have their own retention policies.
+OAuth credentials live under `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cross-model-advisor/credentials` (normally outside the project), with private directory/file permissions and atomic serialized writes. They are not encrypted against your OS user and are never copied from Claude, OMP, or other tools. Provider conversations last one review and stay in memory; the last review is kept locally for seven days. External providers have their own retention policies.
 
-**No-wake.** A stopped session is never restarted. Advice that finishes after Stop is kept for the next real user prompt or tool boundary. Stop always prints nothing.
-
-**Best-effort receipt.** The host has no receipt protocol. `status` “emitted” means locally written and acknowledged, not that Claude confirmed seeing it. A crash can duplicate an emission; a host timeout after acknowledgement can drop it while the inbox still holds the finding. Not exactly-once, not at-least-once.
+**Fail-open.** A timeout, provider error, or failed login lets Claude stop, says the turn was not reviewed, and is recorded for `status`. It is never reported as a pass.
 
 # codex-pr-reviewer
 

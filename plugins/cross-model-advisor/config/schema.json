@@ -172,10 +172,29 @@
       "additionalProperties": false,
       "properties": {
         "maxConcurrentAdvisors": { "type": "integer", "minimum": 1, "maximum": 16, "default": 2 },
-        "reviewTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 600, "default": 90 },
+        "reviewTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 240, "default": 90, "description": "Per-advisor review deadline. The Stop hook itself times out at 300 seconds." },
         "maxToolCallsPerReview": { "type": "integer", "minimum": 1, "maximum": 100, "default": 8 },
         "maxOutputTokens": { "type": "integer", "minimum": 1, "maximum": 100000, "default": 1500 },
         "maxReviewsPerAdvisorPerSession": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 40 }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Review after Claude finishes a turn that changed files.",
+      "properties": {
+        "mode": {
+          "enum": ["block", "report"],
+          "default": "block",
+          "description": "block: concerns and blockers send Claude back to address them. report: findings are only shown to the user."
+        },
+        "maxRounds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5,
+          "default": 2,
+          "description": "How many times one prompt can be sent back before Claude is allowed to stop."
+        }
       }
     },
     "v1Advisor": {
@@ -273,7 +292,8 @@
           "items": { "$ref": "#/$defs/v1Advisor" }
         },
         "exclude": { "$ref": "#/$defs/exclude" },
-        "limits": { "$ref": "#/$defs/limits" }
+        "limits": { "$ref": "#/$defs/limits" },
+        "gate": { "$ref": "#/$defs/gate" }
       }
     },
     "v2Document": {
@@ -305,7 +325,8 @@
           "items": { "$ref": "#/$defs/v2Advisor" }
         },
         "exclude": { "$ref": "#/$defs/exclude" },
-        "limits": { "$ref": "#/$defs/limits" }
+        "limits": { "$ref": "#/$defs/limits" },
+        "gate": { "$ref": "#/$defs/gate" }
       }
     }
   }

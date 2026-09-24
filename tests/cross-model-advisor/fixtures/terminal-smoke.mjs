@@ -23,7 +23,6 @@ export const DRIVER_PATH = path.join(here, "terminal-driver.py");
 export const REPO_ROOT = path.resolve(here, "../../..");
 export const PLUGIN_ROOT = path.join(REPO_ROOT, "plugins", "cross-model-advisor");
 export const SETUP_HELPER = path.join(PLUGIN_ROOT, "dist", "setup-control.mjs");
-export const CONTROL_HELPER = path.join(PLUGIN_ROOT, "dist", "control.mjs");
 export const DIST_MODULES = path.join(PLUGIN_ROOT, "dist", "modules");
 
 const STRIP_ENV = [
@@ -48,8 +47,7 @@ const LIMITS = Object.freeze({
 });
 
 const HOME_RE = /Cross-model advisors/;
-const SAVE_APPLY_RE = /Save & Apply/;
-const SAVE_DEFAULTS_RE = /Save defaults/;
+const SAVE_RE = /(^|\s)Save(\s|$)/;
 const QUIT_RE = /\bQuit\b/;
 const ADD_ADVISOR_RE = /Add advisor/;
 const PROVIDERS_RE = /Provider accounts/;
@@ -122,7 +120,6 @@ export async function makeSmokeWorld(prefix = "cma-term-") {
   world.close = async () => {
     if (world.closed) return;
     world.closed = true;
-    await shutdownSession(world).catch(() => {});
     await fsPromises.rm(root, { recursive: true, force: true });
   };
   return world;
@@ -426,39 +423,6 @@ export class OwnedPty {
   }
 }
 
-async function shutdownSession(world) {
-  const sessionId = world.sessionId;
-  const data = world.data;
-  if (!sessionId || !data) return;
-  const locatorFile = path.join(data, "sessions", sessionId, "locator.json");
-  let locator = null;
-  try {
-    locator = JSON.parse(fs.readFileSync(locatorFile, "utf8"));
-  } catch {
-    locator = null;
-  }
-  if (locator?.pid) killPidTree(locator.pid);
-}
-
-function killPidTree(pid) {
-  const n = Number(pid);
-  if (!Number.isInteger(n) || n <= 0) return;
-  for (const sig of ["SIGTERM", "SIGKILL"]) {
-    try {
-      process.kill(-n, sig);
-    } catch {
-      /* group missing */
-    }
-    try {
-      process.kill(n, sig);
-    } catch {
-      /* gone */
-    }
-  }
-}
-
-export { shutdownSession };
-
 export async function openOwnedPty({
   execPath = process.execPath,
   args,
@@ -646,56 +610,6 @@ export function runSetupCli(args, env, { cwd, timeoutMs = 8_000, helperPath = SE
   return runProcess(process.execPath, [helperPath, ...args], { env, cwd, timeoutMs, stdin });
 }
 
-export function runControlCli(args, env, { cwd, timeoutMs = 8_000, pluginDir = PLUGIN_ROOT, stdin } = {}) {
-  const helper = path.join(pluginDir, "dist", "control.mjs");
-  const body = stdin == null ? undefined : typeof stdin === "string" ? stdin : `${JSON.stringify(stdin)}\n`;
-  return runProcess(process.execPath, [helper, ...args], {
-    env,
-    cwd: cwd ?? env.CLAUDE_PROJECT_DIR,
-    timeoutMs,
-    stdin: body
-  });
-}
-
-function hookPayload({ sessionId, transcriptPath, cwd, ...rest }) {
-  return {
-    session_id: sessionId,
-    transcript_path: transcriptPath,
-    cwd,
-    permission_mode: "default",
-    ...rest
-  };
-}
-
-export async function bootBundledSession(world, env, { pluginDir = PLUGIN_ROOT } = {}) {
-  const transcriptPath = path.join(world.root, "transcript.jsonl");
-  fs.writeFileSync(transcriptPath, "");
-  const start = await runControlCli(
-    ["hook"],
-    env,
-    {
-      pluginDir,
-      stdin: hookPayload({
-        sessionId: world.sessionId,
-        transcriptPath,
-        cwd: world.project,
-        hook_event_name: "SessionStart",
-        source: "startup"
-      }),
-      timeoutMs: 8_000
-    }
-  );
-  assert.equal(start.status, 0, `SessionStart failed\n${start.stderr}\n${start.stdout}`);
-  const on = await runControlCli(["on"], env, { pluginDir, timeoutMs: 12_000 });
-  return { start, on, transcriptPath };
-}
-
-
-export async function loadSessionSettings(env) {
-  const mod = await import(pathToFileURL(path.join(DIST_MODULES, "control.mjs")).href);
-  return mod.getSessionSettings({ env });
-}
-
 export function assertTermiosRestored(termios, label = "termios") {
   assert.ok(termios && termios.available !== false, `${label} unavailable`);
   assert.equal(termios.icanon, true, `${label} ICANON\n${JSON.stringify(termios)}`);
@@ -730,18 +644,10 @@ async function dismissNotice(pty) {
   await delay(50);
 }
 
-async function saveApply(pty) {
-  await focusLabel(pty, SAVE_APPLY_RE);
-  await pty.keys(["ENTER"]);
-  const notice = await pty.wait(/Saved and applied|Saved; not applied|Not saved/, 12_000);
-  await dismissNotice(pty);
-  return notice;
-}
-
 async function saveDefaults(pty) {
-  await focusLabel(pty, SAVE_DEFAULTS_RE);
+  await focusLabel(pty, SAVE_RE);
   await pty.keys(["ENTER"]);
-  const notice = await pty.wait(/Saved defaults|Not saved/, 12_000);
+  const notice = await pty.wait(/Saved\. Applies|Not saved/, 12_000);
   await dismissNotice(pty);
   return notice;
 }
@@ -835,7 +741,6 @@ async function scenarioLunaAndNoReview() {
         accountId: "offline-smoke-account"
       })
     );
-    await bootBundledSession(world, env);
     const beforeHits = probe.hits();
     const pty = await openMenuPty({ env, cwd: world.project });
     try {
@@ -845,8 +750,9 @@ async function scenarioLunaAndNoReview() {
       await chooseModel(pty, "luna", /gpt-5\.6-luna/);
       await chooseEffort(pty, /\bHigh\b/);
       await backToHome(pty);
-      const notice = await saveApply(pty);
-      assert.match(notice.screen, /Saved and applied/);
+      const notice = await saveDefaults(pty);
+      assert.match(notice.screen, /Saved\. Applies from the next reviewed turn/);
+      assert.doesNotMatch(notice.screen, /Save & Apply|Enable/);
       const ended = await leaveMenu(pty);
       assertTermiosRestored(ended.termios);
     } finally {
@@ -859,15 +765,8 @@ async function scenarioLunaAndNoReview() {
     assert.deepEqual(written.exclude, ["tmp/**"]);
     assert.equal(written.limits.maxOutputTokens, 1500);
     assert.equal(written.providers.loopback.apiKeyEnv, "CMA_SMOKE_API_KEY");
-    const settings = await loadSessionSettings(env);
-    assert.equal(settings.ok, true, JSON.stringify(settings));
-    const live = settings.advisors.find((row) => row.name === "architecture");
-    assert.equal(live?.model, "gpt-5.6-luna");
-    assert.equal(live?.reasoningEffort, "high");
-    assert.equal(live?.available, true);
-    assert.equal(settings.enabled, true);
     await delay(400);
-    assert.equal(probe.hits(), beforeHits, "Save & Apply started a provider review");
+    assert.equal(probe.hits(), beforeHits, "saving settings called a provider");
   } finally {
     await probe.close();
     await world.close();
@@ -879,37 +778,6 @@ function noticeText(value) {
     return JSON.stringify(value);
   } catch {
     return String(value);
-  }
-}
-
-async function scenarioSavedNotApplied() {
-  const world = await makeSmokeWorld("cma-notapplied-");
-  try {
-    writeJsonConfig(world.configFile, configV2());
-    const env = smokeEnv(world);
-    await bootBundledSession(world, env);
-    const pty = await openMenuPty({ env, cwd: world.project });
-    try {
-      await waitHome(pty);
-      await focusLabel(pty, /architecture/);
-      await pty.keys(["ENTER"]);
-      await chooseModel(pty, "luna", /gpt-5\.6-luna/);
-      await backToHome(pty);
-      await focusLabel(pty, SAVE_APPLY_RE);
-      await shutdownSession(world);
-      await pty.keys(["ENTER"]);
-      const notice = await pty.wait(/Saved; not applied/, 12_000);
-      assert.doesNotMatch(notice.screen, /Saved and applied/);
-      await dismissNotice(pty);
-      const ended = await leaveMenu(pty);
-      assertTermiosRestored(ended.termios);
-    } finally {
-      await pty.dispose();
-    }
-    const written = readJsonConfig(world.configFile);
-    assert.equal(written.advisors.find((row) => row.name === "architecture").model, "gpt-5.6-luna");
-  } finally {
-    await world.close();
   }
 }
 
@@ -1283,31 +1151,12 @@ async function scenarioQuoting() {
     assert.match(line, / menu$/);
     assert.doesNotMatch(line, /menu-command/);
     assert.ok(line.includes(`CLAUDE_CONFIG_DIR=${posixQuote(path.resolve(configDir))}`));
-    assert.ok(line.includes(`CLAUDE_PLUGIN_DATA=${posixQuote(path.resolve(pluginData))}`));
-    assert.ok(line.includes(`CLAUDE_CODE_SESSION_ID=${posixQuote("sess-quote")}`));
-    assert.ok(line.includes(`CLAUDE_SESSION_ID=${posixQuote("")}`));
-    assert.ok(line.includes(`CLAUDE_PROJECT_DIR=${posixQuote("")}`));
+    // The menu edits saved settings only; the launcher names no session.
+    assert.doesNotMatch(line, /CLAUDE_PLUGIN_DATA|SESSION_ID|CLAUDE_PROJECT_DIR/);
     const helper = posixQuote(fs.existsSync(SETUP_HELPER) ? fs.realpathSync(SETUP_HELPER) : path.resolve(SETUP_HELPER));
     assert.ok(line.includes(`node ${helper} menu`));
     assert.doesNotMatch(line, /sk-live-secret|cap-secret-value|controlCapability|gpt-5|architecture/);
     assert.equal(result.stderr.includes(secret), false);
-    const noSession = await runSetupCli(
-      ["menu-command"],
-      smokeEnv(world, {
-        CLAUDE_CONFIG_DIR: configDir,
-        CLAUDE_PLUGIN_DATA: "",
-        CLAUDE_CODE_SESSION_ID: "",
-        CLAUDE_SESSION_ID: "stale-session",
-        CLAUDE_PROJECT_DIR: world.project
-      }),
-      { cwd: world.project }
-    );
-    const defaults = noSession.stdout.trim().split("\n").filter(Boolean).at(-1) ?? "";
-    assert.ok(defaults.includes(`CLAUDE_CODE_SESSION_ID=${posixQuote("")}`));
-    assert.ok(defaults.includes(`CLAUDE_PLUGIN_DATA=${posixQuote("")}`));
-    assert.ok(defaults.includes(`CLAUDE_SESSION_ID=${posixQuote("")}`));
-    assert.ok(defaults.includes(`CLAUDE_PROJECT_DIR=${posixQuote("")}`));
-    assert.doesNotMatch(defaults, /stale-session/);
   } finally {
     await world.close();
   }
@@ -1426,8 +1275,7 @@ async function scenarioOauthHandoff() {
 }
 
 const SCENARIOS = [
-  ["luna-save-apply-no-review", scenarioLunaAndNoReview],
-  ["saved-not-applied", scenarioSavedNotApplied],
+  ["luna-save-no-review", scenarioLunaAndNoReview],
   ["cancel-discard", scenarioCancel],
   ["no-tty", scenarioNoTty],
   ["toggle-providers-remove", scenarioToggleProvidersRemove],

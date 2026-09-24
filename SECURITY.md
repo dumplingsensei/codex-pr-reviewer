@@ -20,11 +20,13 @@ Reports about any of those are wanted.
 
 ### cross-model-advisor
 
-The sibling advisor sends main-session observations and explicitly read project
-files to external model providers selected in trusted user configuration. Its
-model-visible tools are read-only and project-confined; prompt text is untrusted
-data, not authority to broaden that access. Confinement bypasses, unauthorized
-finding injection, and credential leakage are in scope.
+The sibling review gate sends each reviewed turn's request, Claude's final
+message, the git diff (minus excluded paths), and explicitly read project files
+to external model providers selected in trusted user configuration. Its
+model-visible tools are read-only and project-confined; the request, diff, and
+source are untrusted data, not authority to broaden that access. Confinement
+bypasses, excluded content reaching a provider, forged or unevidenced findings
+sent back to Claude, and credential leakage are in scope.
 
 OAuth tokens are stored under the Claude configuration directory with private
 permissions and serialized atomic updates. These files are not encrypted against the OS user;

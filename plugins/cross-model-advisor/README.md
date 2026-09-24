@@ -1,38 +1,39 @@
 # cross-model-advisor
 
-Independent advisors observe the current Claude Code session, inspect the
-project themselves, and send concise findings back while Claude is working.
-This is not a pull-request reviewer and not a Stop-hook completion gate.
+A review gate for Claude Code built from models of other families. When Claude
+finishes a turn that changed files, the advisors you configure (OpenAI or
+Codex, Gemini, xAI, OpenRouter, Kimi, Copilot, and others) review exactly what
+git measured, inspect the surrounding code themselves, and either send Claude
+back to address concerns or show their findings to you.
 
-The design is inspired by Oh My Pi's advisors. It does not copy OMP's prompt
-corpus or vendor its agent framework.
+The idea of a second model from another family watching the work comes from
+Oh My Pi's advisors. Claude Code's hooks cannot stream a turn to an outside
+model or steer it mid-run, so this plugin reviews the finished turn instead.
+It does not copy OMP's prompts or vendor its agent framework.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `/cross-model-advisor:on` | Validate configuration and enable configured advisors for this session. Reports provider/model names, project root, limits, and external-provider disclosure. Does not call an advisor model just to run the command. |
-| `/cross-model-advisor:off` | Cancel running reviews, stop future reviews, and discard pending injection candidates. Accepted findings stay in the local inbox. |
-| `/cross-model-advisor:status` | Show enabled/paused/busy state per advisor, pending/emitted findings, usage when reported, and sanitized last errors. This is the human-visible inbox. |
-| `/cross-model-advisor:doctor` | Check runtime versions, configuration, key-variable presence, stored OAuth availability, bundle completeness, and IPC access. No model request, token refresh, login flow, installation, or key printing. |
-| `/cross-model-advisor:setup` | Print the exact terminal command for the settings menu. Does not open a TTY inside Claude, interpolate arguments, or edit configuration. |
+| `/cross-model-advisor:on` | Validate configuration and turn the gate on for this session. Reports the git project root, gate mode, each advisor's availability, and what is sent to external providers. Makes no model request. |
+| `/cross-model-advisor:off` | Turn the gate off for this session. The last review stays visible in `status`. |
+| `/cross-model-advisor:status` | Show whether the gate is on, the last review (outcome, round, every finding with evidence, each advisor's result), the last turn that was skipped and why, and per-advisor usage and errors. |
+| `/cross-model-advisor:doctor` | Check the runtime, configuration, git, key-variable presence, advisor availability, and bundle. No model request, token refresh, or login. |
+| `/cross-model-advisor:setup` | Print the terminal command for the settings menu. Does not open a TTY inside Claude or edit configuration. |
 | `/cross-model-advisor:login [provider-slot]` | Choose a configured OAuth slot when no argument is supplied, or name one directly. Get its terminal login command; never paste tokens or callback URLs into Claude. |
-| `/cross-model-advisor:logout <provider-slot>` | Remove that configured provider slot's local OAuth credential. This does not revoke the provider-side grant or cancel an already authorized request. |
+| `/cross-model-advisor:logout <provider-slot>` | Remove that slot's local OAuth credential. This does not revoke the provider-side grant. |
 
-The four session commands run this plugin's control helper by full path:
+The session commands run the plugin's helpers by full path. Claude Code
+substitutes `${CLAUDE_PLUGIN_DATA}` into the skill text; it does not export it
+to Bash commands, and another plugin may export its own, so the path is always
+passed explicitly:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" on --plugin-data "${CLAUDE_PLUGIN_DATA}"
+node "${CLAUDE_PLUGIN_ROOT}/dist/gate.mjs" on --plugin-data "${CLAUDE_PLUGIN_DATA}"
 node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" off --plugin-data "${CLAUDE_PLUGIN_DATA}"
 node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" status --plugin-data "${CLAUDE_PLUGIN_DATA}"
-node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" doctor --plugin-data "${CLAUDE_PLUGIN_DATA}"
+node "${CLAUDE_PLUGIN_ROOT}/dist/gate.mjs" doctor --plugin-data "${CLAUDE_PLUGIN_DATA}"
 ```
-
-Doctor checks the four required executables in the plugin's `dist/`, using
-`CLAUDE_PLUGIN_ROOT` when supplied or the executing worker's location otherwise.
-This is independent of the project directory and Git tracking. Missing entries
-make both `bundle.ok` and the overall `ok` false. Restart Claude after updating
-the plugin so an already-running worker loads the new code.
 
 Requires **Claude Code 2.1.252 or newer**, **Node 22.19.0 or newer**, and
 **macOS or Linux**. Unsupported Node/host/OS is a `doctor` error; ordinary hooks
@@ -49,33 +50,65 @@ The installed plugin is already bundled. There is no `npm install`, build, or
 network bootstrap at install time. From a local checkout,
 `claude --plugin-dir ./plugins/cross-model-advisor` loads it without the cache.
 
+## How the gate works
+
+1. **When you submit a prompt**, a lightweight hook records a git snapshot of
+   the whole working tree: a tree object of tracked and untracked files, with
+   `.gitignore` honoured, written through a private temporary index. Your
+   index, branch, HEAD, and stash are never touched. No model is called, and
+   no SDK is loaded.
+2. **When Claude finishes the turn**, the Stop hook snapshots again. If nothing
+   changed, or this exact change was already reviewed, Claude stops as usual.
+   Plugin commands like this page's are never reviewed, and subagents are not
+   reviewed separately.
+3. **The review.** Every enabled advisor, in parallel, receives your request,
+   Claude's final message (as a claim to check, not evidence), and the diff
+   between the two snapshots, minus excluded paths. Committing during the turn
+   does not change what is measured, and your earlier uncommitted work is not
+   part of it. Advisors may read, list, and search the project, and report up
+   to five findings each, every one backed by evidence: a line they actually
+   read, or the request, final message, or a file's diff.
+4. **The outcome.**
+   - `gate.mode: "block"` (default): any `concern` or `blocker` sends Claude
+     back with the findings, labelled as unverified claims from other models
+     that it should check, fix, or rebut. Claude keeps working, and the next
+     Stop reviews the whole turn again with the earlier findings attached. After
+     `gate.maxRounds` rounds (default 2), Claude is allowed to stop and you are
+     told so. A rebuttal without further edits is accepted.
+   - Only `nit`s, or `gate.mode: "report"`: Claude stops, and the findings are
+     shown to you.
+   - Nothing found: Claude stops silently.
+5. **Failures fail open.** A timeout, provider error, or failed login lets
+   Claude stop, tells you the turn was not reviewed, and records the error for
+   `status`. A failed review is never reported as a pass.
+
+You wait for the review: a turn that changed files ends 30 to 120 seconds later
+than it otherwise would, and sometimes with another round of fixes. A turn that
+changed nothing costs nothing.
+
+The project must be a git work tree. The gate needs git to measure what
+changed, so `on` refuses a project outside one. Snapshots of untracked files
+are ordinary loose objects in your repository's object store, which
+`git gc` collects.
+
 ## Configuration
 
 `/cross-model-advisor:setup` prints a safely quoted command for **your own
-terminal**. It does not open the menu inside Claude, interpolate `$ARGUMENTS`,
-or edit configuration. Opening the slash skill can cost a Claude turn. Reusing
-the printed command does not, and does not infer a session from the working
-directory, a transcript, or directory timestamps.
+terminal**. It does not open the menu inside Claude or edit configuration.
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" menu-command --plugin-data "${CLAUDE_PLUGIN_DATA}"
+node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" menu-command
 ```
 
-Show that helper's stdout verbatim and run it in a real TTY. It prints one
-posix-quoted line and has no extra flags. `CLAUDE_CONFIG_DIR` is always pinned.
-`CLAUDE_SESSION_ID` and `CLAUDE_PROJECT_DIR` are always empty so a leftover
-shell cannot retarget Apply. A validated session id
-(`^[A-Za-z0-9._-]{1,128}$`) plus an absolute plugin-data path also pin
-`CLAUDE_CODE_SESSION_ID` and `CLAUDE_PLUGIN_DATA`; otherwise those two are
-empty as well:
+Run its output in a real TTY. It is one line that pins the configuration
+directory the menu edits:
 
 ```sh
-CLAUDE_CONFIG_DIR="/home/you/.claude" CLAUDE_CODE_SESSION_ID="session-id" CLAUDE_PLUGIN_DATA="/absolute/plugin-data" CLAUDE_SESSION_ID='' CLAUDE_PROJECT_DIR='' node "/absolute/path/to/cross-model-advisor/dist/setup-control.mjs" menu
+CLAUDE_CONFIG_DIR="/home/you/.claude" node "/absolute/path/to/cross-model-advisor/dist/setup-control.mjs" menu
 ```
 
-The formatter never prints the private IPC capability, credentials, or config
-body. Without that captured session pair, the menu edits user defaults only
-and **Save & Apply** / **Enable** are unavailable.
+The menu edits saved settings only. The gate reads them at every Stop, so a
+save applies from the next reviewed turn in every session.
 
 ### Settings menu
 
@@ -105,17 +138,16 @@ Compatible endpoints still require explicit URL and model metadata.
 - **Enabled versus unavailable.** Disable an advisor without removing it.
   Disabled advisors stay editable. Enabled-but-unavailable (missing login,
   missing key variable, unsupported effort or model) is a distinct visible
-  state. **Enable** appears only when the captured live session is off.
+  state.
 - **Empty configuration.** Version 2 allows empty `providers` and `advisors`
   while references stay valid. Empty or all-disabled setups start no reviews.
 - **Unrelated settings.** Existing slots, credentials, `exclude`, and `limits`
   stay unchanged unless an action explicitly changes them. Logout is a
   separate credential command.
 
-Home actions are **Add advisor**, **Provider accounts**, **Save defaults**,
-**Save & Apply**, **Enable** (only when the live session is off), and **Quit**.
+Home actions are **Add advisor**, **Provider accounts**, **Save**, and **Quit**.
 Leaving a dirty menu offers **Discard** or **Return**. No file write occurs
-until **Save defaults** or **Save & Apply**. A revision conflict keeps the
+until **Save**. A revision conflict keeps the
 draft for inspection and refuses overwrite: reload or discard, not merge or
 force-save. An interrupted save may leave `cross-model-advisor.json.lock` in
 the Claude config directory. Remove that directory only after verifying no
@@ -127,40 +159,12 @@ and `setup-control.mjs save` with stdin `{ "revision": "...", "config": { ... } 
 for non-menu use. Use the catalog's revision (`null` for a missing file);
 never submit key values.
 
-### Save and Apply
+### Keys and logins
 
-**Save defaults** writes only user defaults. Other active sessions keep their
-snapshots until they explicitly `/on` or **Save & Apply**.
-
-**Save & Apply** is a second operation against the session captured when the
-menu was launched from Claude. It requires a live, compatible worker with a
-matching frozen root and config path. It never starts, replaces, retries, or
-retargets a worker. It preserves that session's on/off state. **Enable** is a
-separate action, shown only when that live session is off, not a side effect
-of saving or changing a model.
-
-Notices are distinct: `Saved defaults.`, `Saved and applied.`,
-`Saved; not applied: …`, and `Not saved: …`. A failed Apply does not undo a
-global save another editor or session may already have observed. Wrong root,
-missing identity, ended target, stale worker generation or settings revision,
-a hook still holding an affected finding, invalid config, and a worker that
-lacks the settings protocol fail visibly. Refresh the same target after
-ordinary Claude activity if the worker had gone idle; do not retry against a
-replacement. Older sessions need a **new Claude session** for live Apply; it
-is not a fallback to `/on`.
-
-Apply does not replay the last task, drain findings into the terminal, wake
-Claude, or start a provider call solely to test the choice. New reviews start
-at later ordinary observation boundaries. Preview unavailable enabled
-advisors; never keep running the previous model while showing the new one as
-active.
-
-**New or changed API key-variable names** cannot be injected into a live
-worker and cannot be read from another terminal's environment. Apply reports
-unavailable. Export the named variables in your own terminal and start a
-**new Claude session** before `/cross-model-advisor:on` or Apply, even if
-those variables were already exported somewhere else. Model-only changes that
-still use key names the live worker already has can Apply in place.
+**New or changed API key-variable names** must be exported in your own
+terminal before you start Claude. Hooks inherit Claude's environment from when
+it started, so a running session cannot see a newly exported key; start a new
+session.
 
 **OAuth.** Model-only edits reuse the existing slot credential. Changing a
 slot's upstream provider does not transfer the grant. The menu's explicit
@@ -179,10 +183,9 @@ Schema version is `2`. Version-1 files open without being rewritten. The first
 explicit Save publishes version 2, with `enabled` and `reasoningEffort` on
 every advisor (version-1 input normalizes to enabled and `default`). An older
 plugin cannot read version 2. Unknown keys and malformed entries are rejected
-before enable. There is no silent default provider or model, and the plugin
-never uses Claude's current credentials. `/cross-model-advisor:on` snapshots
-the file; edits take effect on the next explicit `on` or a successful Apply
-to that session.
+before any review. There is no silent default provider or model, and the
+plugin never uses Claude's current credentials. The gate reads the file at
+every Stop, so edits apply from the next reviewed turn.
 
 `USER_SELECTED_MODEL` below is documentation notation, not a shipped runnable
 default. Choose real model IDs. An example and schema also ship under
@@ -219,9 +222,14 @@ default. Choose real model IDs. An example and schema also ship under
     "maxToolCallsPerReview": 8,
     "maxOutputTokens": 1500,
     "maxReviewsPerAdvisorPerSession": 40
-  }
+  },
+  "gate": { "mode": "block", "maxRounds": 2 }
 }
 ```
+
+`gate.mode` is `block` or `report`; `gate.maxRounds` (1 to 5) bounds how many
+times one prompt can be sent back. `limits.reviewTimeoutSeconds` (at most 240)
+is each advisor's deadline inside the Stop hook's 300-second budget.
 
 ### Reasoning effort
 
@@ -252,9 +260,8 @@ default. Choose real model IDs. An example and schema also ship under
 - The Codex adapter does not forward a hard remote output-token ceiling. That
   is an existing transport limitation; there is no setting that adds one.
 
-An effort-only Apply updates only that advisor and cancels its old work, the
-same as a model change. Reasoning text is not shown in the menu, status, or
-logs as a consequence of this setting.
+Reasoning text is not shown in the menu, status, or logs as a consequence of
+this setting.
 
 All model calls are direct SDK requests. No installed Codex, Gemini, or other
 advisor executable is required or launched.
@@ -309,9 +316,9 @@ Use the same `CLAUDE_CONFIG_DIR` as Claude Code. Browser login opens the default
 browser (`open` on macOS, `xdg-open` on Linux), with a printed URL as fallback.
 Headless device-code login keeps manual browser instructions. Successful login
 releases terminal input and returns to the shell. Login is never started by hooks,
-`on`, `doctor`, catalog navigation, or Apply. The settings menu may hand off to
-this same helper after an explicit login action, then reacquire the terminal.
-After login, run `on` or the menu's **Enable** (only when the live session is off) to enable an unavailable advisor.
+`on`, `doctor`, or catalog navigation. The settings menu may hand off to this
+same helper after an explicit login action, then reacquire the terminal. After
+login, the advisor is available from the next reviewed turn.
 Missing, expired, revoked, or insufficiently entitled credentials never cause
 fallback to an API key, another account, or another provider. `doctor` checks
 local credential availability, not remote account validity. Token refresh happens
@@ -338,10 +345,10 @@ Old `kind: "cli"` entries are rejected. Replace them with an explicitly selected
 API/OAuth provider and log in separately; existing CLI credentials are not imported.
 
 Advisor names are unique identifiers matching `^[a-z][a-z0-9-]{0,63}$`.
-Instructions are literal strings, not commands. Activation enables only
-successfully validated advisors that are configured `enabled: true`, and names
-every unavailable advisor; disabled advisors stay off. If none are usable, the
-session stays disabled. No silent provider substitution.
+Instructions are literal strings, not commands, appended to the reviewer
+prompt. Only advisors configured `enabled: true` that validate offline review a
+turn; `on` names every unavailable one, and if none are usable the gate stays
+off. No silent provider substitution.
 
 Optional project files, neither of which can select providers, endpoints,
 credentials, binaries, budgets, or auto-enable the plugin:
@@ -350,48 +357,24 @@ credentials, binaries, budgets, or auto-enable the plugin:
 - `.cross-model-advisorignore` — additional excluded paths. Negation is
   rejected; these entries may only narrow access.
 
-The session root is recovered from stored state; for a new session it comes from
-`CLAUDE_PROJECT_DIR`, the hook's `cwd`, or a command's initial working directory.
-Activation freezes its canonical path. `/`, the home directory, and a missing
-root are refused. A later cwd/worktree move outside
-that root pauses observation until `off` and a new session rooted there.
-
-## How advice is delivered
-
-Advisors investigate with four read-only tools (`read`, `list`, `search`,
-`advise`). They do not get a shell, writes, network fetch, or Claude's hidden
-reasoning. Hook payloads are the live authority; visible transcript text is
-supplementary.
-
-Findings are injected only at `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
-and `PostToolUseFailure`, as `additionalContext`. The plugin never returns a
-permission decision, `continue: false`, Stop output, or any wake mechanism.
-
-**No-wake.** A stopped session is never restarted. Advice that finishes after
-the last tool boundary is kept for the next real user prompt or tool event. Stop
-always prints nothing.
-
-**Best-effort receipt.** The host has no receipt protocol. `status` "emitted"
-means the helper locally wrote the envelope and acknowledged it — not that
-Claude confirmed seeing it. A crash before stdout can redeliver; an
-acknowledgement followed by a host timeout can drop the injection entirely
-while the durable inbox still holds the finding. This is not exactly-once or
-at-least-once delivery.
-
-`blocker` is a label, not authority to block Claude. The primary session remains
-responsible for validating advice.
+`on` freezes the session's project root: the git top level containing
+`CLAUDE_PROJECT_DIR`, or the command's working directory. `/`, the home
+directory, and a missing root are refused. The gate snapshots that root at
+every turn regardless of where Claude later `cd`s.
 
 ## Security and disclosure
 
-Prompt text, observations, and source the advisor tools read are sent to the
-**external provider you configured**. That is intentional. Exclusions prevent
+For every reviewed turn, your request, Claude's final message, the diff, and
+source the advisor tools read are sent to the **external providers you
+configured**. That is intentional. Exclusions prevent
 tool access to designated files (`.git`, `.env` / `.env.*`, `*.pem`, `*.key`,
 `.claude`, `.codex`, `.gemini`, `node_modules`, and plugin state), plus paths
 matched by `.gitignore`, `.cross-model-advisorignore`, or user exclusions.
-They do not promise to strip secrets from prose you put in a prompt or from an
-allowed source file.
+The same exclusions filter the diff: an excluded file that changed is named,
+but its content is never sent. They do not promise to strip secrets from prose
+you put in a prompt or from an allowed source file.
 
-**Direct-provider trust boundary.** The worker and bundled SDK are trusted local
+**Direct-provider trust boundary.** The hook helpers and bundled SDK are trusted local
 code under the same OS user. Model-visible investigation is limited to the host
 tools; there is no native advisor shell, filesystem tool, or MCP bridge.
 Provider model/auth endpoints are the intentional network destinations.
@@ -401,22 +384,22 @@ stored under the Claude configuration directory (normally outside the project):
 `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cross-model-advisor/credentials`, in private
 `0600` files within `0700` directories. This is a permission-protected local token
 store, not encryption or an OS sandbox against other processes under your user.
-Writes are atomic and refresh/logout is serialized across workers. Locks are
+Writes are atomic and refresh/logout is serialized across processes. Locks are
 never stolen automatically: a crashed operation can leave `<slot>.lock` in the
 credential directory. If the helper reports a stale lock, verify that no auth
 operation for that slot is running before manually removing that lock directory,
 then retry. Do not remove the credential JSON file to repair a lock.
 The plugin does not read credentials from OMP, Claude Code, Codex, Gemini, or
-ambient SDK credential stores. Tokens are not part of observations, findings,
-or session snapshots.
+ambient SDK credential stores. Tokens are never part of a review, a finding, or
+session state.
 
-Provider conversation context is memory-only; accepted findings and session
-metadata have seven-day local retention. There are no native advisor CLI
+Provider conversations are memory-only and last one review. The last review's
+findings and session metadata have seven-day local retention. There are no native advisor CLI
 recordings. External providers apply their own retention and account policies.
 
 ## Reporting a security problem
 
-This plugin sends session observations and selected project files to external
+This plugin sends each reviewed turn's diff and selected project files to external
 providers you configure and stores OAuth credentials under your OS user, so it
 has a threat model worth reading:
 [SECURITY.md](https://github.com/dumplingsensei/codex-pr-reviewer/blob/main/SECURITY.md).

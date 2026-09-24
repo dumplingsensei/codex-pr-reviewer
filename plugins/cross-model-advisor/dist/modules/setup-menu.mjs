@@ -11,7 +11,6 @@ import {
   THINKING_LEVELS,
   validateConfig
 } from "./config.mjs";
-import { applySessionSettings, getSessionSettings } from "./control.mjs";
 import { getReasoningChoices } from "./reasoning.mjs";
 import { sanitizeText } from "./session/sanitize.mjs";
 import {
@@ -29,21 +28,9 @@ var ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 var FORBIDDEN_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
 var ACTION_ADD = "Add advisor";
 var ACTION_PROVIDERS = "Provider accounts";
-var ACTION_SAVE = "Save defaults";
-var ACTION_SAVE_APPLY = "Save & Apply";
-var ACTION_ENABLE = "Enable";
+var ACTION_SAVE = "Save";
 var ACTION_QUIT = "Quit";
 var AUTH_CHILD_KILL_MS = 2e3;
-var SETTINGS_MESSAGES = Object.freeze({
-  identity: "Session identity is missing or invalid. Apply is unavailable. You can still edit saved defaults.",
-  "no-live": "No live worker for this session. The menu will not start one. Defaults editing remains available. After ordinary Claude activity, return home to refresh this same target.",
-  protocol: "This session's worker is incompatible. Start a new Claude session. Apply is unavailable.",
-  stale: "Session settings changed. Return home to refresh this target before Apply. The menu will not retry against a replacement worker.",
-  busy: "The session is busy publishing a previous review. Wait, then return home to refresh before Apply.",
-  root: "Frozen project root does not match this terminal. Apply refused. Defaults editing remains available.",
-  config: "Config path does not match this session. Apply refused.",
-  unavailable: "This session cannot see a required API key variable. Export the variable name in your own terminal and start a new Claude session. The menu will not move keys over IPC or replace the worker."
-});
 function isAbortError(error) {
   return Boolean(
     error && (error.code === "abort" || error.name === "AbortError" || error.code === "ABORT_ERR")
@@ -76,10 +63,6 @@ function siblingExecutable(name, fromUrl = import.meta.url) {
   const here = path.dirname(fileURLToPath(fromUrl));
   if (path.basename(here) === "modules") return path.join(here, "..", name);
   return path.join(here, name);
-}
-function applyErrorText(error) {
-  const code = typeof error === "string" ? error : "";
-  return SETTINGS_MESSAGES[code] || "Apply is unavailable.";
 }
 function effortLabel(choices, value) {
   const found = choices.find((choice) => choice.value === value);
@@ -116,61 +99,11 @@ function usedSlotIds(ctx) {
 function usedAdvisorNames(ctx) {
   return new Set(ctx.draft.advisors.map((advisor) => advisor.name));
 }
-async function refreshTarget(ctx) {
-  const sessionId = ctx.env.CLAUDE_CODE_SESSION_ID?.trim() || ctx.env.CLAUDE_SESSION_ID?.trim() || "";
-  const pluginData = ctx.env.CLAUDE_PLUGIN_DATA?.trim() || "";
-  ctx.hasSessionEnv = Boolean(sessionId && pluginData);
-  if (!ctx.hasSessionEnv) {
-    ctx.target = null;
-    ctx.targetError = null;
-    return;
-  }
-  try {
-    const result = await ctx.getSessionSettings({ env: ctx.env });
-    if (result?.ok === true) {
-      ctx.target = result;
-      ctx.targetError = null;
-      return;
-    }
-    ctx.target = null;
-    ctx.targetError = typeof result?.error === "string" ? result.error : "no-live";
-  } catch {
-    ctx.target = null;
-    ctx.targetError = "no-live";
-  }
-}
-function runtimeLabel(ctx) {
-  if (!ctx.hasSessionEnv) return "Apply unavailable";
-  if (ctx.targetError) {
-    if (ctx.targetError === "no-live") return "Unavailable";
-    if (ctx.targetError === "protocol") return "Incompatible";
-    if (ctx.targetError === "stale") return "Stale";
-    if (ctx.targetError === "busy") return "Busy";
-    if (ctx.targetError === "root") return "Root mismatch";
-    if (ctx.targetError === "config") return "Config mismatch";
-    if (ctx.targetError === "unavailable") return "Key variables unavailable";
-    if (ctx.targetError === "identity") return "Apply unavailable";
-    return "Unavailable";
-  }
-  if (!ctx.target) return "Unavailable";
-  if (ctx.target.enabled !== true) return "Off";
-  if (ctx.target.paused === true) return "Paused";
-  return "Running";
-}
 function homeTitle(ctx) {
   const dirty = isDirty(ctx) ? "Unsaved changes" : "Saved";
-  const defaults = `Defaults (${dirty}): ${display(ctx.configPath)}`;
-  let target = "Target: (defaults only)    Apply unavailable";
-  if (ctx.hasSessionEnv) {
-    const session = display(ctx.target?.sessionId || ctx.env.CLAUDE_CODE_SESSION_ID || ctx.env.CLAUDE_SESSION_ID || "");
-    const root = display(ctx.target?.projectRoot || "");
-    target = `Target (${runtimeLabel(ctx)}): ${session}`;
-    if (root) target += `
-Project: ${root}`;
-  }
   return `Cross-model advisors
-${defaults}
-${target}`;
+Settings (${dirty}): ${display(ctx.configPath)}
+Saved settings apply from the next reviewed turn in every session.`;
 }
 function advisorDescription(ctx, advisor) {
   const lines = [
@@ -178,17 +111,6 @@ function advisorDescription(ctx, advisor) {
   ];
   if (ctx.staleEffort.has(advisor.name)) {
     lines.push("Reasoning effort needs reselection before save.");
-  }
-  const live = ctx.target?.ok ? ctx.target.advisors.find((row) => row.name === advisor.name) : null;
-  if (live) {
-    const liveEffort = live.reasoningEffort || "default";
-    if (live.model !== advisor.model || liveEffort !== advisor.reasoningEffort) {
-      lines.push(`Active in session: ${live.model} · ${liveEffort}`);
-    }
-    if (typeof live.error === "string" && live.error) lines.push(display(live.error));
-    if (live.enabled === true && live.available === false) {
-      lines.push("Unavailable in this session");
-    }
   }
   return lines.join("\n");
 }
@@ -201,12 +123,6 @@ function homeItems(ctx) {
   items.push({ value: ACTION_ADD, label: ACTION_ADD });
   items.push({ value: ACTION_PROVIDERS, label: ACTION_PROVIDERS });
   items.push({ value: ACTION_SAVE, label: ACTION_SAVE });
-  if (ctx.target?.ok) {
-    items.push({ value: ACTION_SAVE_APPLY, label: ACTION_SAVE_APPLY });
-    if (ctx.target.enabled !== true) {
-      items.push({ value: ACTION_ENABLE, label: ACTION_ENABLE });
-    }
-  }
   items.push({ value: ACTION_QUIT, label: ACTION_QUIT });
   return items;
 }
@@ -298,84 +214,7 @@ async function saveDraft(ctx) {
 async function saveDefaults(ctx) {
   const saved = await saveDraft(ctx);
   if (!saved) return;
-  await ctx.ui.notice({ title: "Saved defaults", text: "Saved defaults." });
-}
-async function rememberApply(ctx, result) {
-  if (result?.ok === true) {
-    ctx.target = result;
-    ctx.targetError = null;
-    return;
-  }
-  ctx.targetError = typeof result?.error === "string" ? result.error : "stale";
-  ctx.target = null;
-}
-async function saveAndApply(ctx) {
-  const saved = await saveDraft(ctx);
-  if (!saved) return;
-  if (!ctx.target?.ok) {
-    await ctx.ui.notice({
-      title: "Saved; not applied",
-      text: `Saved; not applied: ${applyErrorText(ctx.targetError)}`
-    });
-    return;
-  }
-  let result;
-  try {
-    result = await ctx.applySessionSettings({
-      env: ctx.env,
-      target: ctx.target,
-      configRevision: saved.revision
-    });
-  } catch {
-    result = { ok: false, error: "no-live" };
-  }
-  await rememberApply(ctx, result);
-  if (!result || result.ok !== true) {
-    await ctx.ui.notice({
-      title: "Saved; not applied",
-      text: `Saved; not applied: ${applyErrorText(result?.error)}`
-    });
-    return;
-  }
-  await ctx.ui.notice({ title: "Saved and applied", text: "Saved and applied." });
-}
-async function enableSession(ctx) {
-  if (isDirty(ctx)) {
-    await ctx.ui.notice({ title: "Enable", text: "Save defaults first." });
-    return;
-  }
-  if (!ctx.target?.ok) {
-    await ctx.ui.notice({ title: "Enable", text: applyErrorText(ctx.targetError) });
-    return;
-  }
-  if (ctx.revision == null) {
-    await ctx.ui.notice({ title: "Enable", text: "Save defaults first." });
-    return;
-  }
-  let result;
-  try {
-    result = await ctx.applySessionSettings({
-      env: ctx.env,
-      target: ctx.target,
-      configRevision: ctx.revision,
-      enable: true
-    });
-  } catch {
-    result = { ok: false, error: "no-live" };
-  }
-  await rememberApply(ctx, result);
-  if (!result || result.ok !== true) {
-    await ctx.ui.notice({
-      title: "Enable",
-      text: applyErrorText(result?.error)
-    });
-    return;
-  }
-  if (result.enabled !== true) {
-    await ctx.ui.notice({ title: "Enable", text: "Session remains off." });
-    return;
-  }
-  await ctx.ui.notice({ title: "Enable", text: "Enabled this session." });
+  await ctx.ui.notice({ title: "Saved", text: "Saved. Applies from the next reviewed turn." });
 }
 async function promptText(ctx, spec) {
   const raw = await ctx.ui.text({
@@ -1155,14 +994,6 @@ async function homeLoop(ctx) {
       await saveDefaults(ctx);
       continue;
     }
-    if (value === ACTION_SAVE_APPLY) {
-      await saveAndApply(ctx);
-      continue;
-    }
-    if (value === ACTION_ENABLE) {
-      await enableSession(ctx);
-      continue;
-    }
     if (value === ACTION_QUIT) {
       if (await confirmDiscard(ctx)) return 0;
       continue;
@@ -1265,8 +1096,6 @@ async function runSetupMenu(options = {}) {
     saveConfig: options.saveConfig ?? saveConfig,
     getModels: options.getModels ?? getModels,
     getProviderCatalog: options.getProviderCatalog ?? getProviderCatalog,
-    getSessionSettings: options.getSessionSettings ?? getSessionSettings,
-    applySessionSettings: options.applySessionSettings ?? applySessionSettings,
     getReasoningChoices: options.getReasoningChoices ?? getReasoningChoices,
     draft: emptyConfig(),
     saved: null,
@@ -1274,9 +1103,6 @@ async function runSetupMenu(options = {}) {
     configPath: "",
     configError: null,
     staleEffort: /* @__PURE__ */ new Set(),
-    target: null,
-    targetError: null,
-    hasSessionEnv: false,
     catalog: []
   };
   try {
@@ -1299,7 +1125,6 @@ async function runSetupMenu(options = {}) {
     } catch {
       ctx.catalog = [];
     }
-    await refreshTarget(ctx);
     return await homeLoop(ctx);
   } catch (error) {
     if (isAbortError(error)) return 0;

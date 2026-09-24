@@ -3,18 +3,16 @@
  * Offline setup helper CLI. Dispatches catalog/models/save through the shared
  * store, prints a safe menu launcher, and opens the terminal menu. No login,
  * no network, no credential reads, and no session activation from catalog
- * or save. Menu Apply uses the live session client only.
+ * or save.
  */
 
 import { fileURLToPath } from "node:url";
 import { SetupError, main as storeMain } from "./setup-store.mjs";
 import { runSetupMenu } from "./setup-menu.mjs";
-import { explicitPluginData } from "./session/paths.mjs";
 import { sanitizeText } from "./session/sanitize.mjs";
 import { formatMenuCommand, resolvedPath } from "./terminal-command.mjs";
 
-const USAGE =
-  "usage: setup-control.mjs catalog|models <provider-id>|save|menu|menu-command [--plugin-data <path>]";
+const USAGE = "usage: setup-control.mjs catalog|models <provider-id>|save|menu|menu-command";
 const MAX_ERROR_CHARS = 500;
 
 /**
@@ -47,21 +45,8 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 
   if (command === "menu-command") {
     try {
-      // The setup skill names this plugin's data: the Bash tool environment
-      // does not carry it, and another plugin may have exported its own.
-      let launchEnv = env;
-      if (argv.length === 3 && argv[1] === "--plugin-data") {
-        let pluginData;
-        try {
-          pluginData = explicitPluginData(argv[2]);
-        } catch {
-          throw new SetupError("usage", USAGE);
-        }
-        launchEnv = { ...env, CLAUDE_PLUGIN_DATA: pluginData };
-      } else if (argv.length !== 1) {
-        throw new SetupError("usage", USAGE);
-      }
-      process.stdout.write(`${formatMenuCommand({ env: launchEnv, helperPath })}\n`);
+      if (argv.length !== 1) throw new SetupError("usage", USAGE);
+      process.stdout.write(`${formatMenuCommand({ env, helperPath })}\n`);
     } catch (error) {
       writeFailure(process.stderr, error);
       process.exitCode = 1;

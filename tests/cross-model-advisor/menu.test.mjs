@@ -29,9 +29,6 @@ const load = (rel) => import(pathToFileURL(path.join(distModules, rel)).href);
 
 const { runSetupMenu } = await load("setup-menu.mjs");
 const { getModels } = await load("setup-store.mjs");
-const { getSessionSettings } = await load("control.mjs");
-const { startWorker } = await load("worker.mjs");
-const { requestIpc } = await load("session/ipc.mjs");
 
 const scratchDirs = [];
 
@@ -78,7 +75,7 @@ async function makeWorld(prefix = "cma-menu-") {
   scratchDirs.push(root, data, configDir, home);
   const configFile = path.join(configDir, "cross-model-advisor.json");
   const sessionId = `menu-${randomUUID().slice(0, 8)}`;
-  return { root, data, configDir, home, configFile, sessionId, worker: null };
+  return { root, data, configDir, home, configFile, sessionId };
 }
 
 function sessionEnv(world, extra = {}) {
@@ -103,73 +100,6 @@ async function writeConfig(file, config) {
 
 async function readConfig(file) {
   return JSON.parse(await fs.readFile(file, "utf8"));
-}
-
-function makeTools() {
-  return {
-    async call() {
-      return { ok: true };
-    },
-    async isFresh() {
-      return true;
-    },
-    guidance: ""
-  };
-}
-
-async function bootWorker(world, extra = {}) {
-  const env = sessionEnv(world, extra);
-  let reviews = 0;
-  const worker = await startWorker({
-    sessionId: extra.sessionId ?? world.sessionId,
-    projectRoot: extra.projectRoot ?? world.root,
-    pluginData: world.data,
-    env,
-    exitOnIdle: false,
-    idleMs: Number.POSITIVE_INFINITY,
-    debounceMs: 0,
-    loadConfig: async () => JSON.parse(await fs.readFile(world.configFile, "utf8")),
-    configFilePath: () => world.configFile,
-    readConfigState: async () => {
-      const raw = await fs.readFile(world.configFile);
-      return {
-        path: world.configFile,
-        revision: createHash("sha256").update(raw).digest("hex"),
-        config: JSON.parse(raw.toString("utf8")),
-        configError: null
-      };
-    },
-    snapshotRoot: async () => {
-      const listing = await fs.lstat(world.root);
-      return { path: world.root, dev: listing.dev, ino: listing.ino };
-    },
-    validateRoot: async () => world.root,
-    runtimeErrors: () => [],
-    createReviewTools: async () => makeTools(),
-    validateApi: extra.validateApi ?? (async () => ({ available: true })),
-    reviewApi:
-      extra.reviewApi ??
-      (async () => {
-        reviews += 1;
-        return { usage: { costUsd: "unknown" }, history: [] };
-      }),
-    advisorSystemPrompt: "inspect independently"
-  });
-  world.worker = worker;
-  world.reviews = () => reviews;
-  const rpc = (op, more = {}, timeoutMs = 2500) =>
-    requestIpc(
-      worker.socketPath,
-      { capability: worker.controlCapability, op, ...more },
-      { timeoutMs }
-    );
-  return { worker, rpc, env };
-}
-
-async function stopWorker(world) {
-  if (!world.worker) return;
-  await world.worker.stop({ reason: "test" }).catch(() => {});
-  world.worker = null;
 }
 
 function fakeIo() {
@@ -284,7 +214,7 @@ test("v1 config opens without mutation and explicit save writes v2", async () =>
     if (kind === "choose" && isHome(opts)) {
       if (!saveUi._saved) {
         saveUi._saved = true;
-        return select(opts.items, "Save defaults");
+        return select(opts.items, "Save");
       }
       return select(opts.items, "Quit");
     }
@@ -296,151 +226,55 @@ test("v1 config opens without mutation and explicit save writes v2", async () =>
   assert.equal(written.advisors[0].enabled, true);
   assert.equal(written.advisors[0].reasoningEffort, "default");
   assert.deepEqual(written.exclude, ["tmp/**"]);
-  assert.ok(saveUi.notices.some((note) => note.title === "Saved defaults"));
+  assert.ok(saveUi.notices.some((note) => note.title === "Saved"));
 });
 
-test("luna model and high effort save-apply without starting a review", async () => {
+test("luna model and high effort are saved from the advisor editor", async () => {
   const world = await makeWorld("cma-luna-");
   await writeConfig(world.configFile, configV2());
-  const { rpc, env } = await bootWorker(world);
-  try {
-    await rpc("on");
-    const before = (await rpc("status")).result;
-    const ui = scriptedUi(async (kind, opts) => {
-      if (kind === "choose" && isHome(opts)) {
-        if (!ui._edited) {
-          ui._edited = true;
-          return select(opts.items, "architecture");
-        }
-        if (!ui._applied) {
-          ui._applied = true;
-          return select(opts.items, "Save & Apply");
-        }
-        return select(opts.items, "Quit");
+  const ui = scriptedUi(async (kind, opts) => {
+    if (kind === "choose" && isHome(opts)) {
+      // Saved settings apply at the next reviewed turn; the menu names no session.
+      assert.ok(!opts.items.some((item) => /Apply|Enable/.test(item.label)));
+      if (!ui._edited) {
+        ui._edited = true;
+        return select(opts.items, "architecture");
       }
-      if (kind === "choose" && isEditor(opts)) {
-        if (!ui._model) {
-          ui._model = true;
-          return select(opts.items, "Model");
-        }
-        if (!ui._effort) {
-          ui._effort = true;
-          return select(opts.items, "Reasoning effort");
-        }
-        return null;
+      if (!ui._saved) {
+        ui._saved = true;
+        return select(opts.items, "Save");
       }
-      if (kind === "choose" && opts.load && /Model/.test(opts.title)) {
-        const page = await opts.load({ query: "luna", offset: 0, limit: 40 });
-        const hit = page.items.find((item) => item.value === "gpt-5.6-luna" || /luna/i.test(item.label));
-        assert.ok(hit, `luna missing from ${page.items.map((item) => item.value).join(",")}`);
-        return { action: "select", value: hit.value };
+      return select(opts.items, "Quit");
+    }
+    if (kind === "choose" && isEditor(opts)) {
+      if (!ui._model) {
+        ui._model = true;
+        return select(opts.items, "Model");
       }
-      if (kind === "choose" && /Reasoning effort/.test(opts.title)) {
-        return select(opts.items, /^High$|High/);
+      if (!ui._effort) {
+        ui._effort = true;
+        return select(opts.items, "Reasoning effort");
       }
-      throw new Error(`unexpected ${kind}\n${dumpItems(opts)}`);
-    });
-    await runMenu(world, ui, { env });
-    const written = await readConfig(world.configFile);
-    const architecture = advisorNamed(written.advisors, "architecture");
-    assert.equal(architecture.model, "gpt-5.6-luna");
-    assert.equal(architecture.reasoningEffort, "high");
-    assert.deepEqual(written.exclude, ["tmp/**"]);
-    const settings = await getSessionSettings({ env });
-    assert.equal(settings.ok, true);
-    assert.equal(advisorNamed(settings.advisors, "architecture").model, "gpt-5.6-luna");
-    assert.equal(advisorNamed(settings.advisors, "architecture").reasoningEffort, "high");
-    assert.equal(world.reviews(), 0);
-    assert.equal((await rpc("status")).result.enabled, before.enabled);
-    assert.ok(ui.notices.some((note) => note.title === "Saved and applied"));
-  } finally {
-    await stopWorker(world);
-  }
-});
-
-test("save defaults leaves the live snapshot unchanged", async () => {
-  const world = await makeWorld("cma-saveonly-");
-  await writeConfig(world.configFile, configV2());
-  const { rpc, env } = await bootWorker(world);
-  try {
-    await rpc("on");
-    const ui = scriptedUi(async (kind, opts) => {
-      if (kind === "choose" && isHome(opts)) {
-        if (!ui._edited) {
-          ui._edited = true;
-          return select(opts.items, "architecture");
-        }
-        if (!ui._saved) {
-          ui._saved = true;
-          return select(opts.items, "Save defaults");
-        }
-        return select(opts.items, "Quit");
-      }
-      if (kind === "choose" && isEditor(opts)) {
-        if (!ui._model) {
-          ui._model = true;
-          return select(opts.items, "Model");
-        }
-        return null;
-      }
-      if (kind === "choose" && opts.load && /Model/.test(opts.title)) {
-        const page = await opts.load({ query: "luna", offset: 0, limit: 40 });
-        const hit = page.items.find((item) => item.value === "gpt-5.6-luna");
-        return { action: "select", value: hit.value };
-      }
-      throw new Error(`unexpected ${kind}\n${dumpItems(opts)}`);
-    });
-    await runMenu(world, ui, { env });
-    assert.equal((await readConfig(world.configFile)).advisors[0].model, "gpt-5.6-luna");
-    const status = (await rpc("status")).result;
-    assert.equal(advisorNamed(status.advisors, "architecture").model, "gpt-5");
-    assert.equal(world.reviews(), 0);
-    assert.ok(ui.notices.some((note) => note.title === "Saved defaults"));
-  } finally {
-    await stopWorker(world);
-  }
-});
-
-test("Save & Apply reports saved-not-applied when apply fails and keeps the save", async () => {
-  const world = await makeWorld("cma-notapplied-");
-  await writeConfig(world.configFile, configV2());
-  const { env } = await bootWorker(world);
-  try {
-    const ui = scriptedUi(async (kind, opts) => {
-      if (kind === "choose" && isHome(opts)) {
-        if (!ui._edited) {
-          ui._edited = true;
-          return select(opts.items, "architecture");
-        }
-        if (!ui._applied) {
-          ui._applied = true;
-          return select(opts.items, "Save & Apply");
-        }
-        return select(opts.items, "Quit");
-      }
-      if (kind === "choose" && isEditor(opts)) {
-        if (!ui._model) {
-          ui._model = true;
-          return select(opts.items, "Model");
-        }
-        return null;
-      }
-      if (kind === "choose" && opts.load && /Model/.test(opts.title)) {
-        const page = await opts.load({ query: "luna", offset: 0, limit: 40 });
-        return { action: "select", value: page.items.find((item) => item.value === "gpt-5.6-luna").value };
-      }
-      throw new Error(`unexpected ${kind}\n${dumpItems(opts)}`);
-    });
-    await runMenu(world, ui, {
-      env,
-      applySessionSettings: async () => ({ ok: false, error: "no-live" })
-    });
-    assert.equal((await readConfig(world.configFile)).advisors[0].model, "gpt-5.6-luna");
-    assert.ok(ui.notices.some((note) => note.title === "Saved; not applied"));
-    assert.equal(world.reviews(), 0);
-  } finally {
-    await stopWorker(world);
-  }
+      return null;
+    }
+    if (kind === "choose" && opts.load && /Model/.test(opts.title)) {
+      const page = await opts.load({ query: "luna", offset: 0, limit: 40 });
+      const hit = page.items.find((item) => item.value === "gpt-5.6-luna" || /luna/i.test(item.label));
+      assert.ok(hit, `luna missing from ${page.items.map((item) => item.value).join(",")}`);
+      return { action: "select", value: hit.value };
+    }
+    if (kind === "choose" && /Reasoning effort/.test(opts.title)) {
+      return select(opts.items, /^High$|High/);
+    }
+    throw new Error(`unexpected ${kind}\n${dumpItems(opts)}`);
+  });
+  await runMenu(world, ui);
+  const written = await readConfig(world.configFile);
+  const architecture = advisorNamed(written.advisors, "architecture");
+  assert.equal(architecture.model, "gpt-5.6-luna");
+  assert.equal(architecture.reasoningEffort, "high");
+  assert.deepEqual(written.exclude, ["tmp/**"]);
+  assert.ok(ui.notices.some((note) => note.title === "Saved"));
 });
 
 test("discard on dirty cancel leaves disk unchanged", async () => {
@@ -475,8 +309,7 @@ test("non-TTY menu prints the launcher and writes nothing", async () => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /Open this menu in your own terminal/);
   assert.match(result.stderr, /CLAUDE_CONFIG_DIR=/);
-  assert.match(result.stderr, /CLAUDE_SESSION_ID=''/);
-  assert.match(result.stderr, /CLAUDE_PROJECT_DIR=''/);
+  assert.doesNotMatch(result.stderr, /CLAUDE_PLUGIN_DATA|SESSION_ID/);
   assert.doesNotMatch(result.stderr, /menu-command/);
   assert.equal(createHash("sha256").update(await fs.readFile(world.configFile)).digest("hex"), revision);
 });
@@ -515,7 +348,7 @@ test("space toggle, multi-provider add, last advisor removal, and literal instru
       }
       if (!ui._savedOnce) {
         ui._savedOnce = true;
-        return select(opts.items, "Save defaults");
+        return select(opts.items, "Save");
       }
       if (!ui._removed) {
         const saved = await readConfig(world.configFile);
@@ -526,7 +359,7 @@ test("space toggle, multi-provider add, last advisor removal, and literal instru
       }
       if (!ui._savedEmpty) {
         ui._savedEmpty = true;
-        return select(opts.items, "Save defaults");
+        return select(opts.items, "Save");
       }
       return select(opts.items, "Quit");
     }
@@ -679,7 +512,7 @@ test("model paging uses load offsets and unsupported effort must be reselected",
       }
       if (!ui._triedSave) {
         ui._triedSave = true;
-        return select(opts.items, "Save defaults");
+        return select(opts.items, "Save");
       }
       if (!ui._fix) {
         ui._fix = true;
@@ -687,7 +520,7 @@ test("model paging uses load offsets and unsupported effort must be reselected",
       }
       if (!ui._saved) {
         ui._saved = true;
-        return select(opts.items, "Save defaults");
+        return select(opts.items, "Save");
       }
       return select(opts.items, "Quit");
     }
@@ -768,7 +601,7 @@ test("revision conflict refuses overwrite and offers reload or discard", async (
       if (!ui._saving) {
         ui._saving = true;
         await writeConfig(world.configFile, outsider);
-        return select(opts.items, "Save defaults");
+        return select(opts.items, "Save");
       }
       if (!ui._keptDraft) {
         ui._keptDraft = true;
@@ -781,7 +614,7 @@ test("revision conflict refuses overwrite and offers reload or discard", async (
         const arch = pick(opts.items, "architecture");
         assert.match(`${arch.description}`, /gpt-5\.6-luna/);
         await writeConfig(world.configFile, outsider);
-        return select(opts.items, "Save defaults");
+        return select(opts.items, "Save");
       }
       if (!ui._afterReload) {
         ui._afterReload = true;
@@ -889,45 +722,13 @@ test("menu-command quotes spaces and apostrophes and never reads secrets", async
   const line = result.stdout.trim().split("\n").filter(Boolean).at(-1) ?? "";
   assert.match(line, / menu$/);
   assert.ok(line.includes(`CLAUDE_CONFIG_DIR=${posixQuote(path.resolve(configDir))}`));
-  assert.ok(line.includes(`CLAUDE_PLUGIN_DATA=${posixQuote(path.resolve(pluginData))}`));
-  assert.ok(line.includes(`CLAUDE_CODE_SESSION_ID=${posixQuote("sess-quote")}`));
-  assert.ok(line.includes(`CLAUDE_SESSION_ID=${posixQuote("")}`));
-  assert.ok(line.includes(`CLAUDE_PROJECT_DIR=${posixQuote("")}`));
+  // The menu edits saved settings only; it names no session.
+  assert.doesNotMatch(line, /CLAUDE_PLUGIN_DATA|CLAUDE_CODE_SESSION_ID|CLAUDE_SESSION_ID|CLAUDE_PROJECT_DIR/);
   const helper = posixQuote(fsSync.realpathSync(SETUP_HELPER));
   assert.ok(line.includes(`node ${helper} menu`));
   assert.doesNotMatch(line, /sk-live-secret|cap-secret-value|controlCapability|architecture/);
-  const cleared = await runSetupCli(["menu-command"], sessionEnv(world, {
-    env: {
-      CLAUDE_CONFIG_DIR: configDir,
-      CLAUDE_PLUGIN_DATA: "",
-      CLAUDE_CODE_SESSION_ID: "",
-      CLAUDE_SESSION_ID: "stale-session",
-      CLAUDE_PROJECT_DIR: world.root
-    }
-  }), { cwd: world.root });
-  const defaults = cleared.stdout.trim().split("\n").filter(Boolean).at(-1) ?? "";
-  assert.ok(defaults.includes(`CLAUDE_CODE_SESSION_ID=${posixQuote("")}`));
-  assert.ok(defaults.includes(`CLAUDE_PLUGIN_DATA=${posixQuote("")}`));
-  assert.ok(defaults.includes(`CLAUDE_SESSION_ID=${posixQuote("")}`));
-  assert.ok(defaults.includes(`CLAUDE_PROJECT_DIR=${posixQuote("")}`));
-  assert.doesNotMatch(defaults, /stale-session/);
-  // The setup skill names the plugin data; another plugin's exported value loses.
-  const named = await runSetupCli(["menu-command", "--plugin-data", pluginData], sessionEnv(world, {
-    env: {
-      CLAUDE_CONFIG_DIR: configDir,
-      CLAUDE_PLUGIN_DATA: path.join(world.root, "other-plugin-data"),
-      CLAUDE_CODE_SESSION_ID: "sess-quote",
-      CLAUDE_PROJECT_DIR: world.root
-    }
-  }), { cwd: world.root });
-  assert.equal(named.status, 0, named.stderr);
-  const bound = named.stdout.trim().split("\n").filter(Boolean).at(-1) ?? "";
-  assert.ok(bound.includes(`CLAUDE_PLUGIN_DATA=${posixQuote(path.resolve(pluginData))}`));
-  assert.doesNotMatch(bound, /other-plugin-data/);
-  const unsubstituted = await runSetupCli(["menu-command", "--plugin-data", "${CLAUDE_PLUGIN_DATA}"], env, {
-    cwd: world.root
-  });
-  assert.notEqual(unsubstituted.status, 0);
+  const extra = await runSetupCli(["menu-command", "--plugin-data", pluginData], env, { cwd: world.root });
+  assert.notEqual(extra.status, 0);
 });
 
 test("oauth login suspends the menu, runs the injected helper, and reacquires", async () => {

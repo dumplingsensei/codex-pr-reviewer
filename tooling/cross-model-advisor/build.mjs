@@ -4,7 +4,7 @@
  *
  * - Every source module is emitted to `dist/modules/<source-relative-path>`
  *   with in-plugin relative imports preserved and npm dependencies bundled.
- * - Control, worker, auth-control, and setup-control modules are also emitted as
+ * - Control, gate, auth-control, and setup-control modules are also emitted as
  *   executable entry points at `dist/<name>.mjs`.
  * - Dependencies resolve from this tooling directory via esbuild `nodePaths`.
  *
@@ -21,7 +21,7 @@ const pluginRoot = path.join(repoRoot, "plugins/cross-model-advisor");
 const srcRoot = path.join(pluginRoot, "src");
 const nodeModules = path.join(toolingRoot, "node_modules");
 
-const ENTRY_FILES = ["control.mjs", "worker.mjs", "auth-control.mjs", "setup-control.mjs"];
+const ENTRY_FILES = ["control.mjs", "gate.mjs", "auth-control.mjs", "setup-control.mjs"];
 
 /** Provider factories/catalogs that may appear in a bundle. */
 const ALLOWED_PROVIDER_FILES = new Set([

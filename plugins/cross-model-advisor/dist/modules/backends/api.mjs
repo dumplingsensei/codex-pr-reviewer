@@ -24419,7 +24419,41 @@ function renderObservations(observations, secret) {
 ${body}` : "No new session observations.";
   return redactSecret(text, secret);
 }
-function renderTaskContext({ observations, latestTask, compactSummary }, secret) {
+function renderTurn(turn, secret) {
+  const parts = [];
+  if (typeof turn.request === "string" && turn.request.trim()) {
+    parts.push(`[eventId: request] The user's request for this turn:
+${turn.request}`);
+  }
+  if (typeof turn.final === "string" && turn.final.trim()) {
+    parts.push(`[eventId: final] Claude's final message for this turn (its claim, not evidence):
+${turn.final}`);
+  }
+  if (Array.isArray(turn.previous) && turn.previous.length) {
+    const lines = turn.previous.map((item) => `- [${item.severity}] ${item.advisor}: ${item.note}`);
+    parts.push(
+      `This is review round ${turn.round ?? 2}. Findings from the previous round, which Claude was asked to address or rebut:
+${lines.join("\n")}`
+    );
+  }
+  const files = Array.isArray(turn.diff?.files) ? turn.diff.files : [];
+  const header = `Changes made during this turn, measured by git (${files.length} file${files.length === 1 ? "" : "s"}):`;
+  const bodies = files.map((file) => {
+    const label = file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path;
+    return `[eventId: ${file.eventId}] ${file.status} ${label}
+${file.text}`;
+  });
+  parts.push([header, ...bodies].join("\n\n"));
+  if (Array.isArray(turn.diff?.omitted) && turn.diff.omitted.length) {
+    parts.push(`Changed but excluded from review by policy (content withheld): ${turn.diff.omitted.join(", ")}`);
+  }
+  if (Array.isArray(turn.diff?.unshown) && turn.diff.unshown.length) {
+    parts.push(`Changed but not shown (diff size limit); read them if they matter: ${turn.diff.unshown.join(", ")}`);
+  }
+  return redactSecret(parts.join("\n\n"), secret);
+}
+function renderTaskContext({ observations, latestTask, compactSummary, turn }, secret) {
+  if (turn && typeof turn === "object") return renderTurn(turn, secret);
   const parts = [];
   const compactText = compactSummary && typeof compactSummary === "object" ? compactSummary.text : compactSummary;
   if (typeof compactText === "string" && compactText.trim()) {
@@ -24477,6 +24511,10 @@ function stagedCandidate(tools) {
   if (!tools) return null;
   if (typeof tools.candidate === "function") return tools.candidate();
   return tools.candidate ?? null;
+}
+function reviewDone(tools) {
+  if (typeof tools?.done === "boolean") return tools.done;
+  return Boolean(stagedCandidate(tools));
 }
 function abortCode(signal) {
   const reason = signal?.reason;
@@ -24653,6 +24691,7 @@ async function reviewApi({
   history = [],
   latestTask,
   compactSummary,
+  turn,
   systemPrompt = "",
   tools,
   limits = {},
@@ -24689,7 +24728,7 @@ async function reviewApi({
   const system = [systemPrompt, guidance].filter((part) => typeof part === "string" && part.length > 0).join("\n\n");
   const currentUser = {
     role: "user",
-    content: renderTaskContext({ observations, latestTask, compactSummary }, apiKey),
+    content: renderTaskContext({ observations, latestTask, compactSummary, turn }, apiKey),
     timestamp: Date.now()
   };
   const messages = [...copyHistory(history), currentUser];
@@ -24786,7 +24825,7 @@ async function reviewApi({
         toolCalls += 1;
       }
       if (signal?.aborted) fail(abortCode(signal), "review aborted");
-      if (stagedCandidate(tools)) break;
+      if (reviewDone(tools)) break;
     }
   } catch (error) {
     const wrapped = wrapThrown(error, signal, apiKey, kind);

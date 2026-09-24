@@ -1,45 +1,22 @@
 ---
 name: doctor
-description: Check runtime, configuration, provider availability, bundle, and IPC without calling paid models.
+description: Check the runtime, configuration, git, provider availability, and bundle for the review gate, without calling a model.
 disable-model-invocation: true
-allowed-tools: Bash(node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" doctor --plugin-data "${CLAUDE_PLUGIN_DATA}")
+allowed-tools: Bash(node "${CLAUDE_PLUGIN_ROOT}/dist/gate.mjs" doctor --plugin-data "${CLAUDE_PLUGIN_DATA}")
 ---
 
-Diagnose whether cross-model advisors can run in **this session** (`${CLAUDE_SESSION_ID}`).
-
-This skill has no arguments. Do not append user text to the helper.
+Diagnose whether the review gate can run in **this session** (`${CLAUDE_SESSION_ID}`). This skill has no arguments; do not append user text to the helper.
 
 ## Run
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/dist/control.mjs" doctor --plugin-data "${CLAUDE_PLUGIN_DATA}"
+node "${CLAUDE_PLUGIN_ROOT}/dist/gate.mjs" doctor --plugin-data "${CLAUDE_PLUGIN_DATA}"
 ```
 
-The helper reads session identity from `CLAUDE_CODE_SESSION_ID` (or `CLAUDE_SESSION_ID`). Plugin data comes only from the `--plugin-data` path Claude Code substituted above: the Bash tool does not export this plugin's `CLAUDE_PLUGIN_DATA`, and another plugin may have exported its own. It reuses the stored session root. For a new session without stored state, it uses `CLAUDE_PROJECT_DIR` when available, otherwise the command's working directory. Run the command exactly as written. Do not pass other paths, session ids, or `$ARGUMENTS`, or export replacement identity variables.
+Run it exactly as written. Claude Code substitutes the plugin-data path; do not pass other paths or session ids.
 
 ## Report
 
-Show the helper's stdout. It should cover:
+Report `ok`, then each failing area and its message: runtime (Node 22.19.0 or newer on macOS or Linux), configuration, git (the project must be a git work tree), API key variables that are missing (names only), advisors that are unavailable and why, and missing bundle files.
 
-- Node and host/OS versus the runtime baseline (Claude Code 2.1.252+, Node 22.19.0+, macOS or Linux)
-- configuration file `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cross-model-advisor.json`
-- presence of named key variables (names only, never values)
-- configured providers: slot, upstream id, kind, availability, and a static error when unavailable
-- bundle completeness (`control.mjs`, `worker.mjs`, `auth-control.mjs`, `setup-control.mjs`) and IPC access
-
-OAuth availability is offline credential status only. If a slot is unavailable, do not start login from this skill.
-
-Missing bundle entries make both `bundle.ok` and the overall `ok` false.
-Without `CLAUDE_PLUGIN_ROOT`, the worker resolves its plugin root from its own
-file location, not the project directory. After a plugin update, restart Claude
-to replace any already-running worker before diagnosing the updated bundle.
-
-Do **not**:
-
-- make a paid model request
-- start a login flow, print a token, or install anything
-- print API keys, tokens, or credential file contents
-- enable advisors (`on`) or start a review
-- run `status` or `off`
-
-If the helper exits non-zero, show stderr and stop.
+Doctor is offline. It does not call a model, refresh OAuth, or log in, and an `available` advisor is not proof that the remote account accepts requests. Do not print secret values or credential files.

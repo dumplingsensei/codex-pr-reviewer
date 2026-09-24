@@ -4,7 +4,6 @@ import { createRequire as __cmaCreateRequire } from "node:module"; const require
 import fs from "node:fs";
 import path from "node:path";
 import { configFilePath } from "./config.mjs";
-import { validateSessionId } from "./session/paths.mjs";
 function posixQuote(value) {
   const text = String(value);
   if (text.length === 0) return "''";
@@ -36,25 +35,7 @@ function formatLoginCommand({ env = process.env, helperPath, slot }) {
 }
 function formatMenuCommand({ env = process.env, helperPath }) {
   const configDir = path.dirname(path.resolve(configFilePath(env)));
-  const sessionId = env.CLAUDE_CODE_SESSION_ID?.trim() || env.CLAUDE_SESSION_ID?.trim() || "";
-  const pluginData = env.CLAUDE_PLUGIN_DATA?.trim() || "";
-  let validId = "";
-  try {
-    if (sessionId) validId = validateSessionId(sessionId);
-  } catch {
-    validId = "";
-  }
-  const bind = Boolean(validId && pluginData && path.isAbsolute(pluginData));
-  return formatEnvCommand(
-    [
-      ["CLAUDE_CONFIG_DIR", configDir],
-      ["CLAUDE_CODE_SESSION_ID", bind ? validId : ""],
-      ["CLAUDE_PLUGIN_DATA", bind ? path.resolve(pluginData) : ""],
-      ["CLAUDE_SESSION_ID", ""],
-      ["CLAUDE_PROJECT_DIR", ""]
-    ],
-    ["node", helperPath, "menu"]
-  );
+  return formatEnvCommand([["CLAUDE_CONFIG_DIR", configDir]], ["node", helperPath, "menu"]);
 }
 export {
   formatEnvCommand,

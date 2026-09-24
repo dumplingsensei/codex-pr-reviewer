@@ -6,7 +6,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { configFilePath } from "./config.mjs";
-import { validateSessionId } from "./session/paths.mjs";
 
 /**
  * @param {unknown} value
@@ -55,35 +54,13 @@ export function formatLoginCommand({ env = process.env, helperPath, slot }) {
 }
 
 /**
- * Safely quoted menu launcher. Captures the installed helper and config
- * directory. Validated session id and plugin-data are pinned when both are
- * present and well-formed. CLAUDE_SESSION_ID and CLAUDE_PROJECT_DIR are
- * always cleared so a stale shell value cannot retarget or reject Apply;
- * the worker's stored root remains authority. Without a valid session pair,
- * session/plugin-data are also cleared. Never reads config, credentials, or
- * capabilities.
+ * Safely quoted menu launcher: the installed helper plus the config
+ * directory it edits. The menu edits saved settings only, so no session is
+ * named. Never reads config, credentials, or capabilities.
  *
  * @param {{ env?: NodeJS.ProcessEnv, helperPath: string }} options
  */
 export function formatMenuCommand({ env = process.env, helperPath }) {
   const configDir = path.dirname(path.resolve(configFilePath(env)));
-  const sessionId = env.CLAUDE_CODE_SESSION_ID?.trim() || env.CLAUDE_SESSION_ID?.trim() || "";
-  const pluginData = env.CLAUDE_PLUGIN_DATA?.trim() || "";
-  let validId = "";
-  try {
-    if (sessionId) validId = validateSessionId(sessionId);
-  } catch {
-    validId = "";
-  }
-  const bind = Boolean(validId && pluginData && path.isAbsolute(pluginData));
-  return formatEnvCommand(
-    [
-      ["CLAUDE_CONFIG_DIR", configDir],
-      ["CLAUDE_CODE_SESSION_ID", bind ? validId : ""],
-      ["CLAUDE_PLUGIN_DATA", bind ? path.resolve(pluginData) : ""],
-      ["CLAUDE_SESSION_ID", ""],
-      ["CLAUDE_PROJECT_DIR", ""]
-    ],
-    ["node", helperPath, "menu"]
-  );
+  return formatEnvCommand([["CLAUDE_CONFIG_DIR", configDir]], ["node", helperPath, "menu"]);
 }

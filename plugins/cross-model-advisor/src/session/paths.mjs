@@ -1,6 +1,6 @@
 /**
- * Session directory layout and identity checks. Locator and control
- * capability live only under the private plugin-data session directory.
+ * Session directory layout and identity checks. Session state lives only under
+ * the private plugin-data session directory.
  */
 
 import fs from "node:fs/promises";
@@ -48,9 +48,7 @@ export function sessionDir(pluginData, sessionId) {
   return path.join(pluginData, "sessions", validateSessionId(sessionId));
 }
 
-export const locatorPath = (dir) => path.join(dir, "locator.json");
 export const statePath = (dir) => path.join(dir, "state.json");
-export const lockDir = (dir) => path.join(dir, "lock");
 export const errorLogPath = (dir) => path.join(dir, "errors.log");
 
 /**
@@ -110,41 +108,6 @@ export function userConfigPath(env = process.env) {
 
 
 /**
- * @param {string} pluginData
- * @param {string} sessionId
- */
-export async function readLocator(pluginData, sessionId) {
-  const file = locatorPath(sessionDir(pluginData, sessionId));
-  try {
-    const raw = await fs.readFile(file, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Frozen session project root from persisted state. Null when unbound.
- * @param {string} pluginData
- * @param {string} sessionId
- */
-export async function readSessionProjectRoot(pluginData, sessionId) {
-  try {
-    const raw = await fs.readFile(statePath(sessionDir(pluginData, sessionId)), "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed.projectRoot !== "string" || !path.isAbsolute(parsed.projectRoot)) {
-      return null;
-    }
-    return parsed.projectRoot;
-  } catch {
-    return null;
-  }
-}
-
-
-/**
  * True when `pid` still refers to a live process of this user.
  * @param {unknown} pid
  */
@@ -157,13 +120,4 @@ export function pidIsLive(pid) {
   } catch {
     return false;
   }
-}
-
-/**
- * Short Unix socket path in a private mkdtemp directory.
- */
-export async function createSocketDir() {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cma"));
-  await fs.chmod(dir, DIR_MODE).catch(() => {});
-  return { dir, socketPath: path.join(dir, "s") };
 }

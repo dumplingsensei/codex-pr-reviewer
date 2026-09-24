@@ -23,9 +23,7 @@ function explicitPluginData(value) {
 function sessionDir(pluginData, sessionId) {
   return path.join(pluginData, "sessions", validateSessionId(sessionId));
 }
-var locatorPath = (dir) => path.join(dir, "locator.json");
 var statePath = (dir) => path.join(dir, "state.json");
-var lockDir = (dir) => path.join(dir, "lock");
 var errorLogPath = (dir) => path.join(dir, "errors.log");
 async function ensurePrivateDir(dir) {
   await fs.mkdir(dir, { recursive: true, mode: DIR_MODE });
@@ -57,29 +55,6 @@ function readIdentity(env = process.env, payload = {}) {
 function userConfigPath(env = process.env) {
   return path.join(readIdentity(env).configDir, "cross-model-advisor.json");
 }
-async function readLocator(pluginData, sessionId) {
-  const file = locatorPath(sessionDir(pluginData, sessionId));
-  try {
-    const raw = await fs.readFile(file, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-async function readSessionProjectRoot(pluginData, sessionId) {
-  try {
-    const raw = await fs.readFile(statePath(sessionDir(pluginData, sessionId)), "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed.projectRoot !== "string" || !path.isAbsolute(parsed.projectRoot)) {
-      return null;
-    }
-    return parsed.projectRoot;
-  } catch {
-    return null;
-  }
-}
 function pidIsLive(pid) {
   const n = Number(pid);
   if (!Number.isInteger(n) || n <= 0) return false;
@@ -90,25 +65,14 @@ function pidIsLive(pid) {
     return false;
   }
 }
-async function createSocketDir() {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cma"));
-  await fs.chmod(dir, DIR_MODE).catch(() => {
-  });
-  return { dir, socketPath: path.join(dir, "s") };
-}
 export {
   atomicWriteFile,
   atomicWriteJson,
-  createSocketDir,
   ensurePrivateDir,
   errorLogPath,
   explicitPluginData,
-  locatorPath,
-  lockDir,
   pidIsLive,
   readIdentity,
-  readLocator,
-  readSessionProjectRoot,
   sessionDir,
   statePath,
   userConfigPath,
