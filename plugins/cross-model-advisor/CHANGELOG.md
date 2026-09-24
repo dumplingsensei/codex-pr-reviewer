@@ -19,6 +19,10 @@ plugin's SessionStart can export for every Bash command through
 the advisor enabled and available while the hooks, which do receive the right
 directory, never scheduled a review. Hooks still take the host-provided value.
 
+A review cancelled while persisting its reservation (by a new prompt, `off`,
+or Apply) now stops before calling the provider. It previously went on, and
+was handed the newer prompt's task instead of the one it was reserved for.
+
 Replace conversational `/cross-model-advisor:setup` with a plugin-owned
 terminal settings menu. The slash skill only prints a safely quoted
 `setup-control.mjs menu-command` for the user's own terminal; it does not

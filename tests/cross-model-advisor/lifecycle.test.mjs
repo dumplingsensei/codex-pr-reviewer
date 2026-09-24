@@ -1708,21 +1708,29 @@ test("A to B to A and remove/readd start new epochs", async (t) => {
 });
 
 test("pending old-epoch findings stay undeliverable while emitted survive restart", async (t) => {
-  const notes = [];
+  // One finding per prompt. The polling PreToolUse hooks below schedule extra
+  // reviews; those stay silent so none can be drained without a protocol
+  // client, which would rightly make Apply refuse.
+  const notes = new Map([
+    ["pe1", "keep-emitted"],
+    ["pe2", "pending-old"]
+  ]);
   const cfg = configV2();
   const h = await fileHarness(t, {
     config: cfg,
     reviewApi: async (args) => {
-      const note = notes.shift() ?? "pending-old";
+      const promptId = args.latestTask?.promptId;
+      const note = notes.get(promptId);
+      if (!note) return { usage: { costUsd: "unknown" }, history: [] };
+      notes.delete(promptId);
       await args.tools.call("advise", {
         severity: "concern",
         note,
-        evidence: [{ kind: "observation", eventId: "obs_1", detail: "x" }]
+        evidence: [{ kind: "observation", eventId: args.observations.at(-1)?.eventId, detail: "x" }]
       });
       return { usage: { costUsd: "unknown" }, history: [] };
     }
   });
-  notes.push("keep-emitted");
   await h.rpc("on");
   await h.rpc("hook", {
     payload: hook("UserPromptSubmit", { prompt: "one", prompt_id: "pe1" })
@@ -1740,7 +1748,6 @@ test("pending old-epoch findings stay undeliverable while emitted survive restar
     return res.result?.claimId ? res : null;
   });
   await h.rpc("ack", { claimId: first.result.claimId, client: emitClient });
-  notes.push("pending-old");
   await h.rpc("hook", {
     payload: hook("UserPromptSubmit", { prompt: "two", prompt_id: "pe2" })
   });
@@ -1835,7 +1842,10 @@ test("same-slot provider identity changes fence in-flight reviews", async (t) =>
     for (const resolve of pending) resolve();
     pending.clear();
   };
-  let entered = 0;
+  // The drain hook that ends each round also schedules a review for the still
+  // current prompt, so a global review counter races. Key on the prompt the
+  // in-flight review was started for instead.
+  const started = new Map();
   const advisorSpec = {
     name: "correctness",
     provider: "local",
@@ -1854,15 +1864,15 @@ test("same-slot provider identity changes fence in-flight reviews", async (t) =>
     config: cfg(compatibleProvider()),
     env: { CMA_SLOT_KEY: "sk-other-slot" },
     reviewApi: async (args) => {
-      const mine = ++seq;
+      const note = `stale-slot-${args.latestTask?.promptId}-${++seq}`;
       const gate = new Promise((resolve) => {
         pending.add(resolve);
       });
-      entered = mine;
+      if (!started.has(args.latestTask?.promptId)) started.set(args.latestTask?.promptId, note);
       await gate;
       await args.tools.call("advise", {
         severity: "concern",
-        note: `stale-slot-${mine}`,
+        note,
         evidence: [{ kind: "observation", eventId: "obs_1", detail: "late" }]
       });
       return { usage: { costUsd: "unknown" }, history: [] };
@@ -1871,11 +1881,11 @@ test("same-slot provider identity changes fence in-flight reviews", async (t) =>
   h.releases.push(releaseAll);
   await h.rpc("on");
 
-  const fenceAndDiscard = async (nextProvider, promptId, note, expectedSeq) => {
+  const fenceAndDiscard = async (nextProvider, promptId) => {
     await h.rpc("hook", {
-      payload: hook("UserPromptSubmit", { prompt: note, prompt_id: promptId })
+      payload: hook("UserPromptSubmit", { prompt: `task ${promptId}`, prompt_id: promptId })
     });
-    await waitUntil(() => entered === expectedSeq);
+    const note = await waitUntil(() => started.get(promptId));
     assert.equal(applySucceeded(await applyConfig(h, cfg(nextProvider))), true);
     releaseAll();
     await new Promise((resolve) => setTimeout(resolve, 80));
@@ -1896,18 +1906,14 @@ test("same-slot provider identity changes fence in-flight reviews", async (t) =>
 
   await fenceAndDiscard(
     compatibleProvider({ baseUrl: "http://127.0.0.1:11/v1" }),
-    "slot-url",
-    "stale-slot-1",
-    1
+    "slot-url"
   );
   await fenceAndDiscard(
     compatibleProvider({
       baseUrl: "http://127.0.0.1:11/v1",
       apiKeyEnv: "CMA_SLOT_KEY"
     }),
-    "slot-auth",
-    "stale-slot-2",
-    2
+    "slot-auth"
   );
   await fenceAndDiscard(
     compatibleProvider({
@@ -1915,9 +1921,7 @@ test("same-slot provider identity changes fence in-flight reviews", async (t) =>
       apiKeyEnv: "CMA_SLOT_KEY",
       models: { "local-model": { contextWindow: 16384, maxTokens: 2048 } }
     }),
-    "slot-meta",
-    "stale-slot-3",
-    3
+    "slot-meta"
   );
 });
 

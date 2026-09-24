@@ -98644,6 +98644,11 @@ async function startWorker(options) {
           return;
         }
         await persist();
+        if (abort.signal.aborted || !publicationAllowed(reserved) || !ownsReview()) {
+          clearTimeout(timer);
+          if (ownsReview()) reviews.delete(advisorSpec.name);
+          return;
+        }
         const systemPrompt = `${deps.advisorSystemPrompt}
 
 ${advisorSpec.instructions ?? ""}`.trim();
@@ -98657,8 +98662,10 @@ ${advisorSpec.instructions ?? ""}`.trim();
           advisor: advisorSpec,
           observations,
           history: bounded.history,
-          latestTask: state2.latestTask,
-          compactSummary: state2.compactSummary,
+          // The task this review was reserved for, not whatever prompt has
+          // arrived since.
+          latestTask: current.latestTask,
+          compactSummary: current.compactSummary,
           currentContext: current,
           systemPrompt,
           tools,
