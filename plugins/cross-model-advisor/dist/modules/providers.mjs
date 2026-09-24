@@ -34027,11 +34027,11 @@ var require_ponyfill_es2018 = __commonJS({
           throw new TypeError(`${context} is not a function.`);
         }
       }
-      function isObject(x2) {
+      function isObject2(x2) {
         return typeof x2 === "object" && x2 !== null || typeof x2 === "function";
       }
       function assertObject(x2, context) {
-        if (!isObject(x2)) {
+        if (!isObject2(x2)) {
           throw new TypeError(`${context} is not an object.`);
         }
       }
@@ -45511,11 +45511,11 @@ var require_verify_stream = __commonJS({
     var toString = require_tostring();
     var util3 = __require("util");
     var JWS_REGEX = /^[a-zA-Z0-9\-_]+?\.[a-zA-Z0-9\-_]+?\.([a-zA-Z0-9\-_]+)?$/;
-    function isObject(thing) {
+    function isObject2(thing) {
       return Object.prototype.toString.call(thing) === "[object Object]";
     }
     function safeJsonParse(thing) {
-      if (isObject(thing))
+      if (isObject2(thing))
         return thing;
       try {
         return JSON.parse(thing);
@@ -76023,6 +76023,127 @@ function createBuiltinProvider(id) {
     }
   };
 }
+var THINKING_LEVELS = Object.freeze([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+]);
+var COMPATIBLE_THINKING_FORMATS = Object.freeze(["openai", "openrouter", "zai"]);
+var NATIVE_STRING_MAX = 64;
+function isObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function compatibleThinkingPair(meta) {
+  if (!isObject(meta)) return { pair: null };
+  const hasFormat = Object.prototype.hasOwnProperty.call(meta, "thinkingFormat");
+  const hasMap = Object.prototype.hasOwnProperty.call(meta, "thinkingLevelMap");
+  const hasEffort = Object.prototype.hasOwnProperty.call(meta, "supportsReasoningEffort");
+  if (!hasFormat && !hasMap && !hasEffort) return { pair: null };
+  if (!hasFormat || !hasMap) {
+    return { pair: null, error: "compatible model thinking metadata is invalid" };
+  }
+  const format = meta.thinkingFormat;
+  if (format !== "openai" && format !== "openrouter" && format !== "zai") {
+    return { pair: null, error: "compatible model thinking metadata is invalid" };
+  }
+  const map = meta.thinkingLevelMap;
+  if (!isObject(map)) return { pair: null, error: "compatible model thinking metadata is invalid" };
+  const keys = Object.keys(map);
+  if (keys.length !== THINKING_LEVELS.length || THINKING_LEVELS.some((level) => !Object.prototype.hasOwnProperty.call(map, level))) {
+    return { pair: null, error: "compatible model thinking metadata is invalid" };
+  }
+  const thinkingLevelMap = {};
+  for (const level of THINKING_LEVELS) {
+    const mapped = map[level];
+    if (mapped === null) {
+      thinkingLevelMap[level] = null;
+      continue;
+    }
+    if (typeof mapped !== "string" || mapped.length === 0 || mapped.length > NATIVE_STRING_MAX) {
+      return { pair: null, error: "compatible model thinking metadata is invalid" };
+    }
+    thinkingLevelMap[level] = mapped;
+  }
+  if (hasEffort && typeof meta.supportsReasoningEffort !== "boolean") {
+    return { pair: null, error: "compatible model thinking metadata is invalid" };
+  }
+  const pair = { thinkingFormat: format, thinkingLevelMap };
+  if (hasEffort) pair.supportsReasoningEffort = meta.supportsReasoningEffort;
+  return { pair };
+}
+function createCompatibleModel({ id, baseUrl, meta, cost }) {
+  const thinking = compatibleThinkingPair(meta);
+  const model = {
+    id,
+    name: id,
+    api: (
+      /** @type {const} */
+      "openai-completions"
+    ),
+    provider: "openai-compatible",
+    baseUrl,
+    reasoning: Boolean(meta?.reasoning),
+    input: Array.isArray(meta?.input) ? meta.input : ["text"],
+    cost: cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: meta?.contextWindow,
+    maxTokens: meta?.maxTokens,
+    compat: {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+      supportsStrictMode: false
+    }
+  };
+  if (model.reasoning && thinking.pair) {
+    model.thinkingLevelMap = thinking.pair.thinkingLevelMap;
+    model.compat.thinkingFormat = thinking.pair.thinkingFormat;
+    if (typeof thinking.pair.supportsReasoningEffort === "boolean") {
+      model.compat.supportsReasoningEffort = thinking.pair.supportsReasoningEffort;
+    } else {
+      model.compat.supportsReasoningEffort = thinking.pair.thinkingFormat !== "zai";
+    }
+  }
+  return model;
+}
+function resolveOfflineModel(providerSlot, modelId) {
+  if (typeof modelId !== "string" || modelId.length === 0) {
+    return { error: "advisor model is required" };
+  }
+  if (!isObject(providerSlot) || typeof providerSlot.provider !== "string") {
+    return { error: "unsupported provider" };
+  }
+  const id = providerSlot.provider;
+  if (providerSlot.kind === "api" && id === "openai-compatible") {
+    if (!isObject(providerSlot.models) || Array.isArray(providerSlot.models)) {
+      return { error: "unknown model" };
+    }
+    const meta = providerSlot.models[modelId];
+    if (!isObject(meta)) return { error: "unknown model" };
+    const thinking = compatibleThinkingPair(meta);
+    const baseUrl = typeof providerSlot.baseUrl === "string" ? providerSlot.baseUrl.replace(/\/+$/, "") : "";
+    return {
+      model: createCompatibleModel({ id: modelId, baseUrl, meta }),
+      ...thinking.error ? { thinkingError: thinking.error } : {}
+    };
+  }
+  try {
+    const provider = createBuiltinProvider(id);
+    const model = provider.getModels().find((entry) => entry.id === modelId);
+    if (!model) return { error: "unknown model" };
+    return { model };
+  } catch {
+    return { error: "unsupported provider" };
+  }
+}
 export {
-  createBuiltinProvider
+  COMPATIBLE_THINKING_FORMATS,
+  THINKING_LEVELS,
+  compatibleThinkingPair,
+  createBuiltinProvider,
+  createCompatibleModel,
+  resolveOfflineModel
 };

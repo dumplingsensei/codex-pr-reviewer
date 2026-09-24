@@ -50,7 +50,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // ../../plugins/cross-model-advisor/src/session/constants.mjs
-var CONTROL_COMMANDS, CONTROL_OPS, DRAIN_EVENTS, SILENT_EVENTS, SEVERITY_ORDER, DEBOUNCE_MS, IDLE_EXIT_MS, CLAIM_LEASE_MS, DEFAULT_REVIEW_TIMEOUT_MS, DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_REVIEWS, USER_TEXT_CAP, TOOL_SUMMARY_CAP, TRANSCRIPT_TAIL_BYTES, HISTORY_CHAR_BOUND, MAX_DRAIN_FINDINGS, MAX_ENVELOPE_CHARS, MAX_DEDUPE, SESSION_RETENTION_MS, ERROR_LOG_INTERVAL_MS, ERROR_LOG_MAX_BYTES, DIR_MODE, FILE_MODE, WORKER_UMASK, STATE_VERSION, PLUGIN_NAME;
+var CONTROL_COMMANDS, CONTROL_OPS, PROTOCOL_VERSION, SETTINGS_ERRORS, DRAIN_EVENTS, SILENT_EVENTS, SEVERITY_ORDER, DEBOUNCE_MS, IDLE_EXIT_MS, CLAIM_LEASE_MS, DEFAULT_REVIEW_TIMEOUT_MS, DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_REVIEWS, DEFAULT_MAX_OUTPUT_TOKENS, USER_TEXT_CAP, TOOL_SUMMARY_CAP, TRANSCRIPT_TAIL_BYTES, HISTORY_CHAR_BOUND, MAX_DRAIN_FINDINGS, MAX_ENVELOPE_CHARS, MAX_STDIN_BYTES, MAX_DEDUPE, SESSION_RETENTION_MS, ERROR_LOG_INTERVAL_MS, ERROR_LOG_MAX_BYTES, DIR_MODE, FILE_MODE, WORKER_UMASK, STATE_VERSION, PLUGIN_NAME;
 var init_constants = __esm({
   "../../plugins/cross-model-advisor/src/session/constants.mjs"() {
     CONTROL_COMMANDS = Object.freeze([
@@ -62,7 +62,25 @@ var init_constants = __esm({
       "cross-model-advisor:login",
       "cross-model-advisor:logout"
     ]);
-    CONTROL_OPS = Object.freeze(["on", "off", "status", "doctor", "hook", "ack"]);
+    CONTROL_OPS = Object.freeze([
+      "on",
+      "off",
+      "status",
+      "doctor",
+      "hook",
+      "ack",
+      "settings",
+      "apply"
+    ]);
+    PROTOCOL_VERSION = 2;
+    SETTINGS_ERRORS = Object.freeze({
+      PROTOCOL: "protocol",
+      STALE: "stale",
+      BUSY: "busy",
+      ROOT: "root",
+      CONFIG: "config",
+      UNAVAILABLE: "unavailable"
+    });
     DRAIN_EVENTS = Object.freeze([
       "UserPromptSubmit",
       "PreToolUse",
@@ -85,12 +103,14 @@ var init_constants = __esm({
     DEFAULT_REVIEW_TIMEOUT_MS = 9e4;
     DEFAULT_MAX_CONCURRENT = 2;
     DEFAULT_MAX_REVIEWS = 40;
+    DEFAULT_MAX_OUTPUT_TOKENS = 1500;
     USER_TEXT_CAP = 8 * 1024;
     TOOL_SUMMARY_CAP = 1024;
     TRANSCRIPT_TAIL_BYTES = 256 * 1024;
     HISTORY_CHAR_BOUND = 6e4;
     MAX_DRAIN_FINDINGS = 3;
     MAX_ENVELOPE_CHARS = 8e3;
+    MAX_STDIN_BYTES = 1048576;
     MAX_DEDUPE = 8192;
     SESSION_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
     ERROR_LOG_INTERVAL_MS = 5e3;
@@ -164,6 +184,52 @@ var init_paths = __esm({
   }
 });
 
+// ../../plugins/cross-model-advisor/src/session/sanitize.mjs
+function sanitizeText(text, secrets = []) {
+  if (typeof text !== "string" || text.length === 0) return "";
+  let out = text.replace(CONTROL_CHARS, "");
+  for (const secret of secrets) {
+    if (typeof secret !== "string" || secret.length < 4) continue;
+    out = out.split(secret).join("[redacted]");
+  }
+  out = out.replace(CREDENTIAL_ASSIGNMENT, (match, value) => match.replace(value, "[redacted]"));
+  return out;
+}
+function truncateLabeled(text, cap) {
+  if (typeof text !== "string") return "";
+  if (text.length <= cap) return text;
+  return `${text.slice(0, cap)}
+[truncated ${text.length - cap} chars]`;
+}
+function escapeEnvelope(text) {
+  return sanitizeText(text).replaceAll("---", "—-—");
+}
+function resolveSecrets(names2, env = process.env) {
+  const secrets = [];
+  for (const name of names2) {
+    if (typeof name !== "string" || !name) continue;
+    const value = env[name];
+    if (typeof value === "string" && value.length > 0) secrets.push(value);
+  }
+  return secrets;
+}
+function secretNamesFromSnapshot(snapshot) {
+  const names2 = [];
+  const providers = snapshot?.providers;
+  if (!providers || typeof providers !== "object") return names2;
+  for (const entry of Object.values(providers)) {
+    if (entry && typeof entry.apiKeyEnv === "string") names2.push(entry.apiKeyEnv);
+  }
+  return names2;
+}
+var CREDENTIAL_ASSIGNMENT, CONTROL_CHARS;
+var init_sanitize = __esm({
+  "../../plugins/cross-model-advisor/src/session/sanitize.mjs"() {
+    CREDENTIAL_ASSIGNMENT = /\b(?:api[_-]?key|token|password|secret|authorization|bearer)\b\s*[:=]\s*([^\s,;]+)/gi;
+    CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+  }
+});
+
 // ../../plugins/cross-model-advisor/src/session/history.mjs
 function measure(value) {
   if (value == null) return 0;
@@ -224,8 +290,12 @@ __export(config_exports, {
   API_PROVIDERS: () => API_PROVIDERS,
   CONFIG_FILENAME: () => CONFIG_FILENAME,
   CONFIG_VERSION: () => CONFIG_VERSION,
+  CONFIG_VERSION_V1: () => CONFIG_VERSION_V1,
   DEFAULT_LIMITS: () => DEFAULT_LIMITS,
   OAUTH_PROVIDERS: () => OAUTH_PROVIDERS,
+  REASONING_EFFORTS: () => REASONING_EFFORTS,
+  THINKING_FORMATS: () => THINKING_FORMATS,
+  THINKING_LEVELS: () => THINKING_LEVELS,
   configFilePath: () => configFilePath,
   loadConfig: () => loadConfig,
   runtimeErrors: () => runtimeErrors,
@@ -291,9 +361,30 @@ function assertBaseUrl(value, label) {
   if (parsed.protocol === "http:" && isLoopbackHost(parsed.hostname)) return parsed.toString();
   fail(`${label} must use HTTPS (HTTP is allowed only for localhost/loopback)`);
 }
-function assertModelMeta(value, label) {
+function assertNativeLevel(value, label) {
+  if (value === null) return null;
+  if (typeof value !== "string" || value.length === 0 || value.length > NATIVE_LEVEL_MAX) {
+    fail(`${label} must be a bounded native string or null`);
+  }
+  for (let i2 = 0; i2 < value.length; i2 += 1) {
+    const code = value.charCodeAt(i2);
+    if (code < 32 || code === 127) fail(`${label} must be a bounded native string or null`);
+  }
+  return value;
+}
+function assertThinkingLevelMap(value, label) {
   assertPlainObject(value, label);
-  assertKnownKeys(value, MODEL_META_KEYS, label);
+  assertKnownKeys(value, THINKING_LEVELS, label);
+  const mapped = {};
+  for (const level of THINKING_LEVELS) {
+    if (!Object.hasOwn(value, level)) fail(`${label} is missing ${level}`);
+    mapped[level] = assertNativeLevel(value[level], `${label}.${level}`);
+  }
+  return mapped;
+}
+function assertModelMeta(value, label, version) {
+  assertPlainObject(value, label);
+  assertKnownKeys(value, version === 2 ? MODEL_META_KEYS_V2 : MODEL_META_KEYS_V1, label);
   for (const key of ["contextWindow", "maxTokens", "reasoning", "input"]) {
     if (!(key in value)) fail(`${label} is missing ${key}`);
   }
@@ -328,9 +419,30 @@ function assertModelMeta(value, label) {
     }
     meta.pricing = pricing;
   }
+  const hasFormat = Object.hasOwn(value, "thinkingFormat");
+  const hasMap = Object.hasOwn(value, "thinkingLevelMap");
+  if (hasFormat !== hasMap) {
+    fail(`${label} must pair thinkingFormat with thinkingLevelMap`);
+  }
+  if (hasFormat) {
+    if (typeof value.thinkingFormat !== "string" || !THINKING_FORMATS.includes(value.thinkingFormat)) {
+      fail(`${label}.thinkingFormat must be "openai", "openrouter", or "zai"`);
+    }
+    meta.thinkingFormat = value.thinkingFormat;
+    meta.thinkingLevelMap = assertThinkingLevelMap(value.thinkingLevelMap, `${label}.thinkingLevelMap`);
+  }
+  if (Object.hasOwn(value, "supportsReasoningEffort")) {
+    if (!hasFormat) {
+      fail(`${label}.supportsReasoningEffort is only valid with thinkingFormat and thinkingLevelMap`);
+    }
+    if (typeof value.supportsReasoningEffort !== "boolean") {
+      fail(`${label}.supportsReasoningEffort must be a boolean`);
+    }
+    meta.supportsReasoningEffort = value.supportsReasoningEffort;
+  }
   return meta;
 }
-function assertProvider(value, id) {
+function assertProvider(value, id, version) {
   assertPlainObject(value, `providers.${id}`);
   if (value.kind === "api") {
     const compatible = value.provider === "openai-compatible";
@@ -359,7 +471,7 @@ function assertProvider(value, id) {
         if (typeof modelId !== "string" || modelId.length === 0 || modelId.length > 256 || FORBIDDEN_KEYS.has(modelId)) {
           fail(`providers.${id}.models has an invalid model id`);
         }
-        models[modelId] = assertModelMeta(value.models[modelId], `providers.${id}.models.${modelId}`);
+        models[modelId] = assertModelMeta(value.models[modelId], `providers.${id}.models.${modelId}`, version);
       }
       entry.models = models;
     }
@@ -403,55 +515,76 @@ function assertLimits(value) {
   }
   return limits;
 }
+function assertAdvisor(entry, index3, providers, version, names2) {
+  const label = `advisors[${index3}]`;
+  assertPlainObject(entry, label);
+  assertKnownKeys(entry, version === 2 ? ADVISOR_KEYS_V2 : ADVISOR_KEYS_V1, label);
+  assertIdentifier(entry.name, `${label}.name`);
+  if (names2.has(entry.name)) fail(`advisor name ${entry.name} is not unique`);
+  names2.add(entry.name);
+  if (typeof entry.provider !== "string" || !Object.hasOwn(providers, entry.provider)) {
+    fail(`${label}.provider is not a configured provider`);
+  }
+  if (typeof entry.model !== "string" || entry.model.length === 0 || entry.model.length > 256) {
+    fail(`${label}.model must be a user-selected model id`);
+  }
+  const provider = providers[entry.provider];
+  if (provider.kind === "api" && provider.provider === "openai-compatible") {
+    if (!Object.hasOwn(provider.models, entry.model)) {
+      fail(`${label}.model is not defined on providers.${entry.provider}`);
+    }
+  }
+  if (typeof entry.instructions !== "string" || entry.instructions.length === 0 || entry.instructions.length > 8192) {
+    fail(`${label}.instructions must be a literal string`);
+  }
+  let enabled = true;
+  let reasoningEffort = "default";
+  if (version === 2) {
+    if (typeof entry.enabled !== "boolean") fail(`${label}.enabled must be a boolean`);
+    enabled = entry.enabled;
+    if (typeof entry.reasoningEffort !== "string" || !REASONING_EFFORTS.includes(entry.reasoningEffort)) {
+      fail(`${label}.reasoningEffort is not a supported value`);
+    }
+    reasoningEffort = entry.reasoningEffort;
+  }
+  return {
+    name: entry.name,
+    provider: entry.provider,
+    model: entry.model,
+    instructions: entry.instructions,
+    enabled,
+    reasoningEffort
+  };
+}
 function validateConfig(value) {
   assertPlainObject(value, "config");
   assertKnownKeys(value, CONFIG_KEYS, "config");
-  if (value.version !== CONFIG_VERSION) fail("config.version must be 1");
+  if (value.version !== CONFIG_VERSION_V1 && value.version !== CONFIG_VERSION) {
+    fail("config.version must be 1 or 2");
+  }
+  const version = value.version;
   if (!("providers" in value) || !("advisors" in value)) {
     fail("config requires providers and advisors");
   }
   assertPlainObject(value.providers, "providers");
   const providerIds = Object.keys(value.providers);
-  if (providerIds.length === 0) fail("providers must include at least one entry");
+  if (version === CONFIG_VERSION_V1 && providerIds.length === 0) {
+    fail("providers must include at least one entry");
+  }
   const providers = {};
   for (const id of providerIds) {
     assertIdentifier(id, `providers key ${id}`);
-    providers[id] = assertProvider(value.providers[id], id);
+    providers[id] = assertProvider(value.providers[id], id, version);
   }
-  if (!Array.isArray(value.advisors) || value.advisors.length === 0) {
+  if (!Array.isArray(value.advisors)) fail("advisors must be an array");
+  if (version === CONFIG_VERSION_V1 && value.advisors.length === 0) {
     fail("advisors must be a nonempty array");
   }
   if (value.advisors.length > 32) fail("too many advisors");
   const names2 = /* @__PURE__ */ new Set();
-  const advisors = value.advisors.map((entry, index3) => {
-    const label = `advisors[${index3}]`;
-    assertPlainObject(entry, label);
-    assertKnownKeys(entry, ADVISOR_KEYS, label);
-    assertIdentifier(entry.name, `${label}.name`);
-    if (names2.has(entry.name)) fail(`advisor name ${entry.name} is not unique`);
-    names2.add(entry.name);
-    if (typeof entry.provider !== "string" || !Object.hasOwn(providers, entry.provider)) {
-      fail(`${label}.provider is not a configured provider`);
-    }
-    if (typeof entry.model !== "string" || entry.model.length === 0 || entry.model.length > 256) {
-      fail(`${label}.model must be a user-selected model id`);
-    }
-    const provider = providers[entry.provider];
-    if (provider.kind === "api" && provider.provider === "openai-compatible") {
-      if (!Object.hasOwn(provider.models, entry.model)) {
-        fail(`${label}.model is not defined on providers.${entry.provider}`);
-      }
-    }
-    if (typeof entry.instructions !== "string" || entry.instructions.length === 0 || entry.instructions.length > 8192) {
-      fail(`${label}.instructions must be a literal string`);
-    }
-    return {
-      name: entry.name,
-      provider: entry.provider,
-      model: entry.model,
-      instructions: entry.instructions
-    };
-  });
+  const advisors = value.advisors.map(
+    (entry, index3) => assertAdvisor(entry, index3, providers, version, names2)
+  );
   return {
     version: CONFIG_VERSION,
     providers,
@@ -554,11 +687,33 @@ function runtimeErrors({ env: _env = process.env } = {}) {
   }
   return errors;
 }
-var CONFIG_VERSION, CONFIG_FILENAME, API_PROVIDERS, OAUTH_PROVIDERS, DEFAULT_LIMITS, IDENTIFIER_RE, ENV_NAME_RE, MIN_NODE, LIMIT_BOUNDS, MODEL_INPUTS, FORBIDDEN_KEYS, CONFIG_KEYS, API_KEYS, COMPAT_KEYS, OAUTH_KEYS, ADVISOR_KEYS, LIMIT_KEYS, MODEL_META_KEYS, PRICING_KEYS;
+var CONFIG_VERSION, CONFIG_VERSION_V1, CONFIG_FILENAME, REASONING_EFFORTS, THINKING_FORMATS, THINKING_LEVELS, NATIVE_LEVEL_MAX, API_PROVIDERS, OAUTH_PROVIDERS, DEFAULT_LIMITS, IDENTIFIER_RE, ENV_NAME_RE, MIN_NODE, LIMIT_BOUNDS, MODEL_INPUTS, FORBIDDEN_KEYS, CONFIG_KEYS, API_KEYS, COMPAT_KEYS, OAUTH_KEYS, ADVISOR_KEYS_V1, ADVISOR_KEYS_V2, LIMIT_KEYS, MODEL_META_KEYS_V1, MODEL_META_KEYS_V2, PRICING_KEYS;
 var init_config = __esm({
   "../../plugins/cross-model-advisor/src/config.mjs"() {
-    CONFIG_VERSION = 1;
+    CONFIG_VERSION = 2;
+    CONFIG_VERSION_V1 = 1;
     CONFIG_FILENAME = "cross-model-advisor.json";
+    REASONING_EFFORTS = Object.freeze([
+      "default",
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ]);
+    THINKING_FORMATS = Object.freeze(["openai", "openrouter", "zai"]);
+    THINKING_LEVELS = Object.freeze([
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ]);
+    NATIVE_LEVEL_MAX = 64;
     API_PROVIDERS = Object.freeze([
       "openai",
       "anthropic",
@@ -599,14 +754,32 @@ var init_config = __esm({
     API_KEYS = Object.freeze(["kind", "provider", "apiKeyEnv"]);
     COMPAT_KEYS = Object.freeze(["kind", "provider", "apiKeyEnv", "baseUrl", "models"]);
     OAUTH_KEYS = Object.freeze(["kind", "provider"]);
-    ADVISOR_KEYS = Object.freeze(["name", "provider", "model", "instructions"]);
+    ADVISOR_KEYS_V1 = Object.freeze(["name", "provider", "model", "instructions"]);
+    ADVISOR_KEYS_V2 = Object.freeze([
+      "name",
+      "provider",
+      "model",
+      "instructions",
+      "enabled",
+      "reasoningEffort"
+    ]);
     LIMIT_KEYS = Object.freeze(Object.keys(DEFAULT_LIMITS));
-    MODEL_META_KEYS = Object.freeze([
+    MODEL_META_KEYS_V1 = Object.freeze([
       "contextWindow",
       "maxTokens",
       "reasoning",
       "input",
       "pricing"
+    ]);
+    MODEL_META_KEYS_V2 = Object.freeze([
+      "contextWindow",
+      "maxTokens",
+      "reasoning",
+      "input",
+      "pricing",
+      "thinkingFormat",
+      "thinkingLevelMap",
+      "supportsReasoningEffort"
     ]);
     PRICING_KEYS = Object.freeze(["prompt", "completion"]);
   }
@@ -1119,26 +1292,26 @@ var require_ignore = __commonJS({
       const index3 = body.indexOf(SLASH);
       return index3 < 0 || index3 === body.length - 1;
     };
-    var basenameOf = (path12) => {
-      const end = path12.length - 1;
-      const index3 = path12.lastIndexOf(
+    var basenameOf = (path13) => {
+      const end = path13.length - 1;
+      const index3 = path13.lastIndexOf(
         SLASH,
-        path12[end] === SLASH ? end - 1 : end
+        path13[end] === SLASH ? end - 1 : end
       );
-      return index3 < 0 ? path12 : path12.slice(index3 + 1);
+      return index3 < 0 ? path13 : path13.slice(index3 + 1);
     };
-    var parentOf = (path12) => {
-      if (path12.charCodeAt(0) === SLASH_CODE || path12.indexOf(DOUBLE_SLASH) >= 0) {
-        const slices = path12.split(SLASH).filter(Boolean);
+    var parentOf = (path13) => {
+      if (path13.charCodeAt(0) === SLASH_CODE || path13.indexOf(DOUBLE_SLASH) >= 0) {
+        const slices = path13.split(SLASH).filter(Boolean);
         slices.pop();
         return slices.length ? slices.join(SLASH) + SLASH : EMPTY4;
       }
-      const end = path12.length - 1;
-      const cut = path12.lastIndexOf(
+      const end = path13.length - 1;
+      const cut = path13.lastIndexOf(
         SLASH,
-        path12.charCodeAt(end) === SLASH_CODE ? end - 1 : end
+        path13.charCodeAt(end) === SLASH_CODE ? end - 1 : end
       );
-      return cut < 0 ? EMPTY4 : path12.slice(0, cut + 1);
+      return cut < 0 ? EMPTY4 : path13.slice(0, cut + 1);
     };
     var isString = (subject) => typeof subject === "string";
     var checkPattern = (pattern) => pattern && isString(pattern) && !REGEX_TEST_BLANK_LINE.test(pattern) && !REGEX_INVALID_TRAILING_BACKSLASH.test(pattern) && pattern.indexOf("#") !== 0;
@@ -1247,20 +1420,20 @@ var require_ignore = __commonJS({
       //   path matching.
       // - check `string` either `MODE_IGNORE` or `MODE_CHECK_IGNORE`
       // @returns {TestResult} true if a file is ignored
-      test(path12, checkUnignored, mode) {
+      test(path13, checkUnignored, mode) {
         let ignored = false;
         let unignored = false;
         let matchedRule;
         const rules = this._rules;
         const { length } = rules;
         const shortcut = this._basenameCount * 2 >= length;
-        const basename3 = shortcut ? basenameOf(path12) : path12;
+        const basename3 = shortcut ? basenameOf(path13) : path13;
         for (let index3 = 0; index3 < length; index3++) {
           const rule = rules[index3];
           const { negative } = rule;
           const skip = unignored === negative && ignored !== unignored || negative && !ignored && !unignored && !checkUnignored;
           if (!skip && rule[mode].test(
-            shortcut && rule._basenameOnly ? basename3 : path12
+            shortcut && rule._basenameOnly ? basename3 : path13
           )) {
             ignored = !negative;
             unignored = negative;
@@ -1280,17 +1453,17 @@ var require_ignore = __commonJS({
     var throwError = (message, Ctor) => {
       throw new Ctor(message);
     };
-    var checkPath = (path12, originalPath, doThrow) => {
-      if (!isString(path12)) {
+    var checkPath = (path13, originalPath, doThrow) => {
+      if (!isString(path13)) {
         return doThrow(
           `path must be a string, but got \`${originalPath}\``,
           TypeError
         );
       }
-      if (!path12) {
+      if (!path13) {
         return doThrow(`path must not be empty`, TypeError);
       }
-      if (checkPath.isNotRelative(path12)) {
+      if (checkPath.isNotRelative(path13)) {
         const r2 = "`path.relative()`d";
         return doThrow(
           `path should be a ${r2} string, but got "${originalPath}"`,
@@ -1299,25 +1472,25 @@ var require_ignore = __commonJS({
       }
       return true;
     };
-    var isNotRelative = (path12) => {
-      const first = path12.charCodeAt(0);
+    var isNotRelative = (path13) => {
+      const first = path13.charCodeAt(0);
       if (first === SLASH_CODE) {
         return true;
       }
       if (first !== DOT_CODE) {
         return false;
       }
-      if (path12.length === 1) {
+      if (path13.length === 1) {
         return true;
       }
-      const second = path12.charCodeAt(1);
+      const second = path13.charCodeAt(1);
       if (second === SLASH_CODE) {
         return true;
       }
       if (second !== DOT_CODE) {
         return false;
       }
-      return path12.length === 2 || path12.charCodeAt(2) === SLASH_CODE;
+      return path13.length === 2 || path13.charCodeAt(2) === SLASH_CODE;
     };
     checkPath.isNotRelative = isNotRelative;
     checkPath.convert = (p) => p;
@@ -1348,56 +1521,56 @@ var require_ignore = __commonJS({
       }
       // @returns {TestResult}
       _test(originalPath, cache, checkUnignored) {
-        const path12 = originalPath && checkPath.convert(originalPath);
+        const path13 = originalPath && checkPath.convert(originalPath);
         checkPath(
-          path12,
+          path13,
           originalPath,
           this._strictPathCheck ? throwError : RETURN_FALSE
         );
-        return this._t(path12, cache, checkUnignored);
+        return this._t(path13, cache, checkUnignored);
       }
-      checkIgnore(path12) {
-        if (path12.charCodeAt(path12.length - 1) !== SLASH_CODE) {
-          return this.test(path12);
+      checkIgnore(path13) {
+        if (path13.charCodeAt(path13.length - 1) !== SLASH_CODE) {
+          return this.test(path13);
         }
-        const parentPath = parentOf(path12);
+        const parentPath = parentOf(path13);
         if (parentPath) {
           const parent = this._t(parentPath, this._testCache, true);
           if (parent.ignored) {
             return parent;
           }
         }
-        return this._rules.test(path12, false, MODE_CHECK_IGNORE);
+        return this._rules.test(path13, false, MODE_CHECK_IGNORE);
       }
-      _t(path12, cache, checkUnignored) {
-        if (path12 in cache) {
-          return cache[path12];
+      _t(path13, cache, checkUnignored) {
+        if (path13 in cache) {
+          return cache[path13];
         }
-        const parentPath = parentOf(path12);
+        const parentPath = parentOf(path13);
         const parent = parentPath ? this._t(parentPath, cache, checkUnignored) : UNDEFINED;
-        return cache[path12] = parent && parent.ignored ? parent : this._rules.test(path12, checkUnignored, MODE_IGNORE);
+        return cache[path13] = parent && parent.ignored ? parent : this._rules.test(path13, checkUnignored, MODE_IGNORE);
       }
-      ignores(path12) {
-        return this._test(path12, this._ignoreCache, false).ignored;
+      ignores(path13) {
+        return this._test(path13, this._ignoreCache, false).ignored;
       }
       createFilter() {
-        return (path12) => !this.ignores(path12);
+        return (path13) => !this.ignores(path13);
       }
       filter(paths) {
         return makeArray(paths).filter(this.createFilter());
       }
       // @returns {TestResult}
-      test(path12) {
-        return this._test(path12, this._testCache, true);
+      test(path13) {
+        return this._test(path13, this._testCache, true);
       }
     };
     var factory = (options) => new Ignore(options);
-    var isPathValid = (path12) => checkPath(path12 && checkPath.convert(path12), path12, RETURN_FALSE);
+    var isPathValid = (path13) => checkPath(path13 && checkPath.convert(path13), path13, RETURN_FALSE);
     var setupWindows = () => {
       const makePosix = (str2) => /^\\\\\?\\/.test(str2) || /["<>|\u0000-\u001F]+/u.test(str2) ? str2 : str2.replace(/\\/g, "/");
       checkPath.convert = makePosix;
       const REGEX_TEST_WINDOWS_PATH_ABSOLUTE = /^[a-z]:\//i;
-      checkPath.isNotRelative = (path12) => REGEX_TEST_WINDOWS_PATH_ABSOLUTE.test(path12) || isNotRelative(path12);
+      checkPath.isNotRelative = (path13) => REGEX_TEST_WINDOWS_PATH_ABSOLUTE.test(path13) || isNotRelative(path13);
     };
     if (
       // Detect `process` so that it can run in browsers.
@@ -5676,8 +5849,8 @@ var init_guard3 = __esm({
 function IsMatch(value) {
   return IsEqual(value.length, 2);
 }
-function Match2(input, ok, fail3) {
-  return IsMatch(input) ? ok(input[0], input[1]) : fail3();
+function Match2(input, ok, fail4) {
+  return IsMatch(input) ? ok(input[0], input[1]) : fail4();
 }
 var init_match = __esm({
   "node_modules/typebox/build/type/script/token/internal/match.mjs"() {
@@ -10365,15 +10538,15 @@ function defaultProviderAuthContext() {
       const value = getProcessEnv()?.[name];
       return typeof value === "string" && value.trim().length > 0 ? value : void 0;
     },
-    async fileExists(path12) {
+    async fileExists(path13) {
       try {
-        const fs15 = await importNodeModule("node:fs/promises");
-        let resolved = path12;
+        const fs16 = await importNodeModule("node:fs/promises");
+        let resolved = path13;
         if (resolved.startsWith("~")) {
           const os4 = await importNodeModule("node:os");
           resolved = os4.homedir() + resolved.slice(1);
         }
-        await fs15.access(resolved);
+        await fs16.access(resolved);
         return true;
       } catch {
         return false;
@@ -10384,13 +10557,13 @@ function defaultProviderAuthContext() {
 var __rewriteRelativeImportExtension, importNodeModule;
 var init_context = __esm({
   "node_modules/@earendil-works/pi-ai/dist/auth/context.js"() {
-    __rewriteRelativeImportExtension = function(path12, preserveJsx) {
-      if (typeof path12 === "string" && /^\.\.?\//.test(path12)) {
-        return path12.replace(/\.(tsx)$|((?:\.d)?)((?:\.[^./]+?)?)\.([cm]?)ts$/i, function(m2, tsx, d, ext, cm) {
+    __rewriteRelativeImportExtension = function(path13, preserveJsx) {
+      if (typeof path13 === "string" && /^\.\.?\//.test(path13)) {
+        return path13.replace(/\.(tsx)$|((?:\.d)?)((?:\.[^./]+?)?)\.([cm]?)ts$/i, function(m2, tsx, d, ext, cm) {
           return tsx ? preserveJsx ? ".jsx" : ".js" : d && (!ext || !cm) ? m2 : d + ext + "." + cm.toLowerCase() + "js";
         });
       }
-      return path12;
+      return path13;
     };
     importNodeModule = (specifier) => import(__rewriteRelativeImportExtension(specifier));
   }
@@ -10620,7 +10793,7 @@ async function resolveProviderAuthWithSignal(provider, credentials, authContext,
 function overlayEnvAuthContext(base, env) {
   return {
     env: async (name) => env[name] || await base.env(name),
-    fileExists: (path12) => base.fileExists(path12)
+    fileExists: (path13) => base.fileExists(path13)
   };
 }
 async function resolveStoredOAuth(credentials, providerId2, oauth, stored, signal, minOAuthValidityMs) {
@@ -17863,23 +18036,23 @@ var init_parse3 = __esm({
 });
 
 // node_modules/typebox/build/value/delta/diff.mjs
-function CreateUpdate(path12, value) {
-  return { type: "update", path: path12, value };
+function CreateUpdate(path13, value) {
+  return { type: "update", path: path13, value };
 }
-function CreateInsert(path12, value) {
-  return { type: "insert", path: path12, value };
+function CreateInsert(path13, value) {
+  return { type: "insert", path: path13, value };
 }
-function CreateDelete(path12) {
-  return { type: "delete", path: path12 };
+function CreateDelete(path13) {
+  return { type: "delete", path: path13 };
 }
 function AssertCanDiffObject(value) {
   if (guard_exports.IsObject(value) && guard_exports.IsEqual(guard_exports.Symbols(value).length, 0))
     return;
   throw new Error("Cannot create diffs for objects with symbols keys");
 }
-function* FromObject17(path12, left, right) {
+function* FromObject17(path13, left, right) {
   if (!guard_exports.IsObject(right) || guard_exports.IsArray(right))
-    return yield CreateUpdate(path12, right);
+    return yield CreateUpdate(path13, right);
   AssertCanDiffObject(left);
   AssertCanDiffObject(right);
   const leftKeys = guard_exports.Keys(left);
@@ -17889,7 +18062,7 @@ function* FromObject17(path12, left, right) {
       continue;
     if (guard_exports.IsUnsafePropertyKey(key))
       continue;
-    yield CreateInsert(`${path12}/${key}`, right[key]);
+    yield CreateInsert(`${path13}/${key}`, right[key]);
   }
   for (const key of leftKeys) {
     if (!guard_exports.HasPropertyKey(right, key))
@@ -17898,52 +18071,52 @@ function* FromObject17(path12, left, right) {
       continue;
     if (Equal(left, right))
       continue;
-    yield* FromValue4(`${path12}/${key}`, left[key], right[key]);
+    yield* FromValue4(`${path13}/${key}`, left[key], right[key]);
   }
   for (const key of leftKeys) {
     if (guard_exports.HasPropertyKey(right, key))
       continue;
     if (guard_exports.IsUnsafePropertyKey(key))
       continue;
-    yield CreateDelete(`${path12}/${key}`);
+    yield CreateDelete(`${path13}/${key}`);
   }
 }
-function* FromArray13(path12, left, right) {
+function* FromArray13(path13, left, right) {
   if (!guard_exports.IsArray(right))
-    return yield CreateUpdate(path12, right);
+    return yield CreateUpdate(path13, right);
   for (let i2 = 0; i2 < Math.min(left.length, right.length); i2++) {
-    yield* FromValue4(`${path12}/${i2}`, left[i2], right[i2]);
+    yield* FromValue4(`${path13}/${i2}`, left[i2], right[i2]);
   }
   for (let i2 = 0; i2 < right.length; i2++) {
     if (i2 < left.length)
       continue;
-    yield CreateInsert(`${path12}/${i2}`, right[i2]);
+    yield CreateInsert(`${path13}/${i2}`, right[i2]);
   }
   for (let i2 = left.length - 1; i2 >= 0; i2--) {
     if (i2 < right.length)
       continue;
-    yield CreateDelete(`${path12}/${i2}`);
+    yield CreateDelete(`${path13}/${i2}`);
   }
 }
-function* FromTypedArray2(path12, left, right) {
+function* FromTypedArray2(path13, left, right) {
   const typeLeft = globalThis.Object.getPrototypeOf(left).constructor.name;
   const typeRight = globalThis.Object.getPrototypeOf(right).constructor.name;
   const predicate = globals_exports.IsTypeArray(right) && guard_exports.IsEqual(left.length, right.length) && guard_exports.IsEqual(typeLeft, typeRight);
   if (predicate) {
     for (let index3 = 0; index3 < Math.min(left.length, right.length); index3++) {
-      yield* FromValue4(`${path12}/${index3}`, left[index3], right[index3]);
+      yield* FromValue4(`${path13}/${index3}`, left[index3], right[index3]);
     }
   } else {
-    return yield CreateUpdate(path12, right);
+    return yield CreateUpdate(path13, right);
   }
 }
-function* FromUnknown(path12, left, right) {
+function* FromUnknown(path13, left, right) {
   if (left === right)
     return;
-  yield CreateUpdate(path12, right);
+  yield CreateUpdate(path13, right);
 }
-function* FromValue4(path12, left, right) {
-  return globals_exports.IsTypeArray(left) ? yield* FromTypedArray2(path12, left, right) : guard_exports.IsArray(left) ? yield* FromArray13(path12, left, right) : guard_exports.IsObject(left) ? yield* FromObject17(path12, left, right) : yield* FromUnknown(path12, left, right);
+function* FromValue4(path13, left, right) {
+  return globals_exports.IsTypeArray(left) ? yield* FromTypedArray2(path13, left, right) : guard_exports.IsArray(left) ? yield* FromArray13(path13, left, right) : guard_exports.IsObject(left) ? yield* FromObject17(path13, left, right) : yield* FromUnknown(path13, left, right);
 }
 function Diff(current, next) {
   return [...FromValue4("", current, next)];
@@ -18813,8 +18986,8 @@ function formatValidationPath(error) {
       return basePath ? `${basePath}.${requiredProperty}` : requiredProperty;
     }
   }
-  const path12 = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
-  return path12 || "root";
+  const path13 = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
+  return path13 || "root";
 }
 function validateToolCall(tools, toolCall) {
   const tool = tools.find((t2) => t2.name === toolCall.name);
@@ -20827,12 +21000,12 @@ var init_path = __esm({
   "node_modules/openai/internal/utils/path.mjs"() {
     init_error3();
     EMPTY = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.create(null));
-    createPathTagFunction = (pathEncoder = encodeURIPath) => function path12(statics, ...params) {
+    createPathTagFunction = (pathEncoder = encodeURIPath) => function path13(statics, ...params) {
       if (statics.length === 1)
         return statics[0];
       let postPath = false;
       const invalidSegments = [];
-      const path13 = statics.reduce((previousValue, currentValue, index3) => {
+      const path14 = statics.reduce((previousValue, currentValue, index3) => {
         if (/[?#]/.test(currentValue)) {
           postPath = true;
         }
@@ -20849,7 +21022,7 @@ var init_path = __esm({
         }
         return previousValue + currentValue + (index3 === params.length ? "" : encoded);
       }, "");
-      const pathOnly = path13.split(/[?#]/, 1)[0];
+      const pathOnly = path14.split(/[?#]/, 1)[0];
       const invalidSegmentPattern = /(?<=^|\/)(?:\.|%2e){1,2}(?=\/|$)/gi;
       let match;
       while ((match = invalidSegmentPattern.exec(pathOnly)) !== null) {
@@ -20870,10 +21043,10 @@ var init_path = __esm({
         }, "");
         throw new OpenAIError(`Path parameters result in path with invalid segments:
 ${invalidSegments.map((e2) => e2.error).join("\n")}
-${path13}
+${path14}
 ${underline}`);
       }
-      return path13;
+      return path14;
     };
     path5 = /* @__PURE__ */ createPathTagFunction(encodeURIPath);
   }
@@ -29383,9 +29556,9 @@ var init_client = __esm({
         this.apiKey = token;
         return true;
       }
-      buildURL(path12, query, defaultBaseURL) {
+      buildURL(path13, query, defaultBaseURL) {
         const baseURL = !__classPrivateFieldGet2(this, _OpenAI_instances, "m", _OpenAI_baseURLOverridden).call(this) && defaultBaseURL || this.baseURL;
-        const url = isAbsoluteURL(path12) ? new URL(path12) : new URL(baseURL + (baseURL.endsWith("/") && path12.startsWith("/") ? path12.slice(1) : path12));
+        const url = isAbsoluteURL(path13) ? new URL(path13) : new URL(baseURL + (baseURL.endsWith("/") && path13.startsWith("/") ? path13.slice(1) : path13));
         const defaultQuery = this.defaultQuery();
         const pathQuery = Object.fromEntries(url.searchParams);
         if (!isEmptyObj(defaultQuery) || !isEmptyObj(pathQuery)) {
@@ -29413,24 +29586,24 @@ var init_client = __esm({
        */
       async prepareRequest(request2, { url, options }) {
       }
-      get(path12, opts) {
-        return this.methodRequest("get", path12, opts);
+      get(path13, opts) {
+        return this.methodRequest("get", path13, opts);
       }
-      post(path12, opts) {
-        return this.methodRequest("post", path12, opts);
+      post(path13, opts) {
+        return this.methodRequest("post", path13, opts);
       }
-      patch(path12, opts) {
-        return this.methodRequest("patch", path12, opts);
+      patch(path13, opts) {
+        return this.methodRequest("patch", path13, opts);
       }
-      put(path12, opts) {
-        return this.methodRequest("put", path12, opts);
+      put(path13, opts) {
+        return this.methodRequest("put", path13, opts);
       }
-      delete(path12, opts) {
-        return this.methodRequest("delete", path12, opts);
+      delete(path13, opts) {
+        return this.methodRequest("delete", path13, opts);
       }
-      methodRequest(method, path12, opts) {
+      methodRequest(method, path13, opts) {
         return this.request(Promise.resolve(opts).then((opts2) => {
-          return { method, path: path12, ...opts2 };
+          return { method, path: path13, ...opts2 };
         }));
       }
       request(options, remainingRetries = null) {
@@ -29552,8 +29725,8 @@ var init_client = __esm({
         }));
         return { response, options, controller, requestLogID, retryOfRequestLogID, startTime };
       }
-      getAPIList(path12, Page3, opts) {
-        return this.requestAPIList(Page3, opts && "then" in opts ? opts.then((opts2) => ({ method: "get", path: path12, ...opts2 })) : { method: "get", path: path12, ...opts });
+      getAPIList(path13, Page3, opts) {
+        return this.requestAPIList(Page3, opts && "then" in opts ? opts.then((opts2) => ({ method: "get", path: path13, ...opts2 })) : { method: "get", path: path13, ...opts });
       }
       requestAPIList(Page3, options) {
         const request2 = this.makeRequest(options, null, void 0);
@@ -29647,8 +29820,8 @@ var init_client = __esm({
       }
       async buildRequest(inputOptions, { retryCount = 0 } = {}) {
         const options = { ...inputOptions };
-        const { method, path: path12, query, defaultBaseURL } = options;
-        const url = this.buildURL(path12, query, defaultBaseURL);
+        const { method, path: path13, query, defaultBaseURL } = options;
+        const url = this.buildURL(path13, query, defaultBaseURL);
         if ("timeout" in options)
           validatePositiveInteger("timeout", options.timeout);
         options.timeout = options.timeout ?? this.timeout;
@@ -33441,15 +33614,15 @@ function redactSensitive(body) {
   }
   return null;
 }
-async function checkCredentialsFileSafety(path12, onWarn = (m2) => console.warn(`anthropic-sdk: ${m2}`)) {
+async function checkCredentialsFileSafety(path13, onWarn = (m2) => console.warn(`anthropic-sdk: ${m2}`)) {
   if (typeof process === "undefined" || process.platform === "win32")
     return;
-  const { fs: fs15 } = await Promise.resolve().then(() => (init_node(), node_exports));
-  let resolved = path12;
+  const { fs: fs16 } = await Promise.resolve().then(() => (init_node(), node_exports));
+  let resolved = path13;
   let st;
   try {
-    resolved = await fs15.promises.realpath(path12);
-    st = await fs15.promises.stat(resolved);
+    resolved = await fs16.promises.realpath(path13);
+    st = await fs16.promises.stat(resolved);
   } catch {
     return;
   }
@@ -33465,26 +33638,26 @@ async function checkCredentialsFileSafety(path12, onWarn = (m2) => console.warn(
   }
 }
 async function writeCredentialsFileAtomic(targetPath, data) {
-  const { fs: fs15, path: path12 } = await Promise.resolve().then(() => (init_node(), node_exports));
-  const dir = path12.dirname(targetPath);
-  await fs15.promises.mkdir(dir, { recursive: true, mode: 448 });
+  const { fs: fs16, path: path13 } = await Promise.resolve().then(() => (init_node(), node_exports));
+  const dir = path13.dirname(targetPath);
+  await fs16.promises.mkdir(dir, { recursive: true, mode: 448 });
   const tmpPath = `${targetPath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   try {
-    const fh = await fs15.promises.open(tmpPath, "w", 384);
+    const fh = await fs16.promises.open(tmpPath, "w", 384);
     try {
       await fh.writeFile(JSON.stringify(data, null, 2));
       await fh.sync();
     } finally {
       await fh.close();
     }
-    await fs15.promises.rename(tmpPath, targetPath);
+    await fs16.promises.rename(tmpPath, targetPath);
   } catch (err) {
-    await fs15.promises.unlink(tmpPath).catch(() => {
+    await fs16.promises.unlink(tmpPath).catch(() => {
     });
     throw err;
   }
   try {
-    const dirFh = await fs15.promises.open(dir, "r");
+    const dirFh = await fs16.promises.open(dir, "r");
     try {
       await dirFh.sync();
     } finally {
@@ -33864,11 +34037,11 @@ var init_credentials = __esm({
         return null;
       }
       validateProfileName(profileName);
-      const { fs: fs15, path: path12 } = await Promise.resolve().then(() => (init_node(), node_exports));
-      const configPath = path12.join(rootConfigPath, "configs", `${profileName}.json`);
+      const { fs: fs16, path: path13 } = await Promise.resolve().then(() => (init_node(), node_exports));
+      const configPath = path13.join(rootConfigPath, "configs", `${profileName}.json`);
       let configRaw;
       try {
-        configRaw = await fs15.promises.readFile(configPath, "utf-8");
+        configRaw = await fs16.promises.readFile(configPath, "utf-8");
       } catch (err) {
         if (err?.code !== "ENOENT") {
           throw new Error(`failed to read config file ${configPath}: ${err}`);
@@ -33949,14 +34122,14 @@ var init_credentials = __esm({
         return null;
       }
       validateProfileName(profileName);
-      const { path: path12 } = await Promise.resolve().then(() => (init_node(), node_exports));
-      return path12.join(rootConfigPath, "credentials", `${profileName}.json`);
+      const { path: path13 } = await Promise.resolve().then(() => (init_node(), node_exports));
+      return path13.join(rootConfigPath, "credentials", `${profileName}.json`);
     };
     getRootConfigPath = async () => {
       if (!supportsLocalConfigFiles()) {
         return null;
       }
-      const { path: path12 } = await Promise.resolve().then(() => (init_node(), node_exports));
+      const { path: path13 } = await Promise.resolve().then(() => (init_node(), node_exports));
       const configDir = readEnv2("ANTHROPIC_CONFIG_DIR");
       if (configDir) {
         return configDir;
@@ -33965,21 +34138,21 @@ var init_credentials = __esm({
       if (os4 === "Windows") {
         const appData = readEnv2("APPDATA");
         if (appData) {
-          return path12.join(appData, "Anthropic");
+          return path13.join(appData, "Anthropic");
         }
         const userProfile = readEnv2("USERPROFILE");
         if (userProfile) {
-          return path12.join(userProfile, "AppData", "Roaming", "Anthropic");
+          return path13.join(userProfile, "AppData", "Roaming", "Anthropic");
         }
         return null;
       }
       const xdgConfigHome = readEnv2("XDG_CONFIG_HOME");
       if (xdgConfigHome) {
-        return path12.join(xdgConfigHome, "anthropic");
+        return path13.join(xdgConfigHome, "anthropic");
       }
       const home = readEnv2("HOME");
       if (home) {
-        return path12.join(home, ".config", "anthropic");
+        return path13.join(home, ".config", "anthropic");
       }
       return null;
     };
@@ -33996,10 +34169,10 @@ var init_credentials = __esm({
       if (profileName) {
         return profileName;
       }
-      const { fs: fs15, path: path12 } = await Promise.resolve().then(() => (init_node(), node_exports));
-      const filePath = path12.join(rootConfigPath, "active_config");
+      const { fs: fs16, path: path13 } = await Promise.resolve().then(() => (init_node(), node_exports));
+      const filePath = path13.join(rootConfigPath, "active_config");
       try {
-        return (await fs15.promises.readFile(filePath, "utf-8")).trim() || "default";
+        return (await fs16.promises.readFile(filePath, "utf-8")).trim() || "default";
       } catch (err) {
         if (err?.code !== "ENOENT") {
           throw new Error(`failed to read ${filePath}: ${err}`);
@@ -34011,21 +34184,21 @@ var init_credentials = __esm({
 });
 
 // node_modules/@anthropic-ai/sdk/lib/credentials/identity-token.mjs
-function identityTokenFromFile(path12) {
-  if (!path12) {
+function identityTokenFromFile(path13) {
+  if (!path13) {
     throw new AnthropicError("Identity token file path is empty");
   }
   return async () => {
-    const { fs: fs15 } = await Promise.resolve().then(() => (init_node(), node_exports));
+    const { fs: fs16 } = await Promise.resolve().then(() => (init_node(), node_exports));
     let content;
     try {
-      content = await fs15.promises.readFile(path12, "utf-8");
+      content = await fs16.promises.readFile(path13, "utf-8");
     } catch (err) {
-      throw new AnthropicError(`Failed to read identity token file at ${path12}: ${err}`);
+      throw new AnthropicError(`Failed to read identity token file at ${path13}: ${err}`);
     }
     const token = content.trim();
     if (!token) {
-      throw new AnthropicError(`Identity token file at ${path12} is empty`);
+      throw new AnthropicError(`Identity token file at ${path13} is empty`);
     }
     return token;
   };
@@ -34110,11 +34283,11 @@ var init_oidc_federation = __esm({
 // node_modules/@anthropic-ai/sdk/lib/credentials/user-oauth.mjs
 function userOAuthProvider(config) {
   return async (opts) => {
-    const { fs: fs15 } = await Promise.resolve().then(() => (init_node(), node_exports));
+    const { fs: fs16 } = await Promise.resolve().then(() => (init_node(), node_exports));
     await checkCredentialsFileSafety(config.credentialsPath, config.onSafetyWarning);
     let raw;
     try {
-      raw = await fs15.promises.readFile(config.credentialsPath, "utf-8");
+      raw = await fs16.promises.readFile(config.credentialsPath, "utf-8");
     } catch (err) {
       throw new WorkloadIdentityError(`Credentials file not found at ${config.credentialsPath}: ${err}`);
     }
@@ -34286,11 +34459,11 @@ function resolveIdentityTokenProvider(auth) {
 }
 function cachedExchangeProvider(exchange, credentialsPath, onCacheWriteError, onSafetyWarning) {
   return async (opts) => {
-    const { fs: fs15 } = await Promise.resolve().then(() => (init_node(), node_exports));
+    const { fs: fs16 } = await Promise.resolve().then(() => (init_node(), node_exports));
     await checkCredentialsFileSafety(credentialsPath, onSafetyWarning);
     let existing;
     try {
-      const raw = await fs15.promises.readFile(credentialsPath, "utf-8");
+      const raw = await fs16.promises.readFile(credentialsPath, "utf-8");
       existing = JSON.parse(raw);
       const token = existing?.["access_token"];
       if (token && !opts?.forceRefresh) {
@@ -35366,12 +35539,12 @@ var init_path2 = __esm({
   "node_modules/@anthropic-ai/sdk/internal/utils/path.mjs"() {
     init_error5();
     EMPTY2 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.create(null));
-    createPathTagFunction2 = (pathEncoder = encodeURIPath2) => function path12(statics, ...params) {
+    createPathTagFunction2 = (pathEncoder = encodeURIPath2) => function path13(statics, ...params) {
       if (statics.length === 1)
         return statics[0];
       let postPath = false;
       const invalidSegments = [];
-      const path13 = statics.reduce((previousValue, currentValue, index3) => {
+      const path14 = statics.reduce((previousValue, currentValue, index3) => {
         if (/[?#]/.test(currentValue)) {
           postPath = true;
         }
@@ -35388,7 +35561,7 @@ var init_path2 = __esm({
         }
         return previousValue + currentValue + (index3 === params.length ? "" : encoded);
       }, "");
-      const pathOnly = path13.split(/[?#]/, 1)[0];
+      const pathOnly = path14.split(/[?#]/, 1)[0];
       const invalidSegmentPattern = /(?<=^|\/)(?:\.|%2e){1,2}(?=\/|$)/gi;
       let match;
       while ((match = invalidSegmentPattern.exec(pathOnly)) !== null) {
@@ -35409,10 +35582,10 @@ var init_path2 = __esm({
         }, "");
         throw new AnthropicError(`Path parameters result in path with invalid segments:
 ${invalidSegments.map((e2) => e2.error).join("\n")}
-${path13}
+${path14}
 ${underline}`);
       }
-      return path13;
+      return path14;
     };
     path8 = /* @__PURE__ */ createPathTagFunction2(encodeURIPath2);
   }
@@ -48030,9 +48203,9 @@ var init_client2 = __esm({
       makeStatusError(status, error, message, headers) {
         return APIError2.generate(status, error, message, headers);
       }
-      buildURL(path12, query, defaultBaseURL) {
+      buildURL(path13, query, defaultBaseURL) {
         const baseURL = !__classPrivateFieldGet3(this, _BaseAnthropic_instances, "m", _BaseAnthropic_baseURLOverridden).call(this) && defaultBaseURL || this.baseURL;
-        const url = isAbsoluteURL2(path12) ? new URL(path12) : new URL(baseURL + (baseURL.endsWith("/") && path12.startsWith("/") ? path12.slice(1) : path12));
+        const url = isAbsoluteURL2(path13) ? new URL(path13) : new URL(baseURL + (baseURL.endsWith("/") && path13.startsWith("/") ? path13.slice(1) : path13));
         const defaultQuery = this.defaultQuery();
         const pathQuery = Object.fromEntries(url.searchParams);
         if (!isEmptyObj2(defaultQuery) || !isEmptyObj2(pathQuery)) {
@@ -48104,24 +48277,24 @@ var init_client2 = __esm({
       backendMiddleware() {
         return [];
       }
-      get(path12, opts) {
-        return this.methodRequest("get", path12, opts);
+      get(path13, opts) {
+        return this.methodRequest("get", path13, opts);
       }
-      post(path12, opts) {
-        return this.methodRequest("post", path12, opts);
+      post(path13, opts) {
+        return this.methodRequest("post", path13, opts);
       }
-      patch(path12, opts) {
-        return this.methodRequest("patch", path12, opts);
+      patch(path13, opts) {
+        return this.methodRequest("patch", path13, opts);
       }
-      put(path12, opts) {
-        return this.methodRequest("put", path12, opts);
+      put(path13, opts) {
+        return this.methodRequest("put", path13, opts);
       }
-      delete(path12, opts) {
-        return this.methodRequest("delete", path12, opts);
+      delete(path13, opts) {
+        return this.methodRequest("delete", path13, opts);
       }
-      methodRequest(method, path12, opts) {
+      methodRequest(method, path13, opts) {
         return this.request(Promise.resolve(opts).then((opts2) => {
-          return { method, path: path12, ...opts2 };
+          return { method, path: path13, ...opts2 };
         }));
       }
       request(options, remainingRetries = null) {
@@ -48239,8 +48412,8 @@ var init_client2 = __esm({
         armAbandonmentBackstop(response.body ?? response, controller);
         return { response, options, controller, requestLogID, retryOfRequestLogID, startTime };
       }
-      getAPIList(path12, Page3, opts) {
-        return this.requestAPIList(Page3, opts && "then" in opts ? opts.then((opts2) => ({ method: "get", path: path12, ...opts2 })) : { method: "get", path: path12, ...opts });
+      getAPIList(path13, Page3, opts) {
+        return this.requestAPIList(Page3, opts && "then" in opts ? opts.then((opts2) => ({ method: "get", path: path13, ...opts2 })) : { method: "get", path: path13, ...opts });
       }
       requestAPIList(Page3, options) {
         const request2 = this.makeRequest(options, null, void 0);
@@ -48358,14 +48531,14 @@ var init_client2 = __esm({
       }
       async buildRequest(inputOptions, { retryCount = 0 } = {}) {
         const options = { ...inputOptions };
-        const { method, path: path12, query, defaultBaseURL } = options;
+        const { method, path: path13, query, defaultBaseURL } = options;
         if (this._authState.resolution) {
           await this._authState.resolution;
         }
         if (!this._baseURLIsExplicit && this._authState.baseURL && this.baseURL !== this._authState.baseURL) {
           this.baseURL = this._authState.baseURL;
         }
-        const url = this.buildURL(path12, query, defaultBaseURL);
+        const url = this.buildURL(path13, query, defaultBaseURL);
         if ("timeout" in options)
           validatePositiveInteger2("timeout", options.timeout);
         options.timeout = options.timeout ?? this.timeout;
@@ -49609,13 +49782,13 @@ var init_anthropic_messages_lazy = __esm({
 var __rewriteRelativeImportExtension2, importOAuthModule, bundledLoaders, loadAnthropicOAuth, loadOpenAICodexOAuth, loadGitHubCopilotOAuth, loadOpenRouterOAuth, loadKimiCodingOAuth, loadXaiOAuth;
 var init_load = __esm({
   "node_modules/@earendil-works/pi-ai/dist/auth/oauth/load.js"() {
-    __rewriteRelativeImportExtension2 = function(path12, preserveJsx) {
-      if (typeof path12 === "string" && /^\.\.?\//.test(path12)) {
-        return path12.replace(/\.(tsx)$|((?:\.d)?)((?:\.[^./]+?)?)\.([cm]?)ts$/i, function(m2, tsx, d, ext, cm) {
+    __rewriteRelativeImportExtension2 = function(path13, preserveJsx) {
+      if (typeof path13 === "string" && /^\.\.?\//.test(path13)) {
+        return path13.replace(/\.(tsx)$|((?:\.d)?)((?:\.[^./]+?)?)\.([cm]?)ts$/i, function(m2, tsx, d, ext, cm) {
           return tsx ? preserveJsx ? ".jsx" : ".js" : d && (!ext || !cm) ? m2 : d + ext + "." + cm.toLowerCase() + "js";
         });
       }
-      return path12;
+      return path13;
     };
     importOAuthModule = (specifier) => {
       const runtimeSpecifier = import.meta.url.endsWith(".js") ? specifier.replace(/\.ts$/, ".js") : specifier;
@@ -49658,13 +49831,13 @@ var init_load = __esm({
 var __rewriteRelativeImportExtension3, _existsSync, _homedir, _join, dynamicImport, NODE_FS_SPECIFIER, NODE_OS_SPECIFIER, NODE_PATH_SPECIFIER, ANTHROPIC_AUTH_TOKEN_ENV, ANTHROPIC_OAUTH_TOKEN_ENV, ANTHROPIC_API_KEY_ENV;
 var init_env_api_keys = __esm({
   "node_modules/@earendil-works/pi-ai/dist/env-api-keys.js"() {
-    __rewriteRelativeImportExtension3 = function(path12, preserveJsx) {
-      if (typeof path12 === "string" && /^\.\.?\//.test(path12)) {
-        return path12.replace(/\.(tsx)$|((?:\.d)?)((?:\.[^./]+?)?)\.([cm]?)ts$/i, function(m2, tsx, d, ext, cm) {
+    __rewriteRelativeImportExtension3 = function(path13, preserveJsx) {
+      if (typeof path13 === "string" && /^\.\.?\//.test(path13)) {
+        return path13.replace(/\.(tsx)$|((?:\.d)?)((?:\.[^./]+?)?)\.([cm]?)ts$/i, function(m2, tsx, d, ext, cm) {
           return tsx ? preserveJsx ? ".jsx" : ".js" : d && (!ext || !cm) ? m2 : d + ext + "." + cm.toLowerCase() + "js";
         });
       }
-      return path12;
+      return path13;
     };
     _existsSync = null;
     _homedir = null;
@@ -51075,7 +51248,7 @@ var require_extend = __commonJS({
       }
       return toStr.call(arr) === "[object Array]";
     };
-    var isPlainObject = function isPlainObject2(obj) {
+    var isPlainObject2 = function isPlainObject3(obj) {
       if (!obj || toStr.call(obj) !== "[object Object]") {
         return false;
       }
@@ -51132,12 +51305,12 @@ var require_extend = __commonJS({
             src = getProperty(target, name);
             copy = getProperty(options, name);
             if (target !== copy) {
-              if (deep && copy && (isPlainObject(copy) || (copyIsArray = isArray4(copy)))) {
+              if (deep && copy && (isPlainObject2(copy) || (copyIsArray = isArray4(copy)))) {
                 if (copyIsArray) {
                   copyIsArray = false;
                   clone3 = src && isArray4(src) ? src : [];
                 } else {
-                  clone3 = src && isPlainObject(src) ? src : {};
+                  clone3 = src && isPlainObject2(src) ? src : {};
                 }
                 setProperty(target, { name, newValue: extend3(deep, clone3, copy) });
               } else if (typeof copy !== "undefined") {
@@ -53033,11 +53206,11 @@ var require_ponyfill_es2018 = __commonJS({
           throw new TypeError(`${context} is not a function.`);
         }
       }
-      function isObject2(x2) {
+      function isObject4(x2) {
         return typeof x2 === "object" && x2 !== null || typeof x2 === "function";
       }
       function assertObject(x2, context) {
-        if (!isObject2(x2)) {
+        if (!isObject4(x2)) {
           throw new TypeError(`${context} is not an object.`);
         }
       }
@@ -57541,22 +57714,22 @@ var init_from = __esm({
     init_file();
     init_fetch_blob();
     ({ stat: stat2 } = fs12);
-    blobFromSync = (path12, type) => fromBlob(statSync(path12), path12, type);
-    blobFrom = (path12, type) => stat2(path12).then((stat4) => fromBlob(stat4, path12, type));
-    fileFrom = (path12, type) => stat2(path12).then((stat4) => fromFile(stat4, path12, type));
-    fileFromSync = (path12, type) => fromFile(statSync(path12), path12, type);
-    fromBlob = (stat4, path12, type = "") => new fetch_blob_default([new BlobDataItem({
-      path: path12,
+    blobFromSync = (path13, type) => fromBlob(statSync(path13), path13, type);
+    blobFrom = (path13, type) => stat2(path13).then((stat4) => fromBlob(stat4, path13, type));
+    fileFrom = (path13, type) => stat2(path13).then((stat4) => fromFile(stat4, path13, type));
+    fileFromSync = (path13, type) => fromFile(statSync(path13), path13, type);
+    fromBlob = (stat4, path13, type = "") => new fetch_blob_default([new BlobDataItem({
+      path: path13,
       size: stat4.size,
       lastModified: stat4.mtimeMs,
       start: 0
     })], { type });
-    fromFile = (stat4, path12, type = "") => new file_default([new BlobDataItem({
-      path: path12,
+    fromFile = (stat4, path13, type = "") => new file_default([new BlobDataItem({
+      path: path13,
       size: stat4.size,
       lastModified: stat4.mtimeMs,
       start: 0
-    })], basename(path12), { type, lastModified: stat4.mtimeMs });
+    })], basename(path13), { type, lastModified: stat4.mtimeMs });
     BlobDataItem = class _BlobDataItem {
       #path;
       #start;
@@ -62714,9 +62887,9 @@ var require_util2 = __commonJS({
     exports.removeUndefinedValuesInObject = removeUndefinedValuesInObject;
     exports.isValidFile = isValidFile;
     exports.getWellKnownCertificateConfigFileLocation = getWellKnownCertificateConfigFileLocation;
-    var fs15 = __require("fs");
+    var fs16 = __require("fs");
     var os4 = __require("os");
-    var path12 = __require("path");
+    var path13 = __require("path");
     var WELL_KNOWN_CERTIFICATE_CONFIG_FILE = "certificate_config.json";
     var CLOUDSDK_CONFIG_DIRECTORY = "gcloud";
     function snakeToCamel(str2) {
@@ -62802,15 +62975,15 @@ var require_util2 = __commonJS({
     }
     async function isValidFile(filePath) {
       try {
-        const stats = await fs15.promises.lstat(filePath);
+        const stats = await fs16.promises.lstat(filePath);
         return stats.isFile();
       } catch (e2) {
         return false;
       }
     }
     function getWellKnownCertificateConfigFileLocation() {
-      const configDir = process.env.CLOUDSDK_CONFIG || (_isWindows() ? path12.join(process.env.APPDATA || "", CLOUDSDK_CONFIG_DIRECTORY) : path12.join(process.env.HOME || "", ".config", CLOUDSDK_CONFIG_DIRECTORY));
-      return path12.join(configDir, WELL_KNOWN_CERTIFICATE_CONFIG_FILE);
+      const configDir = process.env.CLOUDSDK_CONFIG || (_isWindows() ? path13.join(process.env.APPDATA || "", CLOUDSDK_CONFIG_DIRECTORY) : path13.join(process.env.HOME || "", ".config", CLOUDSDK_CONFIG_DIRECTORY));
+      return path13.join(configDir, WELL_KNOWN_CERTIFICATE_CONFIG_FILE);
     }
     function _isWindows() {
       return os4.platform().startsWith("win");
@@ -64517,11 +64690,11 @@ var require_verify_stream = __commonJS({
     var toString = require_tostring();
     var util3 = __require("util");
     var JWS_REGEX = /^[a-zA-Z0-9\-_]+?\.[a-zA-Z0-9\-_]+?\.([a-zA-Z0-9\-_]+)?$/;
-    function isObject2(thing) {
+    function isObject4(thing) {
       return Object.prototype.toString.call(thing) === "[object Object]";
     }
     function safeJsonParse(thing) {
-      if (isObject2(thing))
+      if (isObject4(thing))
         return thing;
       try {
         return JSON.parse(thing);
@@ -64756,11 +64929,11 @@ var require_getCredentials = __commonJS({
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.getCredentials = getCredentials;
-    var path12 = __require("path");
-    var fs15 = __require("fs");
+    var path13 = __require("path");
+    var fs16 = __require("fs");
     var util_1 = __require("util");
     var errorWithCode_1 = require_errorWithCode();
-    var readFile2 = fs15.readFile ? (0, util_1.promisify)(fs15.readFile) : async () => {
+    var readFile2 = fs16.readFile ? (0, util_1.promisify)(fs16.readFile) : async () => {
       throw new errorWithCode_1.ErrorWithCode("use key rather than keyFile.", "MISSING_CREDENTIALS");
     };
     var ExtensionFiles;
@@ -64828,7 +65001,7 @@ var require_getCredentials = __commonJS({
        * @returns An instance of a class that implements ICredentialsProvider.
        */
       static create(keyFilePath) {
-        const keyFileExtension = path12.extname(keyFilePath);
+        const keyFileExtension = path13.extname(keyFilePath);
         switch (keyFileExtension) {
           case ExtensionFiles.JSON:
             return new JsonCredentialsProvider(keyFilePath);
@@ -66437,12 +66610,12 @@ var require_filesubjecttokensupplier = __commonJS({
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.FileSubjectTokenSupplier = void 0;
     var util_1 = __require("util");
-    var fs15 = __require("fs");
-    var readFile2 = (0, util_1.promisify)(fs15.readFile ?? (() => {
+    var fs16 = __require("fs");
+    var readFile2 = (0, util_1.promisify)(fs16.readFile ?? (() => {
     }));
-    var realpath2 = (0, util_1.promisify)(fs15.realpath ?? (() => {
+    var realpath2 = (0, util_1.promisify)(fs16.realpath ?? (() => {
     }));
-    var lstat = (0, util_1.promisify)(fs15.lstat ?? (() => {
+    var lstat = (0, util_1.promisify)(fs16.lstat ?? (() => {
     }));
     var FileSubjectTokenSupplier = class {
       filePath;
@@ -66560,7 +66733,7 @@ var require_certificatesubjecttokensupplier = __commonJS({
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.CertificateSubjectTokenSupplier = exports.InvalidConfigurationError = exports.CertificateSourceUnavailableError = exports.CERTIFICATE_CONFIGURATION_ENV_VARIABLE = void 0;
     var util_1 = require_util2();
-    var fs15 = __require("fs");
+    var fs16 = __require("fs");
     var crypto_1 = __require("crypto");
     var https2 = __require("https");
     exports.CERTIFICATE_CONFIGURATION_ENV_VARIABLE = "GOOGLE_API_CERTIFICATE_CONFIG";
@@ -66654,7 +66827,7 @@ var require_certificatesubjecttokensupplier = __commonJS({
         const configPath = this.certificateConfigPath;
         let fileContents;
         try {
-          fileContents = await fs15.promises.readFile(configPath, "utf8");
+          fileContents = await fs16.promises.readFile(configPath, "utf8");
         } catch (err) {
           throw new CertificateSourceUnavailableError(`Failed to read certificate config file at: ${configPath}`);
         }
@@ -66679,14 +66852,14 @@ var require_certificatesubjecttokensupplier = __commonJS({
       async #getKeyAndCert(certPath, keyPath) {
         let cert, key;
         try {
-          cert = await fs15.promises.readFile(certPath);
+          cert = await fs16.promises.readFile(certPath);
           new crypto_1.X509Certificate(cert);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           throw new CertificateSourceUnavailableError(`Failed to read certificate file at ${certPath}: ${message}`);
         }
         try {
-          key = await fs15.promises.readFile(keyPath);
+          key = await fs16.promises.readFile(keyPath);
           (0, crypto_1.createPrivateKey)(key);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -66705,7 +66878,7 @@ var require_certificatesubjecttokensupplier = __commonJS({
           return JSON.stringify([leafCert.raw.toString("base64")]);
         }
         try {
-          const chainPems = await fs15.promises.readFile(this.trustChainPath, "utf8");
+          const chainPems = await fs16.promises.readFile(this.trustChainPath, "utf8");
           const pemBlocks = chainPems.match(/-----BEGIN CERTIFICATE-----[^-]+-----END CERTIFICATE-----/g) ?? [];
           const chainCerts = pemBlocks.map((pem, index3) => {
             try {
@@ -67407,7 +67580,7 @@ var require_pluggable_auth_handler = __commonJS({
     exports.PluggableAuthHandler = exports.ExecutableError = void 0;
     var executable_response_1 = require_executable_response();
     var childProcess = __require("child_process");
-    var fs15 = __require("fs");
+    var fs16 = __require("fs");
     var ExecutableError = class extends Error {
       /**
        * The exit code returned by the executable.
@@ -67492,14 +67665,14 @@ var require_pluggable_auth_handler = __commonJS({
         }
         let filePath;
         try {
-          filePath = await fs15.promises.realpath(this.outputFile);
+          filePath = await fs16.promises.realpath(this.outputFile);
         } catch {
           return void 0;
         }
-        if (!(await fs15.promises.lstat(filePath)).isFile()) {
+        if (!(await fs16.promises.lstat(filePath)).isFile()) {
           return void 0;
         }
-        const responseString = await fs15.promises.readFile(filePath, {
+        const responseString = await fs16.promises.readFile(filePath, {
           encoding: "utf8"
         });
         if (responseString === "") {
@@ -67910,7 +68083,7 @@ var require_gdchclient = __commonJS({
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.GdchClient = exports.GDCH_SERVICE_ACCOUNT_TYPE = void 0;
     var crypto8 = __require("crypto");
-    var fs15 = __require("fs");
+    var fs16 = __require("fs");
     var https2 = __require("https");
     var oauth2client_1 = require_oauth2client();
     var DEFAULT_LIFETIME_IN_SECONDS = 3600;
@@ -68133,7 +68306,7 @@ var require_gdchclient = __commonJS({
         const currentPath = this.caCertPath;
         this.caAgentPromise = (async () => {
           try {
-            const ca = await fs15.promises.readFile(currentPath);
+            const ca = await fs16.promises.readFile(currentPath);
             return new https2.Agent({ ca });
           } catch (err) {
             if (this.cachedCaCertPath === currentPath) {
@@ -68193,11 +68366,11 @@ var require_googleauth = __commonJS({
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.GoogleAuth = exports.GoogleAuthExceptionMessages = void 0;
     var child_process_1 = __require("child_process");
-    var fs15 = __require("fs");
+    var fs16 = __require("fs");
     var gaxios_1 = (init_src2(), __toCommonJS(src_exports2));
     var gcpMetadata = require_src3();
     var os4 = __require("os");
-    var path12 = __require("path");
+    var path13 = __require("path");
     var crypto_1 = require_crypto3();
     var computeclient_1 = require_computeclient();
     var idtokenclient_1 = require_idtokenclient();
@@ -68482,20 +68655,20 @@ var require_googleauth = __commonJS({
         if (!configDir) {
           if (this._isWindows()) {
             if (process.env["APPDATA"]) {
-              configDir = path12.join(process.env["APPDATA"], "gcloud");
+              configDir = path13.join(process.env["APPDATA"], "gcloud");
             }
           } else {
             const home = process.env["HOME"];
             if (home) {
-              configDir = path12.join(home, ".config", "gcloud");
+              configDir = path13.join(home, ".config", "gcloud");
             }
           }
         }
         if (!configDir) {
           return null;
         }
-        const location = path12.join(configDir, "application_default_credentials.json");
-        if (!fs15.existsSync(location)) {
+        const location = path13.join(configDir, "application_default_credentials.json");
+        if (!fs16.existsSync(location)) {
           return null;
         }
         const client = await this._getApplicationCredentialsFromFilePath(location, options);
@@ -68512,8 +68685,8 @@ var require_googleauth = __commonJS({
           throw new Error("The file path is invalid.");
         }
         try {
-          filePath = fs15.realpathSync(filePath);
-          if (!fs15.lstatSync(filePath).isFile()) {
+          filePath = fs16.realpathSync(filePath);
+          if (!fs16.lstatSync(filePath).isFile()) {
             throw new Error();
           }
         } catch (err) {
@@ -68522,7 +68695,7 @@ var require_googleauth = __commonJS({
           }
           throw err;
         }
-        const readStream = fs15.createReadStream(filePath);
+        const readStream = fs16.createReadStream(filePath);
         return this.fromStream(readStream, options);
       }
       /**
@@ -68849,8 +69022,8 @@ var require_googleauth = __commonJS({
         if (this.jsonContent) {
           return this._cacheClientFromJSON(this.jsonContent, this.clientOptions);
         } else if (this.keyFilename) {
-          const filePath = path12.resolve(this.keyFilename);
-          const stream7 = fs15.createReadStream(filePath);
+          const filePath = path13.resolve(this.keyFilename);
+          const stream7 = fs16.createReadStream(filePath);
           return await this.fromStreamAsync(stream7, this.clientOptions);
         } else if (this.apiKey) {
           const client = await this.fromAPIKey(this.apiKey, this.clientOptions);
@@ -71635,7 +71808,7 @@ var require_websocket = __commonJS({
     var http3 = __require("http");
     var net2 = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes2, createHash: createHash2 } = __require("crypto");
+    var { randomBytes: randomBytes3, createHash: createHash3 } = __require("crypto");
     var { Duplex, Readable: Readable3 } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -72173,7 +72346,7 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key = randomBytes2(16).toString("base64");
+      const key = randomBytes3(16).toString("base64");
       const request2 = isSecure ? https2.request : http3.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
@@ -72303,7 +72476,7 @@ var require_websocket = __commonJS({
           abortHandshake(websocket, socket, "Invalid Upgrade header");
           return;
         }
-        const digest = createHash2("sha1").update(key + GUID).digest("base64");
+        const digest = createHash3("sha1").update(key + GUID).digest("base64");
         if (res.headers["sec-websocket-accept"] !== digest) {
           abortHandshake(websocket, socket, "Invalid Sec-WebSocket-Accept header");
           return;
@@ -72672,7 +72845,7 @@ var require_websocket_server = __commonJS({
     var EventEmitter = __require("events");
     var http3 = __require("http");
     var { Duplex } = __require("stream");
-    var { createHash: createHash2 } = __require("crypto");
+    var { createHash: createHash3 } = __require("crypto");
     var extension2 = require_extension();
     var PerMessageDeflate2 = require_permessage_deflate();
     var subprotocol2 = require_subprotocol();
@@ -72979,7 +73152,7 @@ var require_websocket_server = __commonJS({
           );
         }
         if (this._state > RUNNING) return abortHandshake(socket, 503);
-        const digest = createHash2("sha1").update(key + GUID).digest("base64");
+        const digest = createHash3("sha1").update(key + GUID).digest("base64");
         const headers = [
           "HTTP/1.1 101 Switching Protocols",
           "Upgrade: websocket",
@@ -84892,7 +85065,7 @@ var init_node3 = __esm({
           params
         );
         const urlParams = body["_url"];
-        const path12 = formatMap("{model}:batchGenerateContent", urlParams);
+        const path13 = formatMap("{model}:batchGenerateContent", urlParams);
         const batch = body["batch"];
         const inputConfig = batch["inputConfig"];
         const requestsWrapper = inputConfig["requests"];
@@ -84913,7 +85086,7 @@ var init_node3 = __esm({
         delete body["config"];
         delete body["_url"];
         delete body["_query"];
-        return { path: path12, body };
+        return { path: path13, body };
       }
       // Helper function to get the first GCS URI
       getGcsUri(src) {
@@ -84969,16 +85142,16 @@ var init_node3 = __esm({
       async createInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = createBatchJobParametersToVertex(this.apiClient, params);
-          path12 = formatMap("batchPredictionJobs", body["_url"]);
+          path13 = formatMap("batchPredictionJobs", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -84993,12 +85166,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = createBatchJobParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{model}:batchGenerateContent", body["_url"]);
+          path13 = formatMap("{model}:batchGenerateContent", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -85023,18 +85196,18 @@ var init_node3 = __esm({
       async createEmbeddingsInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = createEmbeddingsBatchJobParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{model}:asyncBatchEmbedContent", body["_url"]);
+          path13 = formatMap("{model}:asyncBatchEmbedContent", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -85063,16 +85236,16 @@ var init_node3 = __esm({
       async get(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = getBatchJobParametersToVertex(this.apiClient, params);
-          path12 = formatMap("batchPredictionJobs/{name}", body["_url"]);
+          path13 = formatMap("batchPredictionJobs/{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -85087,12 +85260,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = getBatchJobParametersToMldev(this.apiClient, params);
-          path12 = formatMap("batches/{name}", body["_url"]);
+          path13 = formatMap("batches/{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -85120,16 +85293,16 @@ var init_node3 = __esm({
        */
       async cancel(params) {
         var _a6, _b, _c, _d;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = cancelBatchJobParametersToVertex(this.apiClient, params);
-          path12 = formatMap("batchPredictionJobs/{name}:cancel", body["_url"]);
+          path13 = formatMap("batchPredictionJobs/{name}:cancel", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           await this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -85138,12 +85311,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = cancelBatchJobParametersToMldev(this.apiClient, params);
-          path12 = formatMap("batches/{name}:cancel", body["_url"]);
+          path13 = formatMap("batches/{name}:cancel", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           await this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -85155,16 +85328,16 @@ var init_node3 = __esm({
       async listInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = listBatchJobsParametersToVertex(params);
-          path12 = formatMap("batchPredictionJobs", body["_url"]);
+          path13 = formatMap("batchPredictionJobs", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -85187,12 +85360,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = listBatchJobsParametersToMldev(params);
-          path12 = formatMap("batches", body["_url"]);
+          path13 = formatMap("batches", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -85229,16 +85402,16 @@ var init_node3 = __esm({
       async delete(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = deleteBatchJobParametersToVertex(this.apiClient, params);
-          path12 = formatMap("batchPredictionJobs/{name}", body["_url"]);
+          path13 = formatMap("batchPredictionJobs/{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -85259,12 +85432,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = deleteBatchJobParametersToMldev(this.apiClient, params);
-          path12 = formatMap("batches/{name}", body["_url"]);
+          path13 = formatMap("batches/{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -85323,16 +85496,16 @@ var init_node3 = __esm({
       async create(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = createCachedContentParametersToVertex(this.apiClient, params);
-          path12 = formatMap("cachedContents", body["_url"]);
+          path13 = formatMap("cachedContents", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -85346,12 +85519,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = createCachedContentParametersToMldev(this.apiClient, params);
-          path12 = formatMap("cachedContents", body["_url"]);
+          path13 = formatMap("cachedContents", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -85379,16 +85552,16 @@ var init_node3 = __esm({
       async get(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = getCachedContentParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path13 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -85402,12 +85575,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = getCachedContentParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path13 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -85435,16 +85608,16 @@ var init_node3 = __esm({
       async delete(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = deleteCachedContentParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path13 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -85467,12 +85640,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = deleteCachedContentParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path13 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -85512,16 +85685,16 @@ var init_node3 = __esm({
       async update(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = updateCachedContentParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path13 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "PATCH",
@@ -85535,12 +85708,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = updateCachedContentParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path13 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "PATCH",
@@ -85557,16 +85730,16 @@ var init_node3 = __esm({
       async listInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = listCachedContentsParametersToVertex(params);
-          path12 = formatMap("cachedContents", body["_url"]);
+          path13 = formatMap("cachedContents", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -85589,12 +85762,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = listCachedContentsParametersToMldev(params);
-          path12 = formatMap("cachedContents", body["_url"]);
+          path13 = formatMap("cachedContents", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -85925,18 +86098,18 @@ var init_node3 = __esm({
       async listInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = listFilesParametersToMldev(params);
-          path12 = formatMap("files", body["_url"]);
+          path13 = formatMap("files", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -85962,18 +86135,18 @@ var init_node3 = __esm({
       async createInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = createFileParametersToMldev(params);
-          path12 = formatMap("upload/v1beta/files", body["_url"]);
+          path13 = formatMap("upload/v1beta/files", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -86008,18 +86181,18 @@ var init_node3 = __esm({
       async get(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = getFileParametersToMldev(params);
-          path12 = formatMap("files/{file}", body["_url"]);
+          path13 = formatMap("files/{file}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -86049,18 +86222,18 @@ var init_node3 = __esm({
       async delete(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = deleteFileParametersToMldev(params);
-          path12 = formatMap("files/{file}", body["_url"]);
+          path13 = formatMap("files/{file}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -86086,18 +86259,18 @@ var init_node3 = __esm({
       async registerFilesInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = internalRegisterFilesParametersToMldev(params);
-          path12 = formatMap("files:register", body["_url"]);
+          path13 = formatMap("files:register", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -86257,13 +86430,13 @@ var init_node3 = __esm({
           throw new Error("HTTP options are not correctly set.");
         }
       }
-      constructUrl(path12, httpOptions, prependProjectLocation) {
+      constructUrl(path13, httpOptions, prependProjectLocation) {
         const urlElement = [this.getRequestUrlInternal(httpOptions)];
         if (prependProjectLocation) {
           urlElement.push(this.getBaseResourcePath());
         }
-        if (path12 !== "") {
-          urlElement.push(path12);
+        if (path13 !== "") {
+          urlElement.push(path13);
         }
         const url = new URL(`${urlElement.join("/")}`);
         return url;
@@ -86548,8 +86721,8 @@ var init_node3 = __esm({
           file: fileToUpload
         };
         const fileName = this.getFileName(file);
-        const path12 = formatMap("upload/v1beta/files", body["_url"]);
-        const uploadUrl = await this.fetchUploadUrl(path12, fileToUpload.sizeBytes, fileToUpload.mimeType, fileName, body, config === null || config === void 0 ? void 0 : config.httpOptions);
+        const path13 = formatMap("upload/v1beta/files", body["_url"]);
+        const uploadUrl = await this.fetchUploadUrl(path13, fileToUpload.sizeBytes, fileToUpload.mimeType, fileName, body, config === null || config === void 0 ? void 0 : config.httpOptions);
         return uploader.upload(file, uploadUrl, this);
       }
       /**
@@ -86573,13 +86746,13 @@ var init_node3 = __esm({
         if (mimeType === void 0 || mimeType === "") {
           throw new Error("Can not determine mimeType. Please provide mimeType in the config.");
         }
-        const path12 = `upload/v1beta/${fileSearchStoreName}:uploadToFileSearchStore`;
+        const path13 = `upload/v1beta/${fileSearchStoreName}:uploadToFileSearchStore`;
         const fileName = this.getFileName(file);
         const body = {};
         if (config != null) {
           uploadToFileSearchStoreConfigToMldev(config, body);
         }
-        const uploadUrl = await this.fetchUploadUrl(path12, sizeBytes, mimeType, fileName, body, config === null || config === void 0 ? void 0 : config.httpOptions);
+        const uploadUrl = await this.fetchUploadUrl(path13, sizeBytes, mimeType, fileName, body, config === null || config === void 0 ? void 0 : config.httpOptions);
         return uploader.uploadToFileSearchStore(file, uploadUrl, this);
       }
       /**
@@ -86592,7 +86765,7 @@ var init_node3 = __esm({
         const downloader = this.clientOptions.downloader;
         await downloader.download(params, this);
       }
-      async fetchUploadUrl(path12, sizeBytes, mimeType, fileName, body, configHttpOptions) {
+      async fetchUploadUrl(path13, sizeBytes, mimeType, fileName, body, configHttpOptions) {
         var _a6;
         let httpOptions = {};
         if (configHttpOptions) {
@@ -86605,7 +86778,7 @@ var init_node3 = __esm({
           };
         }
         const httpResponse = await this.request({
-          path: path12,
+          path: path13,
           body: JSON.stringify(body),
           httpMethod: "POST",
           httpOptions
@@ -87582,16 +87755,16 @@ var init_node3 = __esm({
       async generateContentInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = generateContentParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:generateContent", body["_url"]);
+          path13 = formatMap("{model}:generateContent", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -87614,12 +87787,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = generateContentParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{model}:generateContent", body["_url"]);
+          path13 = formatMap("{model}:generateContent", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -87645,17 +87818,17 @@ var init_node3 = __esm({
       async generateContentStreamInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = generateContentParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:streamGenerateContent?alt=sse", body["_url"]);
+          path13 = formatMap("{model}:streamGenerateContent?alt=sse", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           const apiClient = this.apiClient;
           response = apiClient.requestStream({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -87691,13 +87864,13 @@ var init_node3 = __esm({
           });
         } else {
           const body = generateContentParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{model}:streamGenerateContent?alt=sse", body["_url"]);
+          path13 = formatMap("{model}:streamGenerateContent?alt=sse", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           const apiClient = this.apiClient;
           response = apiClient.requestStream({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -87757,17 +87930,17 @@ var init_node3 = __esm({
       async embedContentInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = embedContentParametersPrivateToVertex(this.apiClient, params, params);
           const endpointUrl = tIsVertexEmbedContentModel(params.model) ? "{model}:embedContent" : "{model}:predict";
-          path12 = formatMap(endpointUrl, body["_url"]);
+          path13 = formatMap(endpointUrl, body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -87790,12 +87963,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = embedContentParametersPrivateToMldev(this.apiClient, params);
-          path12 = formatMap("{model}:batchEmbedContents", body["_url"]);
+          path13 = formatMap("{model}:batchEmbedContents", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -87824,16 +87997,16 @@ var init_node3 = __esm({
       async generateImagesInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = generateImagesParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:predict", body["_url"]);
+          path13 = formatMap("{model}:predict", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -87856,12 +88029,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = generateImagesParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{model}:predict", body["_url"]);
+          path13 = formatMap("{model}:predict", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -87890,16 +88063,16 @@ var init_node3 = __esm({
       async editImageInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = editImageParametersInternalToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:predict", body["_url"]);
+          path13 = formatMap("{model}:predict", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -87930,16 +88103,16 @@ var init_node3 = __esm({
       async upscaleImageInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = upscaleImageAPIParametersInternalToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:predict", body["_url"]);
+          path13 = formatMap("{model}:predict", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -87991,16 +88164,16 @@ var init_node3 = __esm({
       async recontextImage(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = recontextImageParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:predict", body["_url"]);
+          path13 = formatMap("{model}:predict", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -88042,16 +88215,16 @@ var init_node3 = __esm({
       async segmentImage(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = segmentImageParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:predict", body["_url"]);
+          path13 = formatMap("{model}:predict", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -88081,16 +88254,16 @@ var init_node3 = __esm({
       async get(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = getModelParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path13 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -88105,12 +88278,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = getModelParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path13 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -88128,16 +88301,16 @@ var init_node3 = __esm({
       async listInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = listModelsParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{models_url}", body["_url"]);
+          path13 = formatMap("{models_url}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -88160,12 +88333,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = listModelsParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{models_url}", body["_url"]);
+          path13 = formatMap("{models_url}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -88208,16 +88381,16 @@ var init_node3 = __esm({
       async update(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = updateModelParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}", body["_url"]);
+          path13 = formatMap("{model}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "PATCH",
@@ -88232,12 +88405,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = updateModelParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path13 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "PATCH",
@@ -88266,16 +88439,16 @@ var init_node3 = __esm({
       async delete(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = deleteModelParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path13 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -88298,12 +88471,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = deleteModelParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{name}", body["_url"]);
+          path13 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -88345,16 +88518,16 @@ var init_node3 = __esm({
       async countTokens(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = countTokensParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:countTokens", body["_url"]);
+          path13 = formatMap("{model}:countTokens", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -88377,12 +88550,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = countTokensParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{model}:countTokens", body["_url"]);
+          path13 = formatMap("{model}:countTokens", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -88426,16 +88599,16 @@ var init_node3 = __esm({
       async computeTokens(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = computeTokensParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:computeTokens", body["_url"]);
+          path13 = formatMap("{model}:computeTokens", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -88466,16 +88639,16 @@ var init_node3 = __esm({
       async generateVideosInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = generateVideosParametersToVertex(this.apiClient, params);
-          path12 = formatMap("{model}:predictLongRunning", body["_url"]);
+          path13 = formatMap("{model}:predictLongRunning", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -88492,12 +88665,12 @@ var init_node3 = __esm({
           });
         } else {
           const body = generateVideosParametersToMldev(this.apiClient, params);
-          path12 = formatMap("{model}:predictLongRunning", body["_url"]);
+          path13 = formatMap("{model}:predictLongRunning", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -88599,16 +88772,16 @@ var init_node3 = __esm({
       async getVideosOperationInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = getOperationParametersToVertex(params);
-          path12 = formatMap("{operationName}", body["_url"]);
+          path13 = formatMap("{operationName}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -88620,12 +88793,12 @@ var init_node3 = __esm({
           return response;
         } else {
           const body = getOperationParametersToMldev(params);
-          path12 = formatMap("{operationName}", body["_url"]);
+          path13 = formatMap("{operationName}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -88640,16 +88813,16 @@ var init_node3 = __esm({
       async fetchPredictVideosOperationInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = fetchPredictOperationParametersToVertex(params);
-          path12 = formatMap("{resourceName}:fetchPredictOperation", body["_url"]);
+          path13 = formatMap("{resourceName}:fetchPredictOperation", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -88755,20 +88928,20 @@ var init_node3 = __esm({
       async create(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("The client.tokens.create method is only supported by the Gemini Developer API.");
         } else {
           const body = createAuthTokenParametersToMldev(this.apiClient, params);
-          path12 = formatMap("auth_tokens", body["_url"]);
+          path13 = formatMap("auth_tokens", body["_url"]);
           queryParams = body["_query"];
           delete body["config"];
           delete body["_url"];
           delete body["_query"];
           const transformedBody = convertBidiSetupToTokenSetup(body, params.config);
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(transformedBody),
             httpMethod: "POST",
@@ -88800,18 +88973,18 @@ var init_node3 = __esm({
       async get(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = getDocumentParametersToMldev(params);
-          path12 = formatMap("{name}", body["_url"]);
+          path13 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -88832,18 +89005,18 @@ var init_node3 = __esm({
        */
       async delete(params) {
         var _a6, _b;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = deleteDocumentParametersToMldev(params);
-          path12 = formatMap("{name}", body["_url"]);
+          path13 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           await this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -88855,18 +89028,18 @@ var init_node3 = __esm({
       async listInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = listDocumentsParametersToMldev(params);
-          path12 = formatMap("{parent}/documents", body["_url"]);
+          path13 = formatMap("{parent}/documents", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -88983,18 +89156,18 @@ var init_node3 = __esm({
       async create(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = createFileSearchStoreParametersToMldev(this.apiClient, params);
-          path12 = formatMap("fileSearchStores", body["_url"]);
+          path13 = formatMap("fileSearchStores", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -89017,18 +89190,18 @@ var init_node3 = __esm({
       async get(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = getFileSearchStoreParametersToMldev(params);
-          path12 = formatMap("{name}", body["_url"]);
+          path13 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -89049,18 +89222,18 @@ var init_node3 = __esm({
        */
       async delete(params) {
         var _a6, _b;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = deleteFileSearchStoreParametersToMldev(params);
-          path12 = formatMap("{name}", body["_url"]);
+          path13 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           await this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
@@ -89072,18 +89245,18 @@ var init_node3 = __esm({
       async listInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = listFileSearchStoresParametersToMldev(params);
-          path12 = formatMap("fileSearchStores", body["_url"]);
+          path13 = formatMap("fileSearchStores", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -89103,18 +89276,18 @@ var init_node3 = __esm({
       async uploadToFileSearchStoreInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = uploadToFileSearchStoreParametersToMldev(params);
-          path12 = formatMap("upload/v1beta/{file_search_store_name}:uploadToFileSearchStore", body["_url"]);
+          path13 = formatMap("upload/v1beta/{file_search_store_name}:uploadToFileSearchStore", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -89142,18 +89315,18 @@ var init_node3 = __esm({
       async importFile(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = importFileParametersToMldev(params);
-          path12 = formatMap("{file_search_store_name}:importFile", body["_url"]);
+          path13 = formatMap("{file_search_store_name}:importFile", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -89346,12 +89519,12 @@ var init_node3 = __esm({
     };
     APIResource3._key = [];
     EMPTY3 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.create(null));
-    createPathTagFunction3 = (pathEncoder = encodeURIPath3) => (function path12(statics, ...params) {
+    createPathTagFunction3 = (pathEncoder = encodeURIPath3) => (function path13(statics, ...params) {
       if (statics.length === 1)
         return statics[0];
       let postPath = false;
       const invalidSegments = [];
-      const path13 = statics.reduce((previousValue, currentValue, index3) => {
+      const path14 = statics.reduce((previousValue, currentValue, index3) => {
         var _a6, _b, _c;
         if (/[?#]/.test(currentValue)) {
           postPath = true;
@@ -89369,7 +89542,7 @@ var init_node3 = __esm({
         }
         return previousValue + currentValue + (index3 === params.length ? "" : encoded);
       }, "");
-      const pathOnly = path13.split(/[?#]/, 1)[0];
+      const pathOnly = path14.split(/[?#]/, 1)[0];
       const invalidSegmentPattern = /(^|\/)(?:\.|%2e){1,2}(?=\/|$)/gi;
       let match;
       while ((match = invalidSegmentPattern.exec(pathOnly)) !== null) {
@@ -89393,10 +89566,10 @@ var init_node3 = __esm({
         }, "");
         throw new GeminiNextGenAPIClientError(`Path parameters result in path with invalid segments:
 ${invalidSegments.map((e2) => e2.error).join("\n")}
-${path13}
+${path14}
 ${underline}`);
       }
-      return path13;
+      return path14;
     });
     path10 = /* @__PURE__ */ createPathTagFunction3(encodeURIPath3);
     BaseInteractions = class extends APIResource3 {
@@ -90005,9 +90178,9 @@ ${underline}`);
       makeStatusError(status, error, message, headers) {
         return APIError3.generate(status, error, message, headers);
       }
-      buildURL(path12, query, defaultBaseURL) {
+      buildURL(path13, query, defaultBaseURL) {
         const baseURL = !this.baseURLOverridden() && defaultBaseURL || this.baseURL;
-        const url = isAbsoluteURL3(path12) ? new URL(path12) : new URL(baseURL + (baseURL.endsWith("/") && path12.startsWith("/") ? path12.slice(1) : path12));
+        const url = isAbsoluteURL3(path13) ? new URL(path13) : new URL(baseURL + (baseURL.endsWith("/") && path13.startsWith("/") ? path13.slice(1) : path13));
         const defaultQuery = this.defaultQuery();
         const pathQuery = Object.fromEntries(url.searchParams);
         if (!isEmptyObj3(defaultQuery) || !isEmptyObj3(pathQuery)) {
@@ -90036,24 +90209,24 @@ ${underline}`);
        */
       async prepareRequest(request2, { url, options }) {
       }
-      get(path12, opts) {
-        return this.methodRequest("get", path12, opts);
+      get(path13, opts) {
+        return this.methodRequest("get", path13, opts);
       }
-      post(path12, opts) {
-        return this.methodRequest("post", path12, opts);
+      post(path13, opts) {
+        return this.methodRequest("post", path13, opts);
       }
-      patch(path12, opts) {
-        return this.methodRequest("patch", path12, opts);
+      patch(path13, opts) {
+        return this.methodRequest("patch", path13, opts);
       }
-      put(path12, opts) {
-        return this.methodRequest("put", path12, opts);
+      put(path13, opts) {
+        return this.methodRequest("put", path13, opts);
       }
-      delete(path12, opts) {
-        return this.methodRequest("delete", path12, opts);
+      delete(path13, opts) {
+        return this.methodRequest("delete", path13, opts);
       }
-      methodRequest(method, path12, opts) {
+      methodRequest(method, path13, opts) {
         return this.request(Promise.resolve(opts).then((opts2) => {
-          return Object.assign({ method, path: path12 }, opts2);
+          return Object.assign({ method, path: path13 }, opts2);
         }));
       }
       request(options, remainingRetries = null) {
@@ -90227,8 +90400,8 @@ ${underline}`);
       async buildRequest(inputOptions, { retryCount = 0 } = {}) {
         var _b, _c, _d;
         const options = Object.assign({}, inputOptions);
-        const { method, path: path12, query, defaultBaseURL } = options;
-        const url = this.buildURL(path12, query, defaultBaseURL);
+        const { method, path: path13, query, defaultBaseURL } = options;
+        const url = this.buildURL(path13, query, defaultBaseURL);
         if ("timeout" in options)
           validatePositiveInteger3("timeout", options.timeout);
         options.timeout = (_b = options.timeout) !== null && _b !== void 0 ? _b : this.timeout;
@@ -90454,16 +90627,16 @@ ${underline}`);
       async getInternal(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = getTuningJobParametersToVertex(params);
-          path12 = formatMap("{name}", body["_url"]);
+          path13 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -90484,12 +90657,12 @@ ${underline}`);
           });
         } else {
           const body = getTuningJobParametersToMldev(params);
-          path12 = formatMap("{name}", body["_url"]);
+          path13 = formatMap("{name}", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -90513,16 +90686,16 @@ ${underline}`);
       async listInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = listTuningJobsParametersToVertex(params);
-          path12 = formatMap("tuningJobs", body["_url"]);
+          path13 = formatMap("tuningJobs", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
@@ -90561,16 +90734,16 @@ ${underline}`);
       async cancel(params) {
         var _a6, _b, _c, _d;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = cancelTuningJobParametersToVertex(params);
-          path12 = formatMap("{name}:cancel", body["_url"]);
+          path13 = formatMap("{name}:cancel", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -90593,12 +90766,12 @@ ${underline}`);
           });
         } else {
           const body = cancelTuningJobParametersToMldev(params);
-          path12 = formatMap("{name}:cancel", body["_url"]);
+          path13 = formatMap("{name}:cancel", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -90624,16 +90797,16 @@ ${underline}`);
       async tuneInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           const body = createTuningJobParametersPrivateToVertex(params, params);
-          path12 = formatMap("tuningJobs", body["_url"]);
+          path13 = formatMap("tuningJobs", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -90659,18 +90832,18 @@ ${underline}`);
       async tuneMldevInternal(params) {
         var _a6, _b;
         let response;
-        let path12 = "";
+        let path13 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
           throw new Error("This method is only supported by the Gemini Developer API.");
         } else {
           const body = createTuningJobParametersPrivateToMldev(params);
-          path12 = formatMap("tunedModels", body["_url"]);
+          path13 = formatMap("tunedModels", body["_url"]);
           queryParams = body["_query"];
           delete body["_url"];
           delete body["_query"];
           response = this.apiClient.request({
-            path: path12,
+            path: path13,
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
@@ -92552,7 +92725,7 @@ async function connectWebSocket(url, headers, signal, connectTimeoutMs = DEFAULT
       socket.removeEventListener("close", onClose);
       signal?.removeEventListener("abort", onAbort);
     };
-    const fail3 = (error, closeReason) => {
+    const fail4 = (error, closeReason) => {
       if (settled)
         return;
       settled = true;
@@ -92570,13 +92743,13 @@ async function connectWebSocket(url, headers, signal, connectTimeoutMs = DEFAULT
       resolve2(socket);
     };
     const onError = (event) => {
-      fail3(extractWebSocketError(event));
+      fail4(extractWebSocketError(event));
     };
     const onClose = (event) => {
-      fail3(extractWebSocketCloseError(event));
+      fail4(extractWebSocketCloseError(event));
     };
     const onAbort = () => {
-      fail3(new Error("Request was aborted"), "aborted");
+      fail4(new Error("Request was aborted"), "aborted");
     };
     socket.addEventListener("open", onOpen);
     socket.addEventListener("error", onError);
@@ -92584,7 +92757,7 @@ async function connectWebSocket(url, headers, signal, connectTimeoutMs = DEFAULT
     signal?.addEventListener("abort", onAbort);
     if (connectTimeoutMs > 0) {
       timeout = setTimeout(() => {
-        fail3(new Error(`WebSocket connect timeout after ${connectTimeoutMs}ms`), "connect_timeout");
+        fail4(new Error(`WebSocket connect timeout after ${connectTimeoutMs}ms`), "connect_timeout");
       }, connectTimeoutMs);
     }
     if (signal?.aborted) {
@@ -94907,6 +95080,15 @@ var init_kimi_coding3 = __esm({
 });
 
 // ../../plugins/cross-model-advisor/src/providers.mjs
+var providers_exports = {};
+__export(providers_exports, {
+  COMPATIBLE_THINKING_FORMATS: () => COMPATIBLE_THINKING_FORMATS,
+  THINKING_LEVELS: () => THINKING_LEVELS2,
+  compatibleThinkingPair: () => compatibleThinkingPair,
+  createBuiltinProvider: () => createBuiltinProvider,
+  createCompatibleModel: () => createCompatibleModel,
+  resolveOfflineModel: () => resolveOfflineModel
+});
 function createBuiltinProvider(id) {
   const factory = FACTORIES[id];
   if (typeof factory !== "function") {
@@ -94921,7 +95103,112 @@ function createBuiltinProvider(id) {
     }
   };
 }
-var OAUTH_FLOWS, FACTORIES;
+function isObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function compatibleThinkingPair(meta) {
+  if (!isObject(meta)) return { pair: null };
+  const hasFormat = Object.prototype.hasOwnProperty.call(meta, "thinkingFormat");
+  const hasMap = Object.prototype.hasOwnProperty.call(meta, "thinkingLevelMap");
+  const hasEffort = Object.prototype.hasOwnProperty.call(meta, "supportsReasoningEffort");
+  if (!hasFormat && !hasMap && !hasEffort) return { pair: null };
+  if (!hasFormat || !hasMap) {
+    return { pair: null, error: "compatible model thinking metadata is invalid" };
+  }
+  const format = meta.thinkingFormat;
+  if (format !== "openai" && format !== "openrouter" && format !== "zai") {
+    return { pair: null, error: "compatible model thinking metadata is invalid" };
+  }
+  const map = meta.thinkingLevelMap;
+  if (!isObject(map)) return { pair: null, error: "compatible model thinking metadata is invalid" };
+  const keys = Object.keys(map);
+  if (keys.length !== THINKING_LEVELS2.length || THINKING_LEVELS2.some((level) => !Object.prototype.hasOwnProperty.call(map, level))) {
+    return { pair: null, error: "compatible model thinking metadata is invalid" };
+  }
+  const thinkingLevelMap = {};
+  for (const level of THINKING_LEVELS2) {
+    const mapped = map[level];
+    if (mapped === null) {
+      thinkingLevelMap[level] = null;
+      continue;
+    }
+    if (typeof mapped !== "string" || mapped.length === 0 || mapped.length > NATIVE_STRING_MAX) {
+      return { pair: null, error: "compatible model thinking metadata is invalid" };
+    }
+    thinkingLevelMap[level] = mapped;
+  }
+  if (hasEffort && typeof meta.supportsReasoningEffort !== "boolean") {
+    return { pair: null, error: "compatible model thinking metadata is invalid" };
+  }
+  const pair = { thinkingFormat: format, thinkingLevelMap };
+  if (hasEffort) pair.supportsReasoningEffort = meta.supportsReasoningEffort;
+  return { pair };
+}
+function createCompatibleModel({ id, baseUrl, meta, cost }) {
+  const thinking = compatibleThinkingPair(meta);
+  const model = {
+    id,
+    name: id,
+    api: (
+      /** @type {const} */
+      "openai-completions"
+    ),
+    provider: "openai-compatible",
+    baseUrl,
+    reasoning: Boolean(meta?.reasoning),
+    input: Array.isArray(meta?.input) ? meta.input : ["text"],
+    cost: cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: meta?.contextWindow,
+    maxTokens: meta?.maxTokens,
+    compat: {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+      supportsStrictMode: false
+    }
+  };
+  if (model.reasoning && thinking.pair) {
+    model.thinkingLevelMap = thinking.pair.thinkingLevelMap;
+    model.compat.thinkingFormat = thinking.pair.thinkingFormat;
+    if (typeof thinking.pair.supportsReasoningEffort === "boolean") {
+      model.compat.supportsReasoningEffort = thinking.pair.supportsReasoningEffort;
+    } else {
+      model.compat.supportsReasoningEffort = thinking.pair.thinkingFormat !== "zai";
+    }
+  }
+  return model;
+}
+function resolveOfflineModel(providerSlot, modelId) {
+  if (typeof modelId !== "string" || modelId.length === 0) {
+    return { error: "advisor model is required" };
+  }
+  if (!isObject(providerSlot) || typeof providerSlot.provider !== "string") {
+    return { error: "unsupported provider" };
+  }
+  const id = providerSlot.provider;
+  if (providerSlot.kind === "api" && id === "openai-compatible") {
+    if (!isObject(providerSlot.models) || Array.isArray(providerSlot.models)) {
+      return { error: "unknown model" };
+    }
+    const meta = providerSlot.models[modelId];
+    if (!isObject(meta)) return { error: "unknown model" };
+    const thinking = compatibleThinkingPair(meta);
+    const baseUrl = typeof providerSlot.baseUrl === "string" ? providerSlot.baseUrl.replace(/\/+$/, "") : "";
+    return {
+      model: createCompatibleModel({ id: modelId, baseUrl, meta }),
+      ...thinking.error ? { thinkingError: thinking.error } : {}
+    };
+  }
+  try {
+    const provider = createBuiltinProvider(id);
+    const model = provider.getModels().find((entry) => entry.id === modelId);
+    if (!model) return { error: "unknown model" };
+    return { model };
+  } catch {
+    return { error: "unsupported provider" };
+  }
+}
+var OAUTH_FLOWS, FACTORIES, THINKING_LEVELS2, COMPATIBLE_THINKING_FORMATS, NATIVE_STRING_MAX;
 var init_providers = __esm({
   "../../plugins/cross-model-advisor/src/providers.mjs"() {
     init_anthropic2();
@@ -94956,6 +95243,330 @@ var init_providers = __esm({
       "openai-codex": openaiCodexProvider,
       "github-copilot": githubCopilotProvider
     });
+    THINKING_LEVELS2 = Object.freeze([
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ]);
+    COMPATIBLE_THINKING_FORMATS = Object.freeze(["openai", "openrouter", "zai"]);
+    NATIVE_STRING_MAX = 64;
+  }
+});
+
+// ../../plugins/cross-model-advisor/src/reasoning.mjs
+var reasoning_exports = {};
+__export(reasoning_exports, {
+  REASONING_EFFORTS: () => REASONING_EFFORTS2,
+  getReasoningChoices: () => getReasoningChoices,
+  planReasoningCompletion: () => planReasoningCompletion,
+  readReasoningEffort: () => readReasoningEffort,
+  validateReasoning: () => validateReasoning
+});
+function isObject2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function readReasoningEffort(advisor) {
+  if (!isObject2(advisor) || advisor.reasoningEffort == null) return "default";
+  return advisor.reasoningEffort;
+}
+function usesAnthropicBudget(model) {
+  return model?.api === "anthropic-messages" && model?.compat?.forceAdaptiveThinking !== true;
+}
+function usesGoogleLevel(model) {
+  if (model?.api !== "google-generative-ai") return false;
+  const id = String(model.id ?? "").toLowerCase();
+  return /gemini-3(?:\.\d+)?-pro/.test(id) || /gemini-3(?:\.\d+)?-flash/.test(id) || id === "gemini-flash-latest" || id === "gemini-flash-lite-latest" || /gemma-?4/.test(id);
+}
+function usesGoogleBudget(model) {
+  return model?.api === "google-generative-ai" && !usesGoogleLevel(model);
+}
+function googleBudgetForLevel(model, level) {
+  const id = String(model.id ?? "");
+  if (id.includes("2.5-pro")) {
+    return { minimal: 128, low: 2048, medium: 8192, high: 32768 }[level];
+  }
+  if (id.includes("2.5-flash-lite")) {
+    return { minimal: 512, low: 2048, medium: 8192, high: 24576 }[level];
+  }
+  if (id.includes("2.5-flash")) {
+    return { minimal: 128, low: 2048, medium: 8192, high: 24576 }[level];
+  }
+  return -1;
+}
+function displayNative(value) {
+  const lower2 = value.toLowerCase();
+  if (LEVEL_LABELS[lower2]) return LEVEL_LABELS[lower2];
+  if (lower2 === "none") return "None";
+  if (lower2 === "disabled") return "Disabled";
+  if (lower2 === "enabled") return "Enabled";
+  return value;
+}
+function googleLevelAllowed(model, level) {
+  if (model?.api !== "google-generative-ai") return true;
+  const blocked = GOOGLE_UNSUPPORTED_LEVELS[String(model.id ?? "").toLowerCase()];
+  return !blocked || !blocked.includes(level);
+}
+function openaiCompletionsTransmitsThinking(model) {
+  if (model?.api !== "openai-completions") return true;
+  if (model.compat?.supportsReasoningEffort === true) return true;
+  const format = model.compat?.thinkingFormat;
+  return typeof format === "string" && format.length > 0 && format !== "openai";
+}
+function isEnableOnlyThinking(model) {
+  if (model?.compat?.supportsReasoningEffort === true) return false;
+  const format = model?.compat?.thinkingFormat;
+  return format === "zai" || format === "deepseek";
+}
+function anthropicAdaptiveEffort(level) {
+  if (level === "minimal" || level === "low") return "low";
+  if (level === "medium") return "medium";
+  if (level === "high") return "high";
+  return "high";
+}
+function googleNativeLevel(model, level) {
+  const id = String(model.id ?? "").toLowerCase();
+  if (/gemini-3(?:\.\d+)?-pro/.test(id)) {
+    if (level === "minimal" || level === "low") return "LOW";
+    if (level === "medium" || level === "high") return "HIGH";
+    return void 0;
+  }
+  if (/gemma-?4/.test(id)) {
+    if (level === "minimal" || level === "low") return "MINIMAL";
+    if (level === "medium" || level === "high") return "HIGH";
+    return void 0;
+  }
+  if (level === "minimal") return "MINIMAL";
+  if (level === "low") return "LOW";
+  if (level === "medium") return "MEDIUM";
+  if (level === "high") return "HIGH";
+  return void 0;
+}
+function applyAlias(choice, title, wire) {
+  choice.effective = wire;
+  if (wire.toLowerCase() !== choice.value) {
+    choice.label = `${title} — sent as ${displayNative(wire)}`;
+  }
+}
+function offIsDisableable(model) {
+  if (!model?.reasoning) return false;
+  if (model.thinkingLevelMap?.off === null) return false;
+  if (!googleLevelAllowed(model, "off")) return false;
+  return getSupportedThinkingLevels(model).includes("off");
+}
+function choiceForLevel(model, level) {
+  const title = LEVEL_LABELS[level] ?? level;
+  const mapped = model.thinkingLevelMap?.[level];
+  const choice = { value: level, label: title };
+  if (isEnableOnlyThinking(model)) {
+    applyAlias(choice, title, level === "off" ? "disabled" : "enabled");
+    return choice;
+  }
+  if (typeof mapped === "string") {
+    applyAlias(choice, title, mapped);
+    return choice;
+  }
+  if (model.api === "anthropic-messages" && model.compat?.forceAdaptiveThinking === true) {
+    applyAlias(choice, title, level === "off" ? "disabled" : anthropicAdaptiveEffort(level));
+    return choice;
+  }
+  if (level !== "off" && usesAnthropicBudget(model)) {
+    const budget = thinkingBudgetForLevel(
+      /** @type {import("@earendil-works/pi-ai").ThinkingLevel} */
+      level
+    );
+    choice.label = `${title} — ${budget} tokens`;
+    choice.effective = String(budget);
+    return choice;
+  }
+  if (level !== "off" && usesGoogleBudget(model)) {
+    const budget = googleBudgetForLevel(model, level);
+    if (budget === -1) {
+      choice.effective = "-1";
+      choice.label = `${title} — dynamic`;
+      return choice;
+    }
+    if (typeof budget === "number" && budget > 0) {
+      choice.label = `${title} — ${budget} tokens`;
+      choice.effective = String(budget);
+    }
+    return choice;
+  }
+  if (level !== "off" && usesGoogleLevel(model)) {
+    const native = googleNativeLevel(model, level);
+    if (native) applyAlias(choice, title, native);
+    return choice;
+  }
+  if (level === "off") {
+    if (model.api === "openai-codex-responses") applyAlias(choice, title, "none");
+    else if (model.api === "anthropic-messages") applyAlias(choice, title, "disabled");
+    else if (model.api === "google-generative-ai") applyAlias(choice, title, "disabled");
+  }
+  return choice;
+}
+function modelChoices(model) {
+  if (!model?.reasoning) return DEFAULT_ONLY;
+  if (!openaiCompletionsTransmitsThinking(model)) return DEFAULT_ONLY;
+  const levels = getSupportedThinkingLevels(model).filter((level) => {
+    if (!googleLevelAllowed(model, level)) return false;
+    if (level === "off") return offIsDisableable(model);
+    return true;
+  });
+  const choices = [DEFAULT_CHOICE, ...levels.map((level) => choiceForLevel(model, level))];
+  return { configurable: choices.length > 1, choices };
+}
+function resolveForChoices(providerSlot, modelId) {
+  const resolved = resolveOfflineModel(providerSlot, modelId);
+  if (resolved.thinkingError) {
+    return { ...DEFAULT_ONLY, thinkingError: resolved.thinkingError };
+  }
+  if (!resolved.model) return DEFAULT_ONLY;
+  if (isObject2(providerSlot) && providerSlot.provider === "openai-compatible") {
+    const meta = isObject2(providerSlot.models) ? providerSlot.models[String(modelId)] : void 0;
+    const thinking = compatibleThinkingPair(meta);
+    if (thinking.error) return { ...DEFAULT_ONLY, thinkingError: thinking.error };
+    if (!thinking.pair || !resolved.model.reasoning) return DEFAULT_ONLY;
+  }
+  return modelChoices(resolved.model);
+}
+async function getReasoningChoices(providerSlot, modelId) {
+  const result = resolveForChoices(providerSlot, modelId);
+  return { configurable: result.configurable, choices: result.choices };
+}
+function budgetError(model, effort, maxOutputTokens) {
+  if (effort === "default" || effort === "off") return null;
+  const requested = Number.isInteger(maxOutputTokens) ? (
+    /** @type {number} */
+    maxOutputTokens
+  ) : 1500;
+  const ceiling = Math.min(requested, Number.isInteger(model.maxTokens) ? model.maxTokens : requested);
+  if (usesAnthropicBudget(model)) {
+    const budget = thinkingBudgetForLevel(
+      /** @type {import("@earendil-works/pi-ai").ThinkingLevel} */
+      effort
+    );
+    if (budget + MIN_ANSWER_TOKENS > ceiling) return ERROR_BUDGET;
+  }
+  if (usesGoogleBudget(model)) {
+    const budget = googleBudgetForLevel(model, effort);
+    if (typeof budget === "number" && budget > 0 && budget + MIN_ANSWER_TOKENS > ceiling) {
+      return ERROR_BUDGET;
+    }
+  }
+  return null;
+}
+async function validateReasoning(providerSlot, advisor, maxOutputTokens) {
+  const effort = readReasoningEffort(advisor);
+  if (typeof effort !== "string" || !EFFORT_SET.has(effort)) {
+    return { ok: false, error: ERROR_INVALID };
+  }
+  const modelId = isObject2(advisor) && typeof advisor.model === "string" ? advisor.model : "";
+  const resolved = resolveOfflineModel(providerSlot, modelId);
+  if (resolved.thinkingError) return { ok: false, error: ERROR_METADATA };
+  if (isObject2(providerSlot) && providerSlot.provider === "openai-compatible") {
+    const meta = isObject2(providerSlot.models) ? providerSlot.models[modelId] : void 0;
+    const thinking = compatibleThinkingPair(meta);
+    if (thinking.error) return { ok: false, error: ERROR_METADATA };
+  }
+  if (effort === "default") return { ok: true };
+  if (!resolved.model) return { ok: false, error: ERROR_UNSUPPORTED };
+  const available = resolveForChoices(providerSlot, modelId);
+  if (!available.choices.some((choice) => choice.value === effort)) {
+    return { ok: false, error: ERROR_UNSUPPORTED };
+  }
+  const overBudget = budgetError(resolved.model, effort, maxOutputTokens);
+  if (overBudget) return { ok: false, error: overBudget };
+  return { ok: true };
+}
+function modelForDefaultGeneration(model) {
+  if (model?.provider !== "openai-compatible") return model;
+  if (!model.compat?.thinkingFormat && model.thinkingLevelMap == null) return model;
+  const compat = { ...model.compat, supportsReasoningEffort: false };
+  delete compat.thinkingFormat;
+  const next = { ...model, compat };
+  delete next.thinkingLevelMap;
+  return next;
+}
+function planReasoningCompletion(model, advisor, baseOptions) {
+  const effort = readReasoningEffort(advisor);
+  if (effort === "default") {
+    return { method: "complete", options: baseOptions, model: modelForDefaultGeneration(model) };
+  }
+  if (effort === "off" && model.api === "openai-codex-responses") {
+    return {
+      method: "complete",
+      options: { ...baseOptions, reasoningEffort: "none" },
+      model
+    };
+  }
+  if (effort !== "off" && usesAnthropicBudget(model)) {
+    return {
+      method: "complete",
+      options: {
+        ...baseOptions,
+        thinkingEnabled: true,
+        thinkingBudgetTokens: thinkingBudgetForLevel(
+          /** @type {import("@earendil-works/pi-ai").ThinkingLevel} */
+          effort
+        )
+      },
+      model
+    };
+  }
+  if (effort === "off") {
+    return { method: "completeSimple", options: { ...baseOptions }, model };
+  }
+  return {
+    method: "completeSimple",
+    options: { ...baseOptions, reasoning: effort },
+    model
+  };
+}
+var REASONING_EFFORTS2, EFFORT_SET, LEVEL_LABELS, ERROR_INVALID, ERROR_UNSUPPORTED, ERROR_METADATA, ERROR_BUDGET, DEFAULT_CHOICE, DEFAULT_ONLY, GOOGLE_UNSUPPORTED_LEVELS;
+var init_reasoning = __esm({
+  "../../plugins/cross-model-advisor/src/reasoning.mjs"() {
+    init_dist();
+    init_simple_options();
+    init_providers();
+    REASONING_EFFORTS2 = Object.freeze([
+      "default",
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ]);
+    EFFORT_SET = new Set(REASONING_EFFORTS2);
+    LEVEL_LABELS = Object.freeze({
+      default: "Default",
+      off: "Off",
+      minimal: "Minimal",
+      low: "Low",
+      medium: "Medium",
+      high: "High",
+      xhigh: "XHigh",
+      max: "Max"
+    });
+    ERROR_INVALID = "reasoning effort is invalid";
+    ERROR_UNSUPPORTED = "reasoning effort is not supported for this model";
+    ERROR_METADATA = "compatible model thinking metadata is invalid";
+    ERROR_BUDGET = "reasoning budget exceeds the configured output limit";
+    DEFAULT_CHOICE = Object.freeze({ value: "default", label: "Default" });
+    DEFAULT_ONLY = Object.freeze({
+      configurable: false,
+      choices: [DEFAULT_CHOICE]
+    });
+    GOOGLE_UNSUPPORTED_LEVELS = Object.freeze({
+      "gemini-2.5-pro": Object.freeze(["off"]),
+      "gemini-3.7-flash": Object.freeze(["minimal"]),
+      "gemini-3.8-flash": Object.freeze(["minimal"]),
+      "gemini-3.1-flash-lite-image": Object.freeze(["low", "medium"])
+    });
   }
 });
 
@@ -94975,7 +95586,7 @@ function issue(code, message) {
 function diagnostic(available, error = null) {
   return error ? { available, error } : { available };
 }
-function isObject(value) {
+function isObject3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function normalizeBaseUrl(baseUrl) {
@@ -94995,7 +95606,7 @@ function redactSecret(text, secret) {
   return text.split(secret).join("[redacted]");
 }
 function apiKeyEnvName(provider) {
-  return isObject(provider) && typeof provider.apiKeyEnv === "string" ? provider.apiKeyEnv : "";
+  return isObject3(provider) && typeof provider.apiKeyEnv === "string" ? provider.apiKeyEnv : "";
 }
 function configuredKey(provider, env) {
   const name = apiKeyEnvName(provider);
@@ -95010,19 +95621,19 @@ function anthropicOatAsApiKey(id, kind, key) {
   return kind === "api" && id === "anthropic" && typeof key === "string" && key.includes("sk-ant-oat");
 }
 function providerKind(provider) {
-  return isObject(provider) && typeof provider.kind === "string" ? provider.kind : "";
+  return isObject3(provider) && typeof provider.kind === "string" ? provider.kind : "";
 }
 function providerId(provider) {
-  return isObject(provider) && typeof provider.provider === "string" ? provider.provider : "";
+  return isObject3(provider) && typeof provider.provider === "string" ? provider.provider : "";
 }
 function advisorModelId(advisor) {
-  return isObject(advisor) && typeof advisor.model === "string" ? advisor.model : "";
+  return isObject3(advisor) && typeof advisor.model === "string" ? advisor.model : "";
 }
 function advisorSlot(advisor) {
-  return isObject(advisor) && typeof advisor.provider === "string" ? advisor.provider : "";
+  return isObject3(advisor) && typeof advisor.provider === "string" ? advisor.provider : "";
 }
 function compatibleModelIssues(meta) {
-  if (!isObject(meta)) return issue("config", "openai-compatible model metadata is missing");
+  if (!isObject3(meta)) return issue("config", "openai-compatible model metadata is missing");
   if (!Number.isInteger(meta.contextWindow) || /** @type {number} */
   meta.contextWindow <= 0) {
     return issue("config", "openai-compatible model requires a positive integer contextWindow");
@@ -95040,7 +95651,7 @@ function compatibleModelIssues(meta) {
   return null;
 }
 function mapCost(pricing) {
-  if (!isObject(pricing)) {
+  if (!isObject3(pricing)) {
     return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   }
   const input = Number(pricing.prompt ?? pricing.input ?? 0);
@@ -95058,14 +95669,14 @@ function listedRate(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
 function compatiblePricingKnown(pricing) {
-  if (!isObject(pricing)) return false;
+  if (!isObject3(pricing)) return false;
   const prompt = pricing.prompt ?? pricing.input;
   const completion = pricing.completion ?? pricing.output;
   return listedRate(prompt) && listedRate(completion);
 }
 function compatibleMeta(provider, advisor) {
   const modelId = advisorModelId(advisor);
-  if (!isObject(provider) || !isObject(provider.models) || Array.isArray(provider.models)) {
+  if (!isObject3(provider) || !isObject3(provider.models) || Array.isArray(provider.models)) {
     return { error: issue("config", "openai-compatible provider requires a models map") };
   }
   if (!modelId) return { error: issue("config", "advisor model is required") };
@@ -95075,7 +95686,7 @@ function compatibleMeta(provider, advisor) {
   );
   const problems = compatibleModelIssues(meta);
   if (problems) {
-    if (!isObject(meta)) return { error: issue("config", `unknown model ${modelId}`) };
+    if (!isObject3(meta)) return { error: issue("config", `unknown model ${modelId}`) };
     return { error: problems };
   }
   return { meta: (
@@ -95160,27 +95771,7 @@ function compatiblePiModel(provider, advisor) {
   );
   if (!baseUrl) return { error: issue("config", "openai-compatible provider requires baseUrl") };
   return {
-    model: {
-      id: modelId,
-      name: modelId,
-      api: (
-        /** @type {const} */
-        "openai-completions"
-      ),
-      provider: "openai-compatible",
-      baseUrl,
-      reasoning: Boolean(meta.reasoning),
-      input: meta.input,
-      cost,
-      contextWindow: meta.contextWindow,
-      maxTokens: meta.maxTokens,
-      compat: {
-        supportsStore: false,
-        supportsDeveloperRole: false,
-        supportsReasoningEffort: Boolean(meta.reasoning),
-        supportsStrictMode: false
-      }
-    },
+    model: createCompatibleModel({ id: modelId, baseUrl, meta, cost }),
     pricingKnown: compatiblePricingKnown(meta.pricing)
   };
 }
@@ -95293,9 +95884,9 @@ function asTypeBoxSchema(schema) {
 }
 function toPiTools(schemas) {
   return schemas.map((entry) => {
-    const name = isObject(entry) && typeof entry.name === "string" ? entry.name : "";
-    const description = isObject(entry) && typeof entry.description === "string" ? entry.description : "";
-    const parameters = isObject(entry) ? entry.parameters ?? entry.inputSchema : void 0;
+    const name = isObject3(entry) && typeof entry.name === "string" ? entry.name : "";
+    const description = isObject3(entry) && typeof entry.description === "string" ? entry.description : "";
+    const parameters = isObject3(entry) ? entry.parameters ?? entry.inputSchema : void 0;
     return {
       name,
       description,
@@ -95305,7 +95896,7 @@ function toPiTools(schemas) {
 }
 function renderOneObservation(observation) {
   if (typeof observation === "string") return observation;
-  if (!isObject(observation)) return "";
+  if (!isObject3(observation)) return "";
   const lines = [];
   const field = (label, value) => {
     if (value == null || value === "") return;
@@ -95396,7 +95987,7 @@ function stagedCandidate(tools) {
 function abortCode(signal) {
   const reason = signal?.reason;
   if (reason === "timeout" || reason === "TimeoutError") return "timeout";
-  if (isObject(reason) && (reason.code === "timeout" || reason.name === "TimeoutError")) return "timeout";
+  if (isObject3(reason) && (reason.code === "timeout" || reason.name === "TimeoutError")) return "timeout";
   if (reason instanceof Error && (/timeout/i.test(reason.name) || /timeout/i.test(reason.message))) {
     return "timeout";
   }
@@ -95462,7 +96053,7 @@ function wrapThrown(error, signal, secret, kind = "api") {
     if (status2 === 429) code = "rate";
     else if (status2 === 401 || status2 === 403) code = "auth";
     else if (status2 === 404) code = "config";
-    else if (isObject(error) && typeof error.code === "string" && (error.code === "oauth" || error.code === "auth")) {
+    else if (isObject3(error) && typeof error.code === "string" && (error.code === "oauth" || error.code === "auth")) {
       code = "auth";
     } else {
       const fromText2 = classifyText(String(err.message ?? ""));
@@ -95479,7 +96070,7 @@ function wrapThrown(error, signal, secret, kind = "api") {
   if (status === 404) return new ApiBackendError("config", text);
   const fromText = classifyText(text);
   if (fromText) return new ApiBackendError(fromText, text);
-  if (isObject(error) && typeof error.code === "string" && error.code === "auth") {
+  if (isObject3(error) && typeof error.code === "string" && error.code === "auth") {
     return new ApiBackendError("auth", text);
   }
   return new ApiBackendError("provider", text);
@@ -95538,9 +96129,27 @@ function toolResultMessage(call, result, isError) {
     timestamp: Date.now()
   };
 }
-async function validateApi({ provider, advisor, env = process.env }) {
+async function validateApi({
+  provider,
+  advisor,
+  env = process.env,
+  maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS2
+}) {
   const prepared = await prepareApi(provider, advisor, env);
   if (prepared.error) return diagnostic(false, prepared.error);
+  const requested = Number.isInteger(maxOutputTokens) ? maxOutputTokens : DEFAULT_MAX_OUTPUT_TOKENS2;
+  const ceiling = Math.min(
+    requested,
+    Number.isInteger(prepared.model.maxTokens) ? prepared.model.maxTokens : requested
+  );
+  const reasoning = await validateReasoning(provider, advisor, ceiling);
+  if (!reasoning.ok) {
+    return {
+      available: false,
+      reasoningInvalid: true,
+      error: issue("config", reasoning.error)
+    };
+  }
   return diagnostic(true);
 }
 async function reviewApi({
@@ -95574,9 +96183,11 @@ async function reviewApi({
     Number.isInteger(limits.maxOutputTokens) ? (
       /** @type {number} */
       limits.maxOutputTokens
-    ) : DEFAULT_MAX_OUTPUT_TOKENS,
+    ) : DEFAULT_MAX_OUTPUT_TOKENS2,
     model.maxTokens
   );
+  const reasoning = await validateReasoning(provider, advisor, maxOutputTokens);
+  if (!reasoning.ok) fail2("config", reasoning.error);
   const piTools = toPiTools(toolSchemas);
   if (piTools.length === 0) fail2("config", "host tool schemas are missing");
   const allowed = HOST_TOOL_NAMES;
@@ -95620,6 +96231,8 @@ async function reviewApi({
     env: {}
   };
   if (kind === "api") requestOptions.apiKey = apiKey;
+  const completion = planReasoningCompletion(model, advisor, requestOptions);
+  const requestModel = completion.model ?? model;
   let toolCalls = 0;
   try {
     for (; ; ) {
@@ -95628,7 +96241,7 @@ async function reviewApi({
       if (!evictUntilFits(messages, currentUser, system, model, maxOutputTokens)) {
         fail2("context-limit", "required review context exceeds the model or character bound");
       }
-      const message = await models.complete(model, context, requestOptions);
+      const message = completion.method === "completeSimple" ? await models.completeSimple(requestModel, context, completion.options) : await models.complete(requestModel, context, completion.options);
       accumulateUsage(usage, message, pricingKnown);
       if (message.stopReason === "aborted" || message.stopReason === "error" || message.stopReason === "length") {
         const code = classifyMessage(message, model, signal);
@@ -95692,13 +96305,14 @@ async function reviewApi({
   }
   return { usage: snapshotUsage(usage), history: messages };
 }
-var HOST_TOOL_NAMES, CONTEXT_CHAR_BOUND, TOOL_RESULT_HEADROOM_TOKENS, DEFAULT_MAX_TOOL_CALLS, DEFAULT_MAX_OUTPUT_TOKENS, SEALED_AUTH, OAUTH_STATIC, OAUTH_SANITIZE_CODES, ApiBackendError;
+var HOST_TOOL_NAMES, CONTEXT_CHAR_BOUND, TOOL_RESULT_HEADROOM_TOKENS, DEFAULT_MAX_TOOL_CALLS, DEFAULT_MAX_OUTPUT_TOKENS2, SEALED_AUTH, OAUTH_STATIC, OAUTH_SANITIZE_CODES, ApiBackendError;
 var init_api = __esm({
   "../../plugins/cross-model-advisor/src/backends/api.mjs"() {
     init_dist();
     init_openai_completions_lazy();
     init_auth();
     init_providers();
+    init_reasoning();
     init_history();
     init_tools();
     init_config();
@@ -95706,7 +96320,7 @@ var init_api = __esm({
     CONTEXT_CHAR_BOUND = 6e4;
     TOOL_RESULT_HEADROOM_TOKENS = 2048;
     DEFAULT_MAX_TOOL_CALLS = 8;
-    DEFAULT_MAX_OUTPUT_TOKENS = 1500;
+    DEFAULT_MAX_OUTPUT_TOKENS2 = 1500;
     SEALED_AUTH = Object.freeze({
       env: async () => void 0,
       fileExists: async () => false
@@ -95740,6 +96354,527 @@ var init_api = __esm({
   }
 });
 
+// ../../plugins/cross-model-advisor/src/setup-store.mjs
+var setup_store_exports = {};
+__export(setup_store_exports, {
+  DEFAULT_MODEL_LIMIT: () => DEFAULT_MODEL_LIMIT,
+  MAX_MODEL_LIMIT: () => MAX_MODEL_LIMIT,
+  SetupError: () => SetupError,
+  getModels: () => getModels,
+  getProviderCatalog: () => getProviderCatalog,
+  main: () => main,
+  parseSetupArgv: () => parseSetupArgv,
+  readBoundedStdin: () => readBoundedStdin,
+  readConfigState: () => readConfigState,
+  revisionOf: () => revisionOf,
+  runSetup: () => runSetup,
+  saveConfig: () => saveConfig
+});
+import { createHash as createHash2, randomBytes as randomBytes2 } from "node:crypto";
+import fsSync2 from "node:fs";
+import fs14 from "node:fs/promises";
+import path11 from "node:path";
+function fail3(code, message) {
+  throw new SetupError(code, message);
+}
+async function defaultCreateBuiltinProvider(id) {
+  const { createBuiltinProvider: createBuiltinProvider2 } = await Promise.resolve().then(() => (init_providers(), providers_exports));
+  return createBuiltinProvider2(id);
+}
+async function defaultValidateReasoning(providerSlot, advisor, maxOutputTokens) {
+  const { validateReasoning: validateReasoning2 } = await Promise.resolve().then(() => (init_reasoning(), reasoning_exports));
+  return validateReasoning2(providerSlot, advisor, maxOutputTokens);
+}
+function isPlainObject(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+function isSupportedProviderId(id) {
+  return API_PROVIDERS.includes(id) || OAUTH_PROVIDERS.includes(id);
+}
+function authKinds(id) {
+  const auth = [];
+  if (API_PROVIDERS.includes(id)) auth.push("api");
+  if (OAUTH_PROVIDERS.includes(id)) auth.push("oauth");
+  return auth;
+}
+function supportedProviderIds() {
+  const ids = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const id of API_PROVIDERS) {
+    seen.add(id);
+    ids.push(id);
+  }
+  for (const id of OAUTH_PROVIDERS) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+function revisionOf(body) {
+  return createHash2("sha256").update(body).digest("hex");
+}
+function parseCount(raw, label) {
+  if (typeof raw !== "string" || !/^[0-9]{1,10}$/.test(raw)) {
+    fail3("usage", `${label} must be a non-negative integer.`);
+  }
+  return Number(raw);
+}
+function parseSetupArgv(argv) {
+  const command = argv[0];
+  if (command === "catalog" || command === "save") {
+    if (argv.length !== 1) fail3("usage", USAGE);
+    return { command };
+  }
+  if (command !== "models") fail3("usage", USAGE);
+  const providerId2 = argv[1];
+  if (typeof providerId2 !== "string" || providerId2.length === 0) fail3("usage", USAGE);
+  if (!isSupportedProviderId(providerId2)) fail3("provider", STATIC_ERRORS.provider);
+  let q = null;
+  let offset = 0;
+  let limit3 = DEFAULT_MODEL_LIMIT;
+  for (let i2 = 2; i2 < argv.length; i2 += 1) {
+    const flag = argv[i2];
+    const value = argv[i2 + 1];
+    if (flag === "--q") {
+      if (typeof value !== "string" || value.startsWith("--")) fail3("usage", USAGE);
+      if (value.length > MAX_QUERY_CHARS) fail3("usage", "Search query is too long.");
+      q = value;
+      i2 += 1;
+      continue;
+    }
+    if (flag === "--offset") {
+      if (typeof value !== "string") fail3("usage", USAGE);
+      offset = parseCount(value, "offset");
+      i2 += 1;
+      continue;
+    }
+    if (flag === "--limit") {
+      if (typeof value !== "string") fail3("usage", USAGE);
+      const parsed = parseCount(value, "limit");
+      if (parsed < 1 || parsed > MAX_MODEL_LIMIT) {
+        fail3("usage", `limit must be an integer from 1 to ${MAX_MODEL_LIMIT}.`);
+      }
+      limit3 = parsed;
+      i2 += 1;
+      continue;
+    }
+    fail3("usage", USAGE);
+  }
+  return { command: "models", providerId: providerId2, q, offset, limit: limit3 };
+}
+async function readBoundedStdin(stream7, max = MAX_STDIN_BYTES) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of stream7) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buf.length;
+    if (size > max) fail3("overflow", STATIC_ERRORS.overflow);
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+async function lstatOrNull2(file) {
+  try {
+    return await fs14.lstat(file);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+function refuseSymlink2(st, label) {
+  if (st?.isSymbolicLink()) fail3("symlink", `${label} must not be a symlink.`);
+}
+function mapFsError2(error) {
+  if (error instanceof SetupError) return error;
+  if (error && (error.code === "ELOOP" || error.code === "EMLINK")) {
+    return new SetupError("symlink", STATIC_ERRORS.symlink);
+  }
+  return new SetupError("storage", STATIC_ERRORS.storage);
+}
+async function withSaveLock(file, fn) {
+  const lockPath = `${file}.lock`;
+  try {
+    await fs14.mkdir(path11.dirname(file), { recursive: true, mode: 448 });
+    await fs14.mkdir(lockPath, { mode: 448 });
+  } catch (error) {
+    if (error && error.code === "EEXIST") fail3("busy", STATIC_ERRORS.busy);
+    throw mapFsError2(error);
+  }
+  try {
+    return await fn(await readConfigStateFromPath(file));
+  } finally {
+    await fs14.rmdir(lockPath).catch(() => {
+    });
+  }
+}
+function parseConfigText(raw) {
+  const text = typeof raw === "string" ? raw : raw.toString("utf8");
+  const stripped = text.charCodeAt(0) === 65279 ? text.slice(1) : text;
+  let parsed;
+  try {
+    parsed = JSON.parse(stripped);
+  } catch {
+    return { config: null, configError: "Configuration file is not valid JSON." };
+  }
+  try {
+    return { config: validateConfig(parsed), configError: null };
+  } catch {
+    return { config: null, configError: STATIC_ERRORS.config };
+  }
+}
+async function readConfigStateFromPath(file) {
+  const st = await lstatOrNull2(file);
+  if (!st) {
+    return { path: file, revision: null, config: null, configError: null };
+  }
+  refuseSymlink2(st, "Configuration file");
+  if (!st.isFile()) fail3("storage", "Configuration path is not a file.");
+  if (st.size > MAX_STDIN_BYTES) fail3("storage", "Configuration file is too large.");
+  let handle;
+  let raw;
+  try {
+    handle = await fs14.open(file, fsSync2.constants.O_RDONLY | NOFOLLOW2 | O_CLOEXEC2);
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.size > MAX_STDIN_BYTES) fail3("storage", STATIC_ERRORS.storage);
+    const buffer = Buffer.allocUnsafe(opened.size + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, size, buffer.length - size, null);
+      if (!bytesRead) break;
+      size += bytesRead;
+    }
+    if (size > opened.size) fail3("storage", "Configuration changed while reading. Run catalog again.");
+    raw = buffer.subarray(0, size);
+  } catch (error) {
+    throw mapFsError2(error);
+  } finally {
+    await handle?.close();
+  }
+  const parsed = parseConfigText(raw);
+  return {
+    path: file,
+    revision: revisionOf(raw),
+    config: parsed.config,
+    configError: parsed.configError
+  };
+}
+async function readConfigState({ env = process.env } = {}) {
+  return readConfigStateFromPath(configFilePath(env));
+}
+async function atomicWriteConfig(file, body) {
+  const dir = path11.dirname(file);
+  const dest = await lstatOrNull2(file);
+  if (dest) {
+    refuseSymlink2(dest, "Configuration file");
+    if (!dest.isFile()) fail3("storage", "Configuration path is not a file.");
+  }
+  const tmp = path11.join(dir, `.${path11.basename(file)}.${process.pid}.${randomBytes2(8).toString("hex")}.tmp`);
+  let handle;
+  try {
+    handle = await fs14.open(tmp, OPEN_WRITE2, FILE_MODE);
+    await handle.writeFile(body);
+    await handle.chmod(FILE_MODE);
+    await handle.close();
+    handle = void 0;
+    const latest = await lstatOrNull2(file);
+    if (latest) {
+      refuseSymlink2(latest, "Configuration file");
+      if (!latest.isFile()) fail3("storage", "Configuration path is not a file.");
+    }
+    await fs14.rename(tmp, file);
+  } catch (error) {
+    if (handle) await handle.close().catch(() => {
+    });
+    await fs14.unlink(tmp).catch(() => {
+    });
+    throw mapFsError2(error);
+  }
+}
+function offlineCatalogModels(sdk) {
+  if (!sdk || typeof sdk.getModels !== "function") fail3("catalog", STATIC_ERRORS.catalog);
+  const listed = sdk.getModels();
+  if (!Array.isArray(listed)) fail3("catalog", STATIC_ERRORS.catalog);
+  return listed;
+}
+async function summarizeProvider(createProviderFn, id) {
+  const summary = {
+    id,
+    name: id === "openai-compatible" ? "OpenAI-compatible" : id,
+    auth: authKinds(id),
+    modelCount: 0
+  };
+  if (summary.auth.includes("api") && SUGGESTED_API_KEY_ENV[id]) {
+    summary.suggestedApiKeyEnv = SUGGESTED_API_KEY_ENV[id];
+  }
+  if (id === "openai-compatible") return summary;
+  try {
+    const sdk = await createProviderFn(id);
+    if (sdk && typeof sdk.name === "string" && sdk.name) summary.name = sdk.name;
+    summary.modelCount = offlineCatalogModels(sdk).length;
+  } catch {
+    fail3("catalog", STATIC_ERRORS.catalog);
+  }
+  return summary;
+}
+async function getProviderCatalog(options = {}) {
+  const createProviderFn = options.createBuiltinProvider ?? defaultCreateBuiltinProvider;
+  return Promise.all(supportedProviderIds().map((id) => summarizeProvider(createProviderFn, id)));
+}
+function modelMatches(value, needle) {
+  if (!needle) return true;
+  const id = typeof value?.id === "string" ? value.id : "";
+  const name = typeof value?.name === "string" ? value.name : "";
+  return `${id}
+${name}`.toLowerCase().includes(needle);
+}
+async function getModels(providerId2, options = {}) {
+  if (typeof providerId2 !== "string" || !isSupportedProviderId(providerId2)) {
+    fail3("provider", STATIC_ERRORS.provider);
+  }
+  const q = options.q ?? null;
+  if (q !== null && (typeof q !== "string" || q.length > MAX_QUERY_CHARS)) {
+    fail3("usage", "Search query is too long.");
+  }
+  const offset = options.offset ?? 0;
+  const limit3 = options.limit ?? DEFAULT_MODEL_LIMIT;
+  if (!Number.isInteger(offset) || offset < 0) fail3("usage", "offset must be a non-negative integer.");
+  if (!Number.isInteger(limit3) || limit3 < 1 || limit3 > MAX_MODEL_LIMIT) {
+    fail3("usage", `limit must be an integer from 1 to ${MAX_MODEL_LIMIT}.`);
+  }
+  const createBuiltinProvider2 = options.createBuiltinProvider ?? defaultCreateBuiltinProvider;
+  if (providerId2 === "openai-compatible") {
+    return {
+      ok: true,
+      provider: providerId2,
+      q,
+      offset,
+      limit: limit3,
+      total: 0,
+      models: [],
+      hint: COMPATIBLE_HINT
+    };
+  }
+  let sdk;
+  try {
+    sdk = await createBuiltinProvider2(providerId2);
+  } catch {
+    fail3("catalog", STATIC_ERRORS.catalog);
+  }
+  const needle = typeof q === "string" && q.trim().length > 0 ? q.trim().toLowerCase() : "";
+  const filtered = offlineCatalogModels(sdk).filter((entry) => modelMatches(entry, needle)).sort((a, b) => a.id.localeCompare(b.id));
+  return {
+    ok: true,
+    provider: providerId2,
+    q,
+    offset,
+    limit: limit3,
+    total: filtered.length,
+    models: filtered.slice(offset, offset + limit3).map(({ id, name }) => ({ id, name: name || id }))
+  };
+}
+function parseSavePayload(raw) {
+  const text = raw.charCodeAt(0) === 65279 ? raw.slice(1) : raw;
+  if (text.trim().length === 0) fail3("input", "Save input is empty.");
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    fail3("input", "Save input is not valid JSON.");
+  }
+  if (!isPlainObject(parsed)) fail3("input", "Save input must be an object.");
+  for (const key of Object.keys(parsed)) {
+    if (!SAVE_KEYS.includes(key)) fail3("input", "Save input has unknown keys.");
+  }
+  if (!("revision" in parsed) || !("config" in parsed)) {
+    fail3("input", "Save input requires revision and config.");
+  }
+  if (parsed.revision !== null && (typeof parsed.revision !== "string" || parsed.revision.length === 0 || parsed.revision.length > 128)) {
+    fail3("revision", "revision must be a catalog revision string or null.");
+  }
+  return { revision: parsed.revision, config: parsed.config };
+}
+function assertRevision(expected, provided) {
+  if (expected === null) {
+    if (provided !== null) {
+      fail3("revision", "revision must be null when no configuration file exists.");
+    }
+    return;
+  }
+  if (provided === null) {
+    fail3("revision", "revision is required because a configuration file already exists. Run catalog and retry.");
+  }
+  if (provided !== expected) {
+    fail3("revision", "Configuration changed since catalog. Run catalog again and retry save.");
+  }
+}
+async function assertAdvisorReasoning(config, validateReasoningFn) {
+  const maxOutputTokens = config.limits.maxOutputTokens;
+  for (const advisor of config.advisors) {
+    const providerSlot = config.providers[advisor.provider];
+    let result;
+    try {
+      result = await validateReasoningFn(providerSlot, advisor, maxOutputTokens);
+    } catch {
+      fail3("config", STATIC_ERRORS.config);
+    }
+    if (!result || result.ok !== true) {
+      const message = typeof result?.error === "string" && result.error ? result.error : STATIC_ERRORS.config;
+      fail3("config", message);
+    }
+  }
+}
+async function saveConfig(payload, options = {}) {
+  if (!isPlainObject(payload)) fail3("input", "Save input must be an object.");
+  const revision = payload.revision;
+  if (revision !== null && (typeof revision !== "string" || revision.length === 0 || revision.length > 128)) {
+    fail3("revision", "revision must be a catalog revision string or null.");
+  }
+  if (!("config" in payload)) fail3("input", "Save input requires revision and config.");
+  let validated;
+  try {
+    validated = validateConfig(payload.config);
+  } catch {
+    fail3("config", STATIC_ERRORS.config);
+  }
+  const validateReasoningFn = options.validateReasoning ?? defaultValidateReasoning;
+  await assertAdvisorReasoning(validated, validateReasoningFn);
+  const env = options.env ?? process.env;
+  const file = configFilePath(env);
+  return withSaveLock(file, async (state2) => {
+    assertRevision(state2.revision, revision);
+    const body = `${JSON.stringify(validated, null, 2)}
+`;
+    if (Buffer.byteLength(body) > MAX_STDIN_BYTES) fail3("overflow", "Formatted configuration is too large.");
+    await atomicWriteConfig(file, body);
+    return {
+      ok: true,
+      path: file,
+      revision: revisionOf(body)
+    };
+  });
+}
+function writeJson(stdout, value) {
+  stdout.write(`${JSON.stringify(value)}
+`);
+}
+async function runSetup(options = {}) {
+  const env = options.env ?? process.env;
+  const stdout = options.stdout ?? process.stdout;
+  const argv = options.argv ?? [];
+  const createProviderFn = options.createBuiltinProvider ?? defaultCreateBuiltinProvider;
+  const parsed = parseSetupArgv(argv);
+  if (parsed.command === "catalog") {
+    const state2 = await readConfigState({ env });
+    writeJson(stdout, {
+      ok: true,
+      path: state2.path,
+      revision: state2.revision,
+      config: state2.config,
+      configError: state2.configError,
+      providers: await getProviderCatalog({ createBuiltinProvider: createProviderFn })
+    });
+    return 0;
+  }
+  if (parsed.command === "models") {
+    writeJson(
+      stdout,
+      await getModels(parsed.providerId, {
+        q: parsed.q,
+        offset: parsed.offset,
+        limit: parsed.limit,
+        createBuiltinProvider: createProviderFn
+      })
+    );
+    return 0;
+  }
+  const raw = await readBoundedStdin(options.stdin ?? process.stdin);
+  const payload = parseSavePayload(raw);
+  const saved = await saveConfig(payload, {
+    env,
+    validateReasoning: options.validateReasoning
+  });
+  writeJson(stdout, saved);
+  return 0;
+}
+function writeFailure(stderr, error) {
+  if (error instanceof SetupError) {
+    const message = sanitizeText(error.message).slice(0, MAX_ERROR_CHARS);
+    stderr.write(`${message || STATIC_ERRORS[error.code] || STATIC_ERRORS.storage}
+`);
+    return;
+  }
+  const code = typeof error?.code === "string" ? error.code : "";
+  if (code === "ELOOP" || code === "EMLINK") {
+    stderr.write(`${STATIC_ERRORS.symlink}
+`);
+    return;
+  }
+  stderr.write(`${STATIC_ERRORS.storage}
+`);
+}
+async function main(argv = process.argv.slice(2), env = process.env) {
+  try {
+    await runSetup({ argv, env });
+  } catch (error) {
+    writeFailure(process.stderr, error);
+    process.exitCode = 1;
+  }
+}
+var USAGE, SAVE_KEYS, DEFAULT_MODEL_LIMIT, MAX_MODEL_LIMIT, MAX_QUERY_CHARS, MAX_ERROR_CHARS, SUGGESTED_API_KEY_ENV, COMPATIBLE_HINT, NOFOLLOW2, O_CLOEXEC2, OPEN_WRITE2, STATIC_ERRORS, SetupError;
+var init_setup_store = __esm({
+  "../../plugins/cross-model-advisor/src/setup-store.mjs"() {
+    init_config();
+    init_constants();
+    init_sanitize();
+    USAGE = "usage: setup-control.mjs catalog|models <provider-id>|save";
+    SAVE_KEYS = Object.freeze(["revision", "config"]);
+    DEFAULT_MODEL_LIMIT = 20;
+    MAX_MODEL_LIMIT = 40;
+    MAX_QUERY_CHARS = 128;
+    MAX_ERROR_CHARS = 500;
+    SUGGESTED_API_KEY_ENV = Object.freeze({
+      openai: "OPENAI_API_KEY",
+      anthropic: "ANTHROPIC_API_KEY",
+      google: "GEMINI_API_KEY",
+      openrouter: "OPENROUTER_API_KEY",
+      zai: "ZAI_API_KEY",
+      xai: "XAI_API_KEY",
+      moonshotai: "MOONSHOT_API_KEY",
+      "kimi-coding": "KIMI_API_KEY"
+    });
+    COMPATIBLE_HINT = "openai-compatible has no offline SDK catalog. Reuse model metadata from the current config or collect contextWindow, maxTokens, reasoning, and input from the user. Optional paired thinkingFormat (openai|openrouter|zai) and thinkingLevelMap covering off/minimal/low/medium/high/xhigh/max; reasoning true alone is not tunable.";
+    NOFOLLOW2 = fsSync2.constants.O_NOFOLLOW || 0;
+    O_CLOEXEC2 = fsSync2.constants.O_CLOEXEC ?? 0;
+    OPEN_WRITE2 = fsSync2.constants.O_WRONLY | fsSync2.constants.O_CREAT | fsSync2.constants.O_EXCL | NOFOLLOW2 | O_CLOEXEC2;
+    STATIC_ERRORS = Object.freeze({
+      usage: USAGE,
+      overflow: "Save input is too large.",
+      input: "Save input is invalid.",
+      revision: "Configuration revision does not match.",
+      config: "Configuration is invalid.",
+      symlink: "Configuration file must not be a symlink.",
+      storage: "Configuration storage is unavailable.",
+      busy: "Config save is locked. If an earlier save was interrupted, verify no setup save is running before removing cross-model-advisor.json.lock from the Claude config directory.",
+      catalog: "Offline model catalog is unavailable. Rebuild or reinstall the plugin.",
+      provider: "Unknown provider id."
+    });
+    SetupError = class extends Error {
+      /**
+       * @param {string} code
+       * @param {string} message
+       */
+      constructor(code, message) {
+        super(message);
+        this.name = "SetupError";
+        this.code = code;
+      }
+    };
+  }
+});
+
 // ../../plugins/cross-model-advisor/src/prompt.mjs
 var prompt_exports = {};
 __export(prompt_exports, {
@@ -95762,59 +96897,17 @@ severity blocker is a label only. It does not block the primary, wake Claude, or
 
 // ../../plugins/cross-model-advisor/src/worker.mjs
 import crypto7 from "node:crypto";
-import fs14 from "node:fs/promises";
-import fsSync2 from "node:fs";
-import path11 from "node:path";
+import fs15 from "node:fs/promises";
+import fsSync3 from "node:fs";
+import path12 from "node:path";
 init_constants();
 import { fileURLToPath } from "node:url";
 
 // ../../plugins/cross-model-advisor/src/session/errors.mjs
 init_constants();
 init_paths();
+init_sanitize();
 import fs2 from "node:fs/promises";
-
-// ../../plugins/cross-model-advisor/src/session/sanitize.mjs
-var CREDENTIAL_ASSIGNMENT = /\b(?:api[_-]?key|token|password|secret|authorization|bearer)\b\s*[:=]\s*([^\s,;]+)/gi;
-var CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
-function sanitizeText(text, secrets = []) {
-  if (typeof text !== "string" || text.length === 0) return "";
-  let out = text.replace(CONTROL_CHARS, "");
-  for (const secret of secrets) {
-    if (typeof secret !== "string" || secret.length < 4) continue;
-    out = out.split(secret).join("[redacted]");
-  }
-  out = out.replace(CREDENTIAL_ASSIGNMENT, (match, value) => match.replace(value, "[redacted]"));
-  return out;
-}
-function truncateLabeled(text, cap) {
-  if (typeof text !== "string") return "";
-  if (text.length <= cap) return text;
-  return `${text.slice(0, cap)}
-[truncated ${text.length - cap} chars]`;
-}
-function escapeEnvelope(text) {
-  return sanitizeText(text).replaceAll("---", "—-—");
-}
-function resolveSecrets(names2, env = process.env) {
-  const secrets = [];
-  for (const name of names2) {
-    if (typeof name !== "string" || !name) continue;
-    const value = env[name];
-    if (typeof value === "string" && value.length > 0) secrets.push(value);
-  }
-  return secrets;
-}
-function secretNamesFromSnapshot(snapshot) {
-  const names2 = [];
-  const providers = snapshot?.providers;
-  if (!providers || typeof providers !== "object") return names2;
-  for (const entry of Object.values(providers)) {
-    if (entry && typeof entry.apiKeyEnv === "string") names2.push(entry.apiKeyEnv);
-  }
-  return names2;
-}
-
-// ../../plugins/cross-model-advisor/src/session/errors.mjs
 function createErrorLog(sessionDirectory, { secrets = [], now = () => Date.now() } = {}) {
   let lastAt = 0;
   let lastMessage = "";
@@ -95857,6 +96950,7 @@ function createErrorLog(sessionDirectory, { secrets = [], now = () => Date.now()
 
 // ../../plugins/cross-model-advisor/src/session/findings.mjs
 init_constants();
+init_sanitize();
 import crypto2 from "node:crypto";
 function findingId() {
   return `fnd_${crypto2.randomBytes(8).toString("hex")}`;
@@ -95873,12 +96967,15 @@ function acceptedFinding(candidate, meta) {
     evidence: candidate.evidence ?? [],
     sourcePromptId: meta.sourcePromptId ?? null,
     generation: meta.generation,
+    epoch: meta.epoch ?? null,
+    settingsRevision: meta.settingsRevision ?? null,
     observationRange: meta.observationRange ?? null,
     status: "pending",
     deliverable: true,
     claimedAt: null,
     leaseExpiresAt: null,
     claimId: null,
+    issuer: null,
     emittedAt: null,
     createdAt: meta.now ?? Date.now()
   };
@@ -95892,6 +96989,99 @@ function expireLeases(inbox, now) {
       item.claimId = null;
     }
   }
+}
+function issuerProvenDead(client) {
+  const n = Number(client?.pid);
+  if (!Number.isInteger(n) || n <= 0) return false;
+  try {
+    process.kill(n, 0);
+    return false;
+  } catch (error) {
+    return error?.code === "ESRCH";
+  }
+}
+function normalizeClient(client) {
+  if (!client || typeof client !== "object") return null;
+  const pid = Number(client.pid);
+  const id = typeof client.id === "string" && client.id.length > 0 ? client.id : null;
+  const protocolVersion = Number(client.protocolVersion);
+  if (!id && !(Number.isInteger(pid) && pid > 0)) return null;
+  return {
+    pid: Number.isInteger(pid) && pid > 0 ? pid : null,
+    id,
+    protocolVersion: Number.isInteger(protocolVersion) ? protocolVersion : null
+  };
+}
+function pruneIssuance(issuance) {
+  if (!Array.isArray(issuance)) return [];
+  for (let i2 = issuance.length - 1; i2 >= 0; i2--) {
+    if (issuerProvenDead(issuance[i2]?.client)) issuance.splice(i2, 1);
+  }
+  return issuance;
+}
+function recordIssuance(issuance, rec) {
+  if (!Array.isArray(issuance) || !rec?.claimId) return;
+  const findings = Array.isArray(rec.findings) ? rec.findings : [];
+  const advisors = [];
+  const epochs = {};
+  for (const finding of findings) {
+    const name = finding?.advisor;
+    if (typeof name === "string" && name && !advisors.includes(name)) advisors.push(name);
+    if (typeof name === "string" && name) epochs[name] = finding.epoch ?? null;
+  }
+  issuance.push({
+    claimId: rec.claimId,
+    client: normalizeClient(rec.client),
+    advisors,
+    findingIds: findings.map((item) => item.id).filter(Boolean),
+    epochs,
+    issuedAt: rec.now ?? Date.now()
+  });
+}
+function clearIssuance(issuance, claimId) {
+  if (!Array.isArray(issuance) || !claimId) return 0;
+  let n = 0;
+  for (let i2 = issuance.length - 1; i2 >= 0; i2--) {
+    if (issuance[i2]?.claimId === claimId) {
+      issuance.splice(i2, 1);
+      n += 1;
+    }
+  }
+  return n;
+}
+function ownershipDenyCode(state2, affectedNames) {
+  if (state2?.issuanceUnrecoverable) return "protocol";
+  if (!Array.isArray(state2?.issuance) || state2.issuance.length === 0) return null;
+  const set = affectedNames instanceof Set ? affectedNames : new Set(affectedNames ?? []);
+  let busy = false;
+  for (const item of state2.issuance) {
+    if (issuerProvenDead(item?.client)) continue;
+    const client = item?.client;
+    const legacy = !client || Number(client.protocolVersion) !== PROTOCOL_VERSION || !client.id;
+    if (legacy) return "protocol";
+    const names2 = Array.isArray(item?.advisors) ? item.advisors : [];
+    if (set.size === 0) continue;
+    if (names2.length === 0 || names2.some((name) => set.has(name))) busy = true;
+  }
+  return busy ? "busy" : null;
+}
+function clientsMatch(left, right) {
+  const a = normalizeClient(left);
+  const b = normalizeClient(right);
+  if (!a || !b) return false;
+  if (a.protocolVersion !== PROTOCOL_VERSION || b.protocolVersion !== PROTOCOL_VERSION) return false;
+  if (a.id == null || b.id == null || a.pid == null || b.pid == null) return false;
+  return a.id === b.id && a.pid === b.pid;
+}
+function findingEligible(finding, state2) {
+  if (!finding || finding.deliverable === false) return false;
+  if (finding.status === "stale" || finding.status === "discarded" || finding.status === "emitted") {
+    return false;
+  }
+  const rec = state2?.advisors?.[finding.advisor];
+  if (!rec || rec.tombstone) return false;
+  if (finding.epoch == null) return true;
+  return finding.epoch === rec.epoch;
 }
 function severityRank(value) {
   return SEVERITY_ORDER[value] ?? 9;
@@ -95938,13 +97128,15 @@ function formatEnvelope(finding, now = Date.now()) {
   ].filter((line) => line != null);
   return lines.join("\n");
 }
-async function claimFindings(inbox, { now = Date.now(), leaseMs = CLAIM_LEASE_MS, isFresh } = {}) {
+async function claimFindings(inbox, { now = Date.now(), leaseMs = CLAIM_LEASE_MS, isFresh, isEligible, client } = {}) {
   expireLeases(inbox, now);
   const claimed = [];
   let used = 0;
   const claimId = `lease_${crypto2.randomBytes(6).toString("hex")}`;
+  const issuer = normalizeClient(client);
   for (const finding of rankPending(inbox)) {
     if (claimed.length >= MAX_DRAIN_FINDINGS) break;
+    if (typeof isEligible === "function" && !isEligible(finding)) continue;
     if (typeof isFresh === "function") {
       const fresh = await isFresh(finding);
       if (!fresh) {
@@ -95960,14 +97152,16 @@ async function claimFindings(inbox, { now = Date.now(), leaseMs = CLAIM_LEASE_MS
     finding.claimedAt = now;
     finding.leaseExpiresAt = now + leaseMs;
     finding.claimId = claimId;
+    finding.issuer = issuer;
     claimed.push({ finding, envelope });
     used += envelope.length + (claimed.length > 1 ? 2 : 0);
   }
-  if (claimed.length === 0) return { claimId: null, envelopes: [], ids: [] };
+  if (claimed.length === 0) return { claimId: null, envelopes: [], ids: [], findings: [] };
   return {
     claimId,
     envelopes: claimed.map((item) => item.envelope),
-    ids: claimed.map((item) => item.finding.id)
+    ids: claimed.map((item) => item.finding.id),
+    findings: claimed.map((item) => item.finding)
   };
 }
 function acknowledgeClaim(inbox, claimId, now = Date.now()) {
@@ -95981,6 +97175,16 @@ function acknowledgeClaim(inbox, claimId, now = Date.now()) {
     }
   }
   return count;
+}
+function releaseClaim(inbox, claimId) {
+  for (const item of inbox) {
+    if (item.claimId === claimId && item.status === "claimed") {
+      item.status = "pending";
+      item.claimedAt = null;
+      item.leaseExpiresAt = null;
+      item.claimId = null;
+    }
+  }
 }
 function discardInjectable(inbox) {
   for (const item of inbox) {
@@ -95997,6 +97201,33 @@ function retainPreCompact(inbox, generation) {
     if ((item.generation ?? 0) < generation && (item.status === "pending" || item.status === "claimed")) {
       item.deliverable = false;
     }
+  }
+}
+function fenceAdvisorFindings(inbox, names2) {
+  const set = names2 instanceof Set ? names2 : new Set(names2 ?? []);
+  for (const item of inbox ?? []) {
+    if (!set.has(item.advisor)) continue;
+    if (item.status === "emitted") continue;
+    item.deliverable = false;
+  }
+}
+function adoptLegacyIssuance(issuance, inbox) {
+  if (!Array.isArray(issuance) || !Array.isArray(inbox)) return;
+  const known = new Set(issuance.map((item) => item?.claimId).filter(Boolean));
+  const groups = /* @__PURE__ */ new Map();
+  for (const finding of inbox) {
+    if (finding?.status !== "claimed" || !finding.claimId) continue;
+    if (known.has(finding.claimId)) continue;
+    const list = groups.get(finding.claimId) ?? [];
+    list.push(finding);
+    groups.set(finding.claimId, list);
+  }
+  for (const [claimId, findings] of groups) {
+    recordIssuance(issuance, {
+      claimId,
+      client: normalizeClient(findings[0]?.issuer),
+      findings
+    });
   }
 }
 
@@ -96079,6 +97310,7 @@ function listenIpc(socketPath, handler) {
 
 // ../../plugins/cross-model-advisor/src/session/observations.mjs
 init_constants();
+init_sanitize();
 import path2 from "node:path";
 function dedupeKey(parts) {
   if (parts.uuid) return `uuid:${parts.sessionId}:${parts.generation}:${parts.uuid}`;
@@ -96305,6 +97537,9 @@ function looksLikeControlTraffic(text) {
   return false;
 }
 
+// ../../plugins/cross-model-advisor/src/worker.mjs
+init_sanitize();
+
 // ../../plugins/cross-model-advisor/src/session/state.mjs
 init_constants();
 init_paths();
@@ -96318,7 +97553,12 @@ function emptyState(overrides = {}) {
     pauseReason: null,
     generation: 1,
     workerGeneration: 0,
+    settingsRevision: 0,
     projectRoot: null,
+    rootIdent: null,
+    deliveryProtocolVersion: PROTOCOL_VERSION,
+    issuanceUnrecoverable: false,
+    ended: false,
     transcriptPath: null,
     activation: null,
     activationFingerprint: null,
@@ -96335,6 +97575,7 @@ function emptyState(overrides = {}) {
     errors: {},
     advisors: {},
     inbox: [],
+    issuance: [],
     controlPromptIds: [],
     ...overrides
   };
@@ -96347,10 +97588,45 @@ async function loadState(dir) {
     const raw = await fs3.readFile(statePath(dir), "utf8");
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return emptyState();
-    return { ...emptyState(), ...parsed, version: STATE_VERSION };
+    const missingIssuance = !Object.prototype.hasOwnProperty.call(parsed, "issuance") || !Array.isArray(parsed.issuance);
+    const state2 = normalizeState({ ...emptyState(), ...parsed, version: STATE_VERSION });
+    state2.issuanceUnrecoverable = Boolean(parsed.issuanceUnrecoverable) || missingIssuance;
+    return state2;
   } catch {
     return emptyState();
   }
+}
+function normalizeState(state2) {
+  state2.settingsRevision = Number(state2.settingsRevision) || 0;
+  if (!Array.isArray(state2.issuance)) state2.issuance = [];
+  state2.deliveryProtocolVersion = Number(state2.deliveryProtocolVersion) || PROTOCOL_VERSION;
+  state2.issuanceUnrecoverable = Boolean(state2.issuanceUnrecoverable);
+  state2.ended = Boolean(state2.ended);
+  const advisors = {};
+  for (const [name, rec] of Object.entries(state2.advisors ?? {})) {
+    if (!rec || typeof rec !== "object") continue;
+    advisors[name] = {
+      ...rec,
+      name: rec.name ?? name,
+      epoch: Number(rec.epoch) > 0 ? Number(rec.epoch) : 1,
+      tombstone: Boolean(rec.tombstone),
+      identity: typeof rec.identity === "string" ? rec.identity : null,
+      enabled: rec.enabled !== false,
+      reasoningEffort: typeof rec.reasoningEffort === "string" ? rec.reasoningEffort : "default"
+    };
+  }
+  state2.advisors = advisors;
+  if (Array.isArray(state2.inbox)) {
+    for (const item of state2.inbox) {
+      if (!item || typeof item !== "object") continue;
+      if (item.deliverable == null) {
+        item.deliverable = item.status !== "discarded" && item.status !== "stale";
+      }
+    }
+  } else {
+    state2.inbox = [];
+  }
+  return state2;
 }
 async function saveState(dir, state2) {
   const durable = persistable(state2);
@@ -96365,6 +97641,11 @@ function persistable(state2) {
       provider: advisor.provider,
       model: advisor.model,
       kind: advisor.kind,
+      enabled: advisor.enabled !== false,
+      reasoningEffort: advisor.reasoningEffort ?? "default",
+      epoch: Number(advisor.epoch) > 0 ? Number(advisor.epoch) : 1,
+      tombstone: Boolean(advisor.tombstone),
+      identity: typeof advisor.identity === "string" ? advisor.identity : null,
       reviews: advisor.reviews ?? 0,
       consecutiveFailures: advisor.consecutiveFailures ?? 0,
       paused: advisor.paused ?? false,
@@ -96382,6 +97663,10 @@ function persistable(state2) {
     pauseReason: state2.pauseReason ?? null,
     generation: Number(state2.generation) || 1,
     workerGeneration: Number(state2.workerGeneration) || 0,
+    settingsRevision: Number(state2.settingsRevision) || 0,
+    deliveryProtocolVersion: PROTOCOL_VERSION,
+    issuanceUnrecoverable: Boolean(state2.issuanceUnrecoverable),
+    ended: Boolean(state2.ended),
     projectRoot: state2.projectRoot ?? null,
     rootIdent: state2.rootIdent ?? null,
     transcriptPath: state2.transcriptPath ?? null,
@@ -96399,6 +97684,7 @@ function persistable(state2) {
     errors: state2.errors ?? {},
     advisors,
     inbox: Array.isArray(state2.inbox) ? state2.inbox : [],
+    issuance: Array.isArray(state2.issuance) ? state2.issuance : [],
     controlPromptIds: Array.isArray(state2.controlPromptIds) ? state2.controlPromptIds.slice(-512) : []
   };
 }
@@ -96417,6 +97703,7 @@ function boundTask(task) {
 // ../../plugins/cross-model-advisor/src/session/transcript.mjs
 init_constants();
 import fs4 from "node:fs/promises";
+init_sanitize();
 function visibleText(content, secrets) {
   if (typeof content === "string") {
     return truncateLabeled(sanitizeText(content, secrets), USER_TEXT_CAP);
@@ -96664,15 +97951,15 @@ function defaultNormalize(note) {
 function cwdInsideRoot(cwd, root, rootIdent) {
   if (!cwd || !root) return true;
   try {
-    const frozen = path11.resolve(root);
-    const listing = fsSync2.lstatSync(frozen);
+    const frozen = path12.resolve(root);
+    const listing = fsSync3.lstatSync(frozen);
     if (listing.isSymbolicLink() || !listing.isDirectory()) return false;
     if (rootIdent && rootIdent.dev != null && rootIdent.ino != null && (Number(listing.dev) !== Number(rootIdent.dev) || Number(listing.ino) !== Number(rootIdent.ino))) {
       return false;
     }
-    const realCwd = fsSync2.realpathSync(path11.resolve(cwd));
-    const rel = path11.relative(frozen, realCwd);
-    return rel === "" || !rel.startsWith("..") && !path11.isAbsolute(rel);
+    const realCwd = fsSync3.realpathSync(path12.resolve(cwd));
+    const rel = path12.relative(frozen, realCwd);
+    return rel === "" || !rel.startsWith("..") && !path12.isAbsolute(rel);
   } catch {
     return false;
   }
@@ -96718,6 +98005,73 @@ function unsupportedProviderDiagnostic(provider) {
     error: { code: "config", message: UNSUPPORTED_PROVIDER_MESSAGE }
   };
 }
+function configRevisionOf(raw) {
+  return crypto7.createHash("sha256").update(raw).digest("hex");
+}
+function normalizeAdvisorSpec(spec) {
+  if (!spec || typeof spec !== "object") return spec;
+  return {
+    name: spec.name,
+    provider: spec.provider,
+    model: spec.model,
+    instructions: spec.instructions,
+    enabled: spec.enabled !== false,
+    reasoningEffort: typeof spec.reasoningEffort === "string" ? spec.reasoningEffort : "default"
+  };
+}
+function providerIdentity(provider) {
+  if (!provider || typeof provider !== "object") return null;
+  return {
+    kind: provider.kind ?? "",
+    provider: provider.provider ?? "",
+    apiKeyEnv: typeof provider.apiKeyEnv === "string" ? provider.apiKeyEnv : "",
+    baseUrl: typeof provider.baseUrl === "string" ? provider.baseUrl : "",
+    models: provider.models ?? null
+  };
+}
+function advisorSpecKey(spec, exclude, provider) {
+  const normalized = normalizeAdvisorSpec(spec);
+  return JSON.stringify({
+    provider: normalized?.provider ?? "",
+    model: normalized?.model ?? "",
+    instructions: normalized?.instructions ?? "",
+    enabled: normalized?.enabled !== false,
+    reasoningEffort: normalized?.reasoningEffort ?? "default",
+    exclude: exclude ?? [],
+    providerDef: providerIdentity(provider)
+  });
+}
+function limitsIdentity(limits) {
+  return JSON.stringify(limits ?? {});
+}
+function outputTokenLimit(limits) {
+  const value = limits?.maxOutputTokens;
+  return Number.isInteger(value) ? value : DEFAULT_MAX_OUTPUT_TOKENS;
+}
+function rootsEquivalent(left, right, rootIdent) {
+  if (typeof left !== "string" || typeof right !== "string" || !left || !right) return false;
+  const a = path12.resolve(left);
+  const b = path12.resolve(right);
+  if (a === b) return true;
+  try {
+    if (fsSync3.realpathSync(a) === fsSync3.realpathSync(b)) return true;
+  } catch {
+  }
+  if (rootIdent?.dev == null || rootIdent?.ino == null) return false;
+  try {
+    const listing = fsSync3.lstatSync(b);
+    return Number(listing.dev) === Number(rootIdent.dev) && Number(listing.ino) === Number(rootIdent.ino);
+  } catch {
+    return false;
+  }
+}
+function apiKeyMissing(provider, env) {
+  if (!provider || provider.kind !== "api") return false;
+  const name = typeof provider.apiKeyEnv === "string" ? provider.apiKeyEnv : "";
+  if (!name) return true;
+  const value = env?.[name];
+  return typeof value !== "string" || value.trim().length === 0;
+}
 function diagnosticErrorText(diagnostic2) {
   const err = diagnostic2?.error;
   if (typeof err === "string" && err) return err;
@@ -96725,87 +98079,87 @@ function diagnosticErrorText(diagnostic2) {
   return "unavailable";
 }
 function credentialDirFromEnv(env, configFilePathFn) {
-  return path11.resolve(
-    path11.join(path11.dirname(configFilePathFn(env)), "cross-model-advisor", "credentials")
+  return path12.resolve(
+    path12.join(path12.dirname(configFilePathFn(env)), "cross-model-advisor", "credentials")
   );
 }
 function pluginRootFromHere() {
-  const here = path11.dirname(fileURLToPath(import.meta.url));
-  const dir = path11.basename(here);
-  if (dir === "src" || dir === "dist") return path11.dirname(here);
-  if (dir === "modules") return path11.dirname(path11.dirname(here));
+  const here = path12.dirname(fileURLToPath(import.meta.url));
+  const dir = path12.basename(here);
+  if (dir === "src" || dir === "dist") return path12.dirname(here);
+  if (dir === "modules") return path12.dirname(path12.dirname(here));
   return here;
 }
 function bundleStatus(pluginRoot) {
-  const dist = path11.join(pluginRoot, "dist");
+  const dist = path12.join(pluginRoot, "dist");
   const need = ["control.mjs", "worker.mjs", "auth-control.mjs", "setup-control.mjs"];
-  const missing = need.filter((name) => !fsSync2.existsSync(path11.join(dist, name)));
+  const missing = need.filter((name) => !fsSync3.existsSync(path12.join(dist, name)));
   return { ok: missing.length === 0, missing };
 }
 async function acquireLock2(dir) {
   const lock = lockDir(dir);
-  const ownerFile = path11.join(lock, "owner.json");
+  const ownerFile = path12.join(lock, "owner.json");
   const wait = (ms) => new Promise((resolve2) => setTimeout(resolve2, ms));
   for (let attempt = 0; attempt < 25; attempt++) {
     try {
-      await fs14.mkdir(lock);
+      await fs15.mkdir(lock);
       await atomicWriteJson(ownerFile, { pid: process.pid, startedAt: Date.now() });
       return true;
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
       let owner = null;
       try {
-        owner = JSON.parse(await fs14.readFile(ownerFile, "utf8"));
+        owner = JSON.parse(await fs15.readFile(ownerFile, "utf8"));
       } catch {
         owner = null;
       }
       let locator = null;
       try {
-        locator = JSON.parse(await fs14.readFile(locatorPath(dir), "utf8"));
+        locator = JSON.parse(await fs15.readFile(locatorPath(dir), "utf8"));
       } catch {
         locator = null;
       }
       const ownerLive = Boolean(owner?.pid && pidIsLive(owner.pid));
       const locatorLive = Boolean(
-        locator?.pid && pidIsLive(locator.pid) && locator.socketPath && fsSync2.existsSync(locator.socketPath)
+        locator?.pid && pidIsLive(locator.pid) && locator.socketPath && fsSync3.existsSync(locator.socketPath)
       );
       if (ownerLive || locatorLive) return false;
       if (!owner && attempt < 15) {
         await wait(20);
         continue;
       }
-      await fs14.rm(lock, { recursive: true, force: true }).catch(() => {
+      await fs15.rm(lock, { recursive: true, force: true }).catch(() => {
       });
     }
   }
   return false;
 }
 async function pruneSessions(pluginData, now, liveId) {
-  const root = path11.join(pluginData, "sessions");
+  const root = path12.join(pluginData, "sessions");
   let entries = [];
   try {
-    entries = await fs14.readdir(root, { withFileTypes: true });
+    entries = await fs15.readdir(root, { withFileTypes: true });
   } catch {
     return;
   }
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name === liveId) continue;
-    const dir = path11.join(root, entry.name);
+    const dir = path12.join(root, entry.name);
     try {
-      const raw = await fs14.readFile(locatorPath(dir), "utf8");
+      const raw = await fs15.readFile(locatorPath(dir), "utf8");
       const locator = JSON.parse(raw);
       if (locator?.pid && pidIsLive(locator.pid)) continue;
     } catch {
     }
     let mtime = now;
     try {
-      const stat4 = await fs14.stat(dir);
+      const stat4 = await fs15.stat(dir);
       mtime = stat4.mtimeMs;
     } catch {
       continue;
     }
     if (now - mtime > SESSION_RETENTION_MS) {
-      await fs14.rm(dir, { recursive: true, force: true }).catch(() => {
+      await fs15.rm(dir, { recursive: true, force: true }).catch(() => {
       });
     }
   }
@@ -96814,6 +98168,7 @@ async function resolveDeps(options) {
   let configMod = null;
   let toolsMod = null;
   let apiMod = null;
+  let storeMod = null;
   let prompt = options.advisorSystemPrompt;
   if (!options.loadConfig || !options.validateRoot || !options.runtimeErrors || !options.configFilePath) {
     configMod = await Promise.resolve().then(() => (init_config(), config_exports));
@@ -96823,6 +98178,13 @@ async function resolveDeps(options) {
   }
   if (!options.validateApi || !options.reviewApi) {
     apiMod = await Promise.resolve().then(() => (init_api(), api_exports));
+  }
+  if (!options.readConfigState) {
+    try {
+      storeMod = await Promise.resolve().then(() => (init_setup_store(), setup_store_exports));
+    } catch {
+      storeMod = null;
+    }
   }
   if (prompt == null) {
     prompt = (await Promise.resolve().then(() => (init_prompt(), prompt_exports))).advisorSystemPrompt;
@@ -96836,6 +98198,7 @@ async function resolveDeps(options) {
     snapshotRoot: options.snapshotRoot ?? configMod?.snapshotRoot,
     runtimeErrors: options.runtimeErrors ?? configMod?.runtimeErrors ?? (() => []),
     configFilePath: options.configFilePath ?? configMod.configFilePath,
+    readConfigState: options.readConfigState ?? storeMod?.readConfigState,
     createReviewTools: options.createReviewTools ?? toolsMod?.createReviewTools,
     normalizeFinding: options.normalizeFinding ?? toolsMod?.normalizeFinding ?? defaultNormalize,
     validateApi: options.validateApi ?? apiMod?.validateApi,
@@ -96847,15 +98210,15 @@ async function fileEvidenceFresh(evidence, root) {
   const maxBytes = 1024 * 1024;
   for (const item of Array.isArray(evidence) ? evidence : []) {
     if (item?.kind !== "file") continue;
-    const abs = path11.resolve(root, item.path);
-    const rel = path11.relative(root, abs);
-    if (!rel || rel.startsWith("..") || path11.isAbsolute(rel)) return false;
+    const abs = path12.resolve(root, item.path);
+    const rel = path12.relative(root, abs);
+    if (!rel || rel.startsWith("..") || path12.isAbsolute(rel)) return false;
     let handle;
     try {
-      const st = await fs14.lstat(abs);
+      const st = await fs15.lstat(abs);
       if (!st.isFile() || st.isSymbolicLink() || st.size > maxBytes) return false;
-      const flags = fsSync2.constants.O_RDONLY | (fsSync2.constants.O_NOFOLLOW || 0);
-      handle = await fs14.open(abs, flags);
+      const flags = fsSync3.constants.O_RDONLY | (fsSync3.constants.O_NOFOLLOW || 0);
+      handle = await fs15.open(abs, flags);
       const fdStat = await handle.stat();
       if (fdStat.ino !== st.ino || fdStat.dev !== st.dev || !fdStat.isFile()) return false;
       const buf = Buffer.alloc(Number(st.size));
@@ -96883,7 +98246,7 @@ async function startWorker(options) {
   const pluginData = options.pluginData;
   if (!pluginData) throw new Error("plugin data path required");
   const dir = sessionDir(pluginData, sessionId);
-  await ensurePrivateDir(path11.join(pluginData, "sessions"));
+  await ensurePrivateDir(path12.join(pluginData, "sessions"));
   await ensurePrivateDir(dir);
   const locked = await acquireLock2(dir);
   if (!locked) {
@@ -96895,6 +98258,9 @@ async function startWorker(options) {
   let state2 = await loadState(dir);
   state2.workerGeneration = (Number(state2.workerGeneration) || 0) + 1;
   if (!state2.projectRoot) state2.projectRoot = projectRoot;
+  if (!Array.isArray(state2.issuance)) state2.issuance = [];
+  adoptLegacyIssuance(state2.issuance, state2.inbox);
+  pruneIssuance(state2.issuance);
   const socket = await createSocketDir();
   const controlCapability = randomCapability();
   const locator = {
@@ -96920,15 +98286,25 @@ async function startWorker(options) {
   let stopPromise = null;
   const pendingWork = /* @__PURE__ */ new Set();
   const secrets = () => resolveSecrets(secretNamesFromSnapshot(state2.activation), env);
-  const persist = () => {
-    if (closed) return persistChain;
-    persistChain = persistChain.then(() => {
+  const writeState = typeof options.saveState === "function" ? options.saveState : saveState;
+  const enqueuePersist = () => {
+    const run = () => {
       if (closed) return;
-      return saveState(dir, state2);
-    }).catch((error) => {
-      if (!closed) errors.record(error);
-    });
+      return writeState(dir, state2);
+    };
+    persistChain = persistChain.then(run, run);
     return persistChain;
+  };
+  const persist = () => enqueuePersist().catch((error) => {
+    if (!closed) errors.record(error);
+  });
+  const persistDurable = async () => {
+    try {
+      await enqueuePersist();
+    } catch (error) {
+      if (!closed) errors.record(error);
+      throw error;
+    }
   };
   const cancelPendingSchedule = () => {
     if (debounceTimer) {
@@ -97079,11 +98455,19 @@ async function startWorker(options) {
         fingerprints: [],
         cursor: 0,
         history: [],
-        coalesced: null
+        coalesced: null,
+        epoch: 1,
+        tombstone: false,
+        identity: null,
+        enabled: true,
+        reasoningEffort: "default"
       };
     }
-    if (!Array.isArray(state2.advisors[name].history)) state2.advisors[name].history = [];
-    return state2.advisors[name];
+    const rec = state2.advisors[name];
+    if (!Array.isArray(rec.history)) rec.history = [];
+    if (!(Number(rec.epoch) > 0)) rec.epoch = 1;
+    if (rec.tombstone == null) rec.tombstone = false;
+    return rec;
   };
   const cancelReview = (name, reason) => {
     const active = reviews.get(name);
@@ -97120,6 +98504,9 @@ async function startWorker(options) {
     if (!state2.enabled || state2.pauseReason === "off") return false;
     if (reserved.generation !== state2.generation) return false;
     if (state2.compaction?.phase === "pre") return false;
+    const rec = advisorRecord(reserved.name ?? "");
+    if (!rec || rec.tombstone) return false;
+    if (reserved.epoch != null && rec.epoch !== reserved.epoch) return false;
     if (reserved.promptId && state2.latestTask?.promptId && reserved.promptId !== state2.latestTask.promptId) {
       return false;
     }
@@ -97131,10 +98518,12 @@ async function startWorker(options) {
     const value = typeof candidate === "function" ? candidate() : candidate;
     if (!value) return null;
     const rec = advisorRecord(name);
+    if (reserved?.epoch != null && rec.epoch !== reserved.epoch) return null;
     const fp = deps.normalizeFinding(value.note);
     if (fp && rec.fingerprints.includes(fp)) return null;
     const fresh = typeof tools.isFresh === "function" ? await tools.isFresh(value.evidence) : true;
     if (!publicationAllowed(reserved)) return null;
+    if (reserved?.epoch != null && rec.epoch !== reserved.epoch) return null;
     if (!fresh) return null;
     const sanitized = {
       ...value,
@@ -97147,14 +98536,19 @@ async function startWorker(options) {
     if (fp) {
       rec.fingerprints = [...rec.fingerprints, fp].slice(-4096);
     }
-    const finding = acceptedFinding(sanitized, meta);
+    const finding = acceptedFinding(sanitized, {
+      ...meta,
+      epoch: reserved?.epoch ?? rec.epoch,
+      settingsRevision: state2.settingsRevision ?? 0
+    });
     state2.inbox.push(finding);
     return finding;
   };
   const startReview = async (advisorSpec, observations) => {
     if (shuttingDown || closed) return;
+    if (advisorSpec?.enabled === false) return;
     const rec = advisorRecord(advisorSpec.name);
-    if (rec.paused || reviews.has(advisorSpec.name)) return;
+    if (rec.paused || rec.tombstone || reviews.has(advisorSpec.name)) return;
     if (!state2.latestTask && !state2.compactSummary) {
       state2.contextUnavailable = true;
       return;
@@ -97182,6 +98576,7 @@ async function startWorker(options) {
     const abort = new AbortController();
     const reservedGeneration = state2.generation;
     const reservedPromptId = state2.latestTask?.promptId ?? null;
+    const reservedEpoch = rec.epoch;
     const timeoutMs = (limits.reviewTimeoutSeconds ?? DEFAULT_REVIEW_TIMEOUT_MS / 1e3) * 1e3;
     const timer = setTimeout(() => {
       try {
@@ -97195,7 +98590,9 @@ async function startWorker(options) {
       abort,
       generation: reservedGeneration,
       promptId: reservedPromptId,
-      timer
+      timer,
+      epoch: reservedEpoch,
+      name: advisorSpec.name
     };
     reviews.set(advisorSpec.name, reserved);
     rec.reviews = (rec.reviews ?? 0) + 1;
@@ -97203,12 +98600,17 @@ async function startWorker(options) {
     const blocked = unsupportedProviderDiagnostic(provider);
     if (blocked) {
       clearTimeout(timer);
-      reviews.delete(advisorSpec.name);
+      if (reviews.get(advisorSpec.name)?.reviewId === reviewId) reviews.delete(advisorSpec.name);
       rec.reviews = Math.max(0, (rec.reviews ?? 1) - 1);
       pauseAdvisor(advisorSpec.name, blocked.error.code, blocked.error.message);
       await persist();
       return;
     }
+    const ownsReview = () => {
+      const still = reviews.get(advisorSpec.name);
+      return still?.reviewId === reviewId && still?.epoch === reservedEpoch;
+    };
+    const epochCurrent = () => advisorRecord(advisorSpec.name).epoch === reservedEpoch;
     trackWork(
       (async () => {
         let tools;
@@ -97227,13 +98629,13 @@ async function startWorker(options) {
           });
         } catch (error) {
           clearTimeout(timer);
-          if (reviews.get(advisorSpec.name)?.reviewId === reviewId) reviews.delete(advisorSpec.name);
+          if (ownsReview()) reviews.delete(advisorSpec.name);
           await errors.record(error);
           return;
         }
-        if (shuttingDown || !publicationAllowed(reserved) || reviews.get(advisorSpec.name)?.reviewId !== reviewId) {
+        if (shuttingDown || !publicationAllowed(reserved) || !ownsReview()) {
           clearTimeout(timer);
-          if (reviews.get(advisorSpec.name)?.reviewId === reviewId) reviews.delete(advisorSpec.name);
+          if (ownsReview()) reviews.delete(advisorSpec.name);
           try {
             abort.abort({ code: "cancel" });
           } catch {
@@ -97267,10 +98669,9 @@ ${advisorSpec.instructions ?? ""}`.trim();
         try {
           const result = await deps.reviewApi(args);
           clearTimeout(timer);
-          if (!publicationAllowed(reserved)) return;
-          if (reviews.get(advisorSpec.name)?.reviewId !== reviewId) return;
+          if (result?.usage) rec.usage = mergeUsage(rec.usage, result.usage);
+          if (!publicationAllowed(reserved) || !ownsReview() || !epochCurrent()) return;
           rec.history = result?.history ?? bounded.history;
-          rec.usage = mergeUsage(rec.usage, result?.usage);
           rec.consecutiveFailures = 0;
           rec.lastError = null;
           await publishCandidate(
@@ -97283,6 +98684,7 @@ ${advisorSpec.instructions ?? ""}`.trim();
               kind: provider.kind,
               sourcePromptId: reservedPromptId,
               generation: reservedGeneration,
+              epoch: reservedEpoch,
               observationRange: observations.length ? { from: observations[0].seq, to: observations[observations.length - 1].seq } : null,
               now: now()
             },
@@ -97291,6 +98693,7 @@ ${advisorSpec.instructions ?? ""}`.trim();
         } catch (error) {
           clearTimeout(timer);
           if (error?.usage) rec.usage = mergeUsage(rec.usage, error.usage);
+          if (!epochCurrent()) return;
           const code = errorCode(error);
           rec.lastError = sanitizeText(error?.message ?? code, secrets());
           if (PAUSE_IMMEDIATE.has(code)) {
@@ -97303,13 +98706,10 @@ ${advisorSpec.instructions ?? ""}`.trim();
           }
         } finally {
           clearTimeout(timer);
-          const still = reviews.get(advisorSpec.name);
-          if (still?.reviewId === reviewId) {
-            reviews.delete(advisorSpec.name);
-          }
-          rec.cursor = state2.observationSeq;
+          if (ownsReview()) reviews.delete(advisorSpec.name);
+          if (epochCurrent()) rec.cursor = state2.observationSeq;
           await persist();
-          if (rec.coalesced && state2.enabled && !state2.paused && !state2.primaryIdle && !rec.paused && !shuttingDown) {
+          if (epochCurrent() && rec.coalesced && state2.enabled && !state2.paused && !state2.primaryIdle && !rec.paused && !rec.tombstone && !shuttingDown) {
             const next = rec.coalesced;
             rec.coalesced = null;
             await startReview(advisorSpec, next);
@@ -97335,8 +98735,9 @@ ${advisorSpec.instructions ?? ""}`.trim();
     }
     if (state2.compaction?.phase === "pre") return;
     const specs = (state2.activation?.advisors ?? []).filter((spec) => {
+      if (spec.enabled === false) return false;
       const rec = advisorRecord(spec.name);
-      return !rec.paused;
+      return !rec.paused && !rec.tombstone;
     });
     const maxConcurrent = state2.activation?.limits?.maxConcurrentAdvisors ?? DEFAULT_MAX_CONCURRENT;
     let busy = [...reviews.keys()].length;
@@ -97358,15 +98759,35 @@ ${advisorSpec.instructions ?? ""}`.trim();
     state2.paused = false;
     if (state2.pauseReason === "compaction") state2.pauseReason = null;
   };
+  let hookClient = null;
   const drain = async (eventName, { allow } = {}) => {
-    if (!allow) return { stdout: "", claimId: null };
+    const issuer = normalizeClient(hookClient);
+    if (!allow) return { stdout: "", claimId: null, client: issuer };
     const claimed = await claimFindings(state2.inbox, {
       now: now(),
       leaseMs: options.claimLeaseMs ?? CLAIM_LEASE_MS,
-      isFresh: (finding) => fileEvidenceFresh(finding.evidence, state2.projectRoot)
+      isFresh: (finding) => fileEvidenceFresh(finding.evidence, state2.projectRoot),
+      isEligible: (finding) => findingEligible(finding, state2),
+      client: issuer
     });
-    await persist();
-    if (!claimed.claimId) return { stdout: "", claimId: null };
+    if (claimed.claimId) {
+      recordIssuance(state2.issuance, {
+        claimId: claimed.claimId,
+        client: issuer,
+        findings: claimed.findings,
+        now: now()
+      });
+      try {
+        await persistDurable();
+      } catch {
+        releaseClaim(state2.inbox, claimed.claimId);
+        clearIssuance(state2.issuance, claimed.claimId);
+        return { stdout: "", claimId: null, client: issuer };
+      }
+    } else {
+      await persist();
+    }
+    if (!claimed.claimId) return { stdout: "", claimId: null, client: issuer };
     const additionalContext = claimed.envelopes.join("\n\n");
     return {
       stdout: `${JSON.stringify({
@@ -97376,7 +98797,8 @@ ${advisorSpec.instructions ?? ""}`.trim();
         }
       })}
 `,
-      claimId: claimed.claimId
+      claimId: claimed.claimId,
+      client: issuer
     };
   };
   const handleSessionStart = async (payload) => {
@@ -97417,14 +98839,19 @@ ${advisorSpec.instructions ?? ""}`.trim();
       }
       return { stdout: "" };
     }
+    const nextSettings = (Number(state2.settingsRevision) || 0) + 1;
     state2.enabled = false;
+    state2.ended = false;
     cancelAll("session-start");
     if (source === "fork") {
       state2 = emptyState({
         projectRoot: state2.projectRoot,
         workerGeneration: state2.workerGeneration,
-        transcriptPath: payload.transcript_path ?? null
+        transcriptPath: payload.transcript_path ?? null,
+        settingsRevision: nextSettings
       });
+    } else {
+      state2.settingsRevision = nextSettings;
     }
     if (source === "clear") {
       recent.length = 0;
@@ -97587,6 +99014,9 @@ ${advisorSpec.instructions ?? ""}`.trim();
     return { stdout: "" };
   };
   const handleSessionEnd = async () => {
+    state2.ended = true;
+    state2.settingsRevision = (Number(state2.settingsRevision) || 0) + 1;
+    shuttingDown = true;
     cancelAll("session-end");
     await persist();
     setImmediate(() => {
@@ -97595,67 +99025,360 @@ ${advisorSpec.instructions ?? ""}`.trim();
     });
     return { stdout: "" };
   };
-  const handleOn = async () => {
-    const runtime = deps.runtimeErrors({ env }) ?? [];
-    if (runtime.length) {
-      return { ok: false, enabled: false, error: runtime[0], advisors: [] };
+  const configPathOf = () => {
+    try {
+      return typeof deps.configFilePath === "function" ? deps.configFilePath(env) : null;
+    } catch {
+      return null;
     }
-    let frozenRoot = projectRoot;
-    let rootIdent = state2.rootIdent ?? null;
-    if (typeof deps.snapshotRoot === "function") {
-      rootIdent = await deps.snapshotRoot(projectRoot);
-      if (rootIdent?.path) frozenRoot = rootIdent.path;
-    } else {
-      const canonical = await deps.validateRoot(projectRoot);
-      frozenRoot = typeof canonical === "string" && canonical ? canonical : projectRoot;
+  };
+  const settingsAdvisors = () => (state2.activation?.advisors ?? []).filter((spec) => !state2.advisors[spec.name]?.tombstone).map((spec) => {
+    const rec = advisorRecord(spec.name);
+    const provider = state2.activation?.providers?.[spec.provider];
+    const enabled = spec.enabled !== false;
+    const available = Boolean(enabled && !rec.paused);
+    return {
+      name: spec.name,
+      enabled,
+      available,
+      provider: spec.provider,
+      model: spec.model,
+      kind: provider?.kind ?? rec.kind,
+      reasoningEffort: spec.reasoningEffort ?? rec.reasoningEffort ?? "default",
+      error: available ? void 0 : rec.lastError ?? void 0
+    };
+  });
+  const settingsSnapshot = () => ({
+    ok: true,
+    protocolVersion: PROTOCOL_VERSION,
+    sessionId,
+    projectRoot: state2.projectRoot ?? null,
+    configPath: configPathOf(),
+    workerGeneration: state2.workerGeneration,
+    settingsRevision: Number(state2.settingsRevision) || 0,
+    enabled: Boolean(state2.enabled),
+    paused: Boolean(state2.paused),
+    advisors: settingsAdvisors()
+  });
+  const settingsFail = (code) => ({
+    ok: false,
+    error: code,
+    code,
+    protocolVersion: PROTOCOL_VERSION,
+    sessionId,
+    projectRoot: state2.projectRoot ?? null,
+    configPath: configPathOf(),
+    workerGeneration: state2.workerGeneration,
+    settingsRevision: Number(state2.settingsRevision) || 0,
+    enabled: Boolean(state2.enabled),
+    paused: Boolean(state2.paused),
+    advisors: settingsAdvisors()
+  });
+  const affectedAdvisorNames = (nextSpecs, nextExclude, nextProviders, nextLimits) => {
+    const oldSpecs = state2.activation?.advisors ?? [];
+    const oldExclude = state2.activation?.exclude ?? [];
+    const oldProviders = state2.activation?.providers ?? {};
+    const oldLimits = state2.activation?.limits ?? {};
+    const nextNames = new Set(nextSpecs.map((spec) => spec.name));
+    const affected = /* @__PURE__ */ new Set();
+    const excludeChanged = JSON.stringify(oldExclude) !== JSON.stringify(nextExclude ?? []);
+    const limitsChanged = limitsIdentity(oldLimits) !== limitsIdentity(nextLimits ?? {});
+    if (excludeChanged || limitsChanged) {
+      for (const spec of oldSpecs) affected.add(spec.name);
+      for (const spec of nextSpecs) affected.add(spec.name);
+      return affected;
     }
-    const config = await deps.loadConfig({ env, projectRoot: frozenRoot });
+    const oldByName = new Map(oldSpecs.map((spec) => [spec.name, spec]));
+    for (const spec of oldSpecs) {
+      if (!nextNames.has(spec.name)) affected.add(spec.name);
+    }
+    for (const spec of nextSpecs) {
+      const prev = oldByName.get(spec.name);
+      const prevKey = prev ? advisorSpecKey(prev, oldExclude, oldProviders?.[prev.provider]) : null;
+      const nextKey = advisorSpecKey(spec, nextExclude ?? [], nextProviders?.[spec.provider]);
+      if (!prev || prevKey !== nextKey) affected.add(spec.name);
+    }
+    return affected;
+  };
+  const fenceAffected = (affected) => {
+    for (const name of affected) {
+      cancelReview(name, "settings");
+      const rec = advisorRecord(name);
+      rec.epoch = (Number(rec.epoch) > 0 ? Number(rec.epoch) : 1) + 1;
+      rec.coalesced = null;
+      rec.history = [];
+    }
+    fenceAdvisorFindings(state2.inbox, affected);
+  };
+  const diagnoseAdvisors = async (config) => {
     const advisors = [];
-    for (const advisor of config.advisors ?? []) {
+    const maxOutputTokens = outputTokenLimit(config?.limits);
+    for (const advisor of (config.advisors ?? []).map(normalizeAdvisorSpec)) {
       const provider = config.providers?.[advisor.provider];
-      if (!provider) {
-        advisors.push({ name: advisor.name, available: false, error: "missing provider" });
+      if (advisor.enabled === false) {
+        advisors.push({
+          name: advisor.name,
+          enabled: false,
+          available: false,
+          provider: advisor.provider,
+          model: advisor.model,
+          kind: provider?.kind,
+          reasoningEffort: advisor.reasoningEffort,
+          error: void 0
+        });
         continue;
       }
-      const diagnostic2 = unsupportedProviderDiagnostic(provider) ?? await deps.validateApi({ provider, advisor, env });
-      const errorText = diagnostic2?.available ? void 0 : sanitizeText(diagnosticErrorText(diagnostic2), secrets());
+      if (!provider) {
+        advisors.push({
+          name: advisor.name,
+          enabled: true,
+          available: false,
+          provider: advisor.provider,
+          model: advisor.model,
+          reasoningEffort: advisor.reasoningEffort,
+          error: "missing provider"
+        });
+        continue;
+      }
+      const diagnostic2 = unsupportedProviderDiagnostic(provider) ?? await deps.validateApi({ provider, advisor, env, maxOutputTokens });
+      const available = Boolean(diagnostic2?.available);
+      const reasoningInvalid = diagnostic2?.reasoningInvalid === true;
       advisors.push({
         name: advisor.name,
-        available: Boolean(diagnostic2?.available),
+        enabled: true,
+        available,
         provider: advisor.provider,
         model: advisor.model,
         kind: provider.kind,
-        error: errorText
+        reasoningEffort: advisor.reasoningEffort,
+        error: available ? void 0 : sanitizeText(diagnosticErrorText(diagnostic2), secrets()),
+        reasoningInvalid: reasoningInvalid || void 0
       });
-      const rec = advisorRecord(advisor.name);
-      rec.provider = advisor.provider;
-      rec.model = advisor.model;
-      rec.kind = provider.kind;
-      rec.paused = !diagnostic2?.available;
-      rec.pauseReason = diagnostic2?.available ? rec.pauseReason : diagnostic2?.error?.code ?? "unavailable";
-      rec.lastError = diagnostic2?.available ? rec.lastError : errorText;
     }
-    const usable = advisors.filter((item) => item.available);
+    return advisors;
+  };
+  const readConfigExact = async () => {
+    if (typeof deps.readConfigState === "function") {
+      return deps.readConfigState({ env });
+    }
+    const file = typeof deps.configFilePath === "function" ? deps.configFilePath(env) : null;
+    if (!file) return { path: null, revision: null, config: null, configError: "config unavailable" };
+    let raw;
+    try {
+      raw = await fs15.readFile(file);
+    } catch {
+      return { path: file, revision: null, config: null, configError: "config unavailable" };
+    }
+    const revision = configRevisionOf(raw);
+    let config = null;
+    let configError = null;
+    try {
+      config = await deps.loadConfig({ env });
+    } catch (error) {
+      configError = error instanceof Error ? error.message : "invalid config";
+    }
+    return { path: file, revision, config, configError };
+  };
+  const activateFromConfig = async ({ config, revision, wantEnabled, mode, frozenRoot, rootIdent }) => {
+    const deny = (code, extra) => mode === "apply" ? settingsFail(code) : {
+      ok: false,
+      enabled: Boolean(state2.enabled),
+      error: code,
+      code,
+      advisors: extra?.advisors ?? []
+    };
+    if (shuttingDown || closed || state2.ended) return deny(SETTINGS_ERRORS.STALE);
+    const specs = (config.advisors ?? []).map(normalizeAdvisorSpec);
+    const exclude = config.exclude ?? [];
+    const affected = affectedAdvisorNames(specs, exclude, config.providers, config.limits);
+    pruneIssuance(state2.issuance);
+    const blocked = ownershipDenyCode(state2, affected);
+    if (blocked) return deny(blocked);
+    const diagnosed = await diagnoseAdvisors(config);
+    if (shuttingDown || closed || state2.ended) return deny(SETTINGS_ERRORS.STALE);
+    pruneIssuance(state2.issuance);
+    const blockedAfter = ownershipDenyCode(state2, affected);
+    if (blockedAfter) return deny(blockedAfter);
+    if (diagnosed.some((row) => row.reasoningInvalid)) {
+      return deny(SETTINGS_ERRORS.CONFIG, { advisors: diagnosed });
+    }
+    if (shuttingDown || closed || state2.ended) return deny(SETTINGS_ERRORS.STALE);
+    const priorAdvisors = new Map(
+      Object.entries(state2.advisors ?? {}).map(([name, rec]) => [name, { ...rec }])
+    );
+    const priorInboxDeliverable = (state2.inbox ?? []).map((item) => item.deliverable);
+    const prior = {
+      activation: state2.activation,
+      activationFingerprint: state2.activationFingerprint,
+      settingsRevision: state2.settingsRevision,
+      enabled: state2.enabled,
+      paused: state2.paused,
+      pauseReason: state2.pauseReason,
+      projectRoot: state2.projectRoot,
+      rootIdent: state2.rootIdent,
+      cwdOutsideRoot: state2.cwdOutsideRoot
+    };
+    const restoreActivation = () => {
+      state2.activation = prior.activation;
+      state2.activationFingerprint = prior.activationFingerprint;
+      state2.settingsRevision = prior.settingsRevision;
+      state2.enabled = prior.enabled;
+      state2.paused = prior.paused;
+      state2.pauseReason = prior.pauseReason;
+      state2.projectRoot = prior.projectRoot;
+      state2.rootIdent = prior.rootIdent;
+      state2.cwdOutsideRoot = prior.cwdOutsideRoot;
+      for (const name of Object.keys(state2.advisors ?? {})) {
+        if (!priorAdvisors.has(name)) delete state2.advisors[name];
+      }
+      for (const [name, rec] of priorAdvisors) state2.advisors[name] = rec;
+      priorInboxDeliverable.forEach((flag, index3) => {
+        if (state2.inbox[index3]) state2.inbox[index3].deliverable = flag;
+      });
+    };
+    const nextNames = new Set(specs.map((spec) => spec.name));
+    fenceAffected(affected);
+    for (const spec of state2.activation?.advisors ?? []) {
+      if (!nextNames.has(spec.name)) {
+        const rec = advisorRecord(spec.name);
+        rec.tombstone = true;
+        rec.enabled = false;
+      }
+    }
+    for (const row of diagnosed) {
+      const rec = advisorRecord(row.name);
+      rec.tombstone = false;
+      rec.provider = row.provider;
+      rec.model = row.model;
+      rec.kind = row.kind;
+      rec.enabled = row.enabled !== false;
+      rec.reasoningEffort = row.reasoningEffort ?? "default";
+      rec.identity = advisorSpecKey(
+        specs.find((spec) => spec.name === row.name),
+        exclude,
+        config.providers?.[row.provider]
+      );
+      if (row.enabled === false) {
+        rec.paused = false;
+        continue;
+      }
+      if (row.available) {
+        if (mode === "on" || affected.has(row.name)) {
+          rec.paused = false;
+          rec.pauseReason = null;
+          rec.lastError = null;
+          rec.consecutiveFailures = 0;
+        }
+      } else {
+        rec.paused = true;
+        rec.pauseReason = "unavailable";
+        rec.lastError = row.error;
+      }
+    }
     state2.activation = {
       version: config.version,
       providers: config.providers,
-      advisors: (config.advisors ?? []).filter((advisor) => usable.some((item) => item.name === advisor.name)),
-      exclude: config.exclude ?? [],
-      limits: config.limits ?? {}
+      advisors: specs,
+      exclude,
+      limits: config.limits ?? {},
+      configRevision: revision ?? null
     };
     state2.activationFingerprint = fingerprintSnapshot(state2.activation);
-    state2.projectRoot = frozenRoot;
-    state2.rootIdent = rootIdent;
-    state2.cwdOutsideRoot = false;
-    state2.enabled = usable.length > 0;
-    state2.paused = !state2.enabled;
-    state2.pauseReason = state2.enabled ? null : "no-usable-advisors";
-    await persist();
+    if (frozenRoot) {
+      state2.projectRoot = frozenRoot;
+      if (rootIdent) state2.rootIdent = rootIdent;
+    }
+    if (mode === "on") state2.cwdOutsideRoot = false;
+    const usable = diagnosed.filter((item) => item.available);
+    if (wantEnabled) {
+      state2.enabled = usable.length > 0;
+      if (state2.compaction?.phase !== "pre" && !state2.cwdOutsideRoot) {
+        state2.paused = !state2.enabled;
+        state2.pauseReason = state2.enabled ? null : "no-usable-advisors";
+      }
+    } else {
+      state2.enabled = false;
+      if (state2.pauseReason !== "cwd-outside-root" && state2.compaction?.phase !== "pre") {
+        state2.paused = true;
+        state2.pauseReason = "off";
+      }
+    }
+    state2.settingsRevision = (Number(state2.settingsRevision) || 0) + 1;
+    try {
+      await persistDurable();
+    } catch {
+      restoreActivation();
+      return deny(SETTINGS_ERRORS.CONFIG);
+    }
+    return { diagnosed, usable };
+  };
+  const prepareActivationRoot = async () => {
+    const runtime = deps.runtimeErrors({ env }) ?? [];
+    if (runtime.length) {
+      return { ok: false, reason: "runtime", error: runtime[0] };
+    }
+    let frozenRoot = projectRoot;
+    let rootIdent = null;
+    try {
+      if (typeof deps.snapshotRoot === "function") {
+        rootIdent = await deps.snapshotRoot(projectRoot);
+        if (rootIdent?.path) frozenRoot = rootIdent.path;
+      } else {
+        const canonical = await deps.validateRoot(projectRoot);
+        frozenRoot = typeof canonical === "string" && canonical ? canonical : projectRoot;
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        reason: "root",
+        error: sanitizeText(error instanceof Error ? error.message : "invalid root", secrets())
+      };
+    }
+    if (state2.rootIdent?.dev != null && state2.rootIdent?.ino != null && rootIdent?.dev != null && rootIdent?.ino != null && (Number(state2.rootIdent.dev) !== Number(rootIdent.dev) || Number(state2.rootIdent.ino) !== Number(rootIdent.ino))) {
+      return { ok: false, reason: "root", error: SETTINGS_ERRORS.ROOT };
+    }
+    if (state2.projectRoot && projectRoot && !rootsEquivalent(state2.projectRoot, projectRoot, state2.rootIdent ?? rootIdent)) {
+      return { ok: false, reason: "root", error: SETTINGS_ERRORS.ROOT };
+    }
+    if (state2.rootIdent) {
+      rootIdent = state2.rootIdent;
+      if (state2.projectRoot) frozenRoot = state2.projectRoot;
+    }
+    return { ok: true, frozenRoot, rootIdent };
+  };
+  const handleOn = async () => {
+    const prepared = await prepareActivationRoot();
+    if (!prepared.ok) {
+      return { ok: false, enabled: false, error: prepared.error, advisors: [] };
+    }
+    const { frozenRoot, rootIdent } = prepared;
+    let config;
+    try {
+      config = await deps.loadConfig({ env, projectRoot: frozenRoot });
+    } catch (error) {
+      return {
+        ok: false,
+        enabled: false,
+        error: sanitizeText(error instanceof Error ? error.message : "invalid config", secrets()),
+        advisors: []
+      };
+    }
+    const result = await activateFromConfig({
+      config,
+      revision: null,
+      wantEnabled: true,
+      mode: "on",
+      frozenRoot,
+      rootIdent
+    });
+    if (result?.ok === false) {
+      return { ok: false, enabled: result.enabled, error: result.error, advisors: result.advisors ?? [] };
+    }
     return {
       ok: true,
       enabled: state2.enabled,
-      projectRoot: frozenRoot,
-      advisors,
+      projectRoot: state2.projectRoot,
+      advisors: result.diagnosed,
       limits: state2.activation.limits,
       disclosure: "External providers receive bounded session observations. The plugin does not persist provider conversations. Injection is best-effort and never wakes a stopped session."
     };
@@ -97666,6 +99389,7 @@ ${advisorSpec.instructions ?? ""}`.trim();
     state2.enabled = false;
     state2.paused = true;
     state2.pauseReason = "off";
+    state2.settingsRevision = (Number(state2.settingsRevision) || 0) + 1;
     await persist();
     return {
       ok: true,
@@ -97679,15 +99403,19 @@ ${advisorSpec.instructions ?? ""}`.trim();
       const rec = advisorRecord(spec.name);
       const provider = state2.activation?.providers?.[spec.provider];
       let advisorState = "idle";
-      if (!state2.enabled) advisorState = "disabled";
+      if (!state2.enabled || spec.enabled === false) advisorState = "disabled";
+      else if (rec.paused && rec.pauseReason === "unavailable") advisorState = "unavailable";
       else if (rec.paused) advisorState = "paused";
       else if (reviews.has(spec.name)) advisorState = "busy";
       return {
         name: spec.name,
         state: advisorState,
+        enabled: spec.enabled !== false,
+        available: spec.enabled !== false && !rec.paused,
         provider: spec.provider,
         model: spec.model,
         kind: provider?.kind ?? rec.kind,
+        reasoningEffort: spec.reasoningEffort ?? rec.reasoningEffort ?? "default",
         reviews: rec.reviews ?? 0,
         usage: rec.usage ?? null,
         lastError: rec.lastError ?? null
@@ -97699,6 +99427,7 @@ ${advisorSpec.instructions ?? ""}`.trim();
       paused: Boolean(state2.paused),
       reason: state2.pauseReason,
       generation: state2.generation,
+      settingsRevision: Number(state2.settingsRevision) || 0,
       projectRoot: state2.projectRoot,
       advisors,
       inbox: state2.inbox.map((item) => ({
@@ -97712,6 +99441,55 @@ ${advisorSpec.instructions ?? ""}`.trim();
       })),
       emission: "best-effort"
     };
+  };
+  const handleSettings = async (req) => {
+    if (req?.protocolVersion !== PROTOCOL_VERSION) return settingsFail(SETTINGS_ERRORS.PROTOCOL);
+    if (shuttingDown || closed || state2.ended) return settingsFail(SETTINGS_ERRORS.STALE);
+    return settingsSnapshot();
+  };
+  const handleApply = async (req) => {
+    if (req?.protocolVersion !== PROTOCOL_VERSION) return settingsFail(SETTINGS_ERRORS.PROTOCOL);
+    if (shuttingDown || closed || state2.ended) return settingsFail(SETTINGS_ERRORS.STALE);
+    if (req.workerGeneration == null || req.settingsRevision == null || req.configRevision == null || req.configRevision === "") {
+      return settingsFail(SETTINGS_ERRORS.CONFIG);
+    }
+    if (Number(req.workerGeneration) !== Number(state2.workerGeneration)) {
+      return settingsFail(SETTINGS_ERRORS.STALE);
+    }
+    if (Number(req.settingsRevision) !== Number(state2.settingsRevision || 0)) {
+      return settingsFail(SETTINGS_ERRORS.STALE);
+    }
+    const first = await readConfigExact();
+    if (!first?.config || first.configError || first.revision == null) {
+      return settingsFail(SETTINGS_ERRORS.CONFIG);
+    }
+    if (first.revision !== req.configRevision) return settingsFail(SETTINGS_ERRORS.CONFIG);
+    const second = await readConfigExact();
+    if (!second || second.revision !== first.revision) return settingsFail(SETTINGS_ERRORS.CONFIG);
+    if (shuttingDown || closed || state2.ended) return settingsFail(SETTINGS_ERRORS.STALE);
+    for (const advisor of first.config.advisors ?? []) {
+      if (advisor.enabled === false) continue;
+      const provider = first.config.providers?.[advisor.provider];
+      if (apiKeyMissing(provider, env)) return settingsFail(SETTINGS_ERRORS.UNAVAILABLE);
+    }
+    const prepared = await prepareActivationRoot();
+    if (!prepared.ok) {
+      return settingsFail(
+        prepared.reason === "runtime" ? SETTINGS_ERRORS.UNAVAILABLE : SETTINGS_ERRORS.ROOT
+      );
+    }
+    if (shuttingDown || closed || state2.ended) return settingsFail(SETTINGS_ERRORS.STALE);
+    const wantEnabled = req.enable === true ? true : Boolean(state2.enabled);
+    const result = await activateFromConfig({
+      config: first.config,
+      revision: first.revision,
+      wantEnabled,
+      mode: "apply",
+      frozenRoot: prepared.frozenRoot,
+      rootIdent: prepared.rootIdent
+    });
+    if (result?.ok === false) return result;
+    return settingsSnapshot();
   };
   const handleDoctor = async () => {
     const runtime = deps.runtimeErrors({ env }) ?? [];
@@ -97741,9 +99519,10 @@ ${advisorSpec.instructions ?? ""}`.trim();
     const providerDiagnostics = [];
     const providers = snapshot?.providers ?? loadedConfig?.providers ?? {};
     const advisorList = snapshot?.advisors ?? loadedConfig?.advisors ?? [];
+    const maxOutputTokens = outputTokenLimit(snapshot?.limits ?? loadedConfig?.limits);
     for (const [slot, provider] of Object.entries(providers)) {
       const advisor = advisorList.find((item) => item.provider === slot) ?? { name: slot, provider: slot };
-      const diagnostic2 = unsupportedProviderDiagnostic(provider) ?? await deps.validateApi({ provider, advisor, env });
+      const diagnostic2 = unsupportedProviderDiagnostic(provider) ?? await deps.validateApi({ provider, advisor, env, maxOutputTokens });
       const errorText = diagnostic2?.available ? void 0 : sanitizeText(diagnosticErrorText(diagnostic2), secrets());
       providerDiagnostics.push({
         slot,
@@ -97770,48 +99549,54 @@ ${advisorSpec.instructions ?? ""}`.trim();
       ipc: { ok: Boolean(server?.listening), socketPath: socket.socketPath }
     };
   };
-  const handleHook = async (payload) => {
-    if (!payload || typeof payload !== "object") return { stdout: "" };
-    if (payload.agent_id) return { stdout: "" };
-    if (payload.cwd && state2.projectRoot && !cwdInsideRoot(payload.cwd, state2.projectRoot, state2.rootIdent)) {
-      if (payload.hook_event_name !== "SessionStart") {
-        state2.cwdOutsideRoot = true;
-        state2.paused = true;
-        state2.pauseReason = "cwd-outside-root";
-        cancelAll("cwd");
-      }
-    }
+  const handleHook = async (payload, client) => {
+    const issuer = normalizeClient(client);
+    hookClient = issuer;
     try {
-      if (payload.transcript_path) await ingestTranscript(payload.transcript_path);
-    } catch (error) {
-      await errors.record(error);
-    }
-    const event = payload.hook_event_name;
-    switch (event) {
-      case "SessionStart":
-        return handleSessionStart(payload);
-      case "UserPromptSubmit":
-        return handlePrompt(payload);
-      case "UserPromptExpansion":
-        return handleExpansion(payload);
-      case "PreToolUse":
-        return handleTool(payload, "intent");
-      case "PostToolUse":
-        return handleTool(payload, "outcome");
-      case "PostToolUseFailure":
-        return handleTool(payload, "failure");
-      case "Stop":
-        return handleStop(payload);
-      case "StopFailure":
-        return handleStopFailure(payload);
-      case "PreCompact":
-        return handlePreCompact(payload);
-      case "PostCompact":
-        return handlePostCompact(payload);
-      case "SessionEnd":
-        return handleSessionEnd(payload);
-      default:
-        return { stdout: "" };
+      if (!payload || typeof payload !== "object") return { stdout: "" };
+      if (payload.agent_id) return { stdout: "" };
+      if (payload.cwd && state2.projectRoot && !cwdInsideRoot(payload.cwd, state2.projectRoot, state2.rootIdent)) {
+        if (payload.hook_event_name !== "SessionStart") {
+          state2.cwdOutsideRoot = true;
+          state2.paused = true;
+          state2.pauseReason = "cwd-outside-root";
+          cancelAll("cwd");
+        }
+      }
+      try {
+        if (payload.transcript_path) await ingestTranscript(payload.transcript_path);
+      } catch (error) {
+        await errors.record(error);
+      }
+      const event = payload.hook_event_name;
+      switch (event) {
+        case "SessionStart":
+          return await handleSessionStart(payload);
+        case "UserPromptSubmit":
+          return await handlePrompt(payload);
+        case "UserPromptExpansion":
+          return await handleExpansion(payload);
+        case "PreToolUse":
+          return await handleTool(payload, "intent");
+        case "PostToolUse":
+          return await handleTool(payload, "outcome");
+        case "PostToolUseFailure":
+          return await handleTool(payload, "failure");
+        case "Stop":
+          return await handleStop(payload);
+        case "StopFailure":
+          return await handleStopFailure(payload);
+        case "PreCompact":
+          return await handlePreCompact(payload);
+        case "PostCompact":
+          return await handlePostCompact(payload);
+        case "SessionEnd":
+          return await handleSessionEnd(payload);
+        default:
+          return { stdout: "" };
+      }
+    } finally {
+      if (hookClient === issuer) hookClient = null;
     }
   };
   let serial = Promise.resolve();
@@ -97835,13 +99620,32 @@ ${advisorSpec.instructions ?? ""}`.trim();
       case "doctor":
         return handleDoctor();
       case "hook":
-        return handleHook(req.payload ?? req.hook ?? {});
-      case "ack":
+        return handleHook(req.payload ?? req.hook ?? {}, req.client);
+      case "ack": {
+        const client = normalizeClient(req.client);
+        const rec = (state2.issuance ?? []).find((item) => item?.claimId === req.claimId);
+        if (rec && !clientsMatch(rec.client, client)) {
+          return { ok: false, error: SETTINGS_ERRORS.PROTOCOL, emission: "best-effort", client };
+        }
         acknowledgeClaim(state2.inbox, req.claimId, now());
+        clearIssuance(state2.issuance, req.claimId);
         await persist();
-        return { ok: true, emission: "best-effort" };
+        return { ok: true, emission: "best-effort", client };
+      }
       case "ping":
-        return { pid: process.pid, workerGeneration: state2.workerGeneration };
+        return {
+          protocolVersion: PROTOCOL_VERSION,
+          sessionId,
+          projectRoot: state2.projectRoot ?? null,
+          configPath: configPathOf(),
+          workerGeneration: state2.workerGeneration,
+          settingsRevision: Number(state2.settingsRevision) || 0,
+          pid: process.pid
+        };
+      case "settings":
+        return handleSettings(req);
+      case "apply":
+        return handleApply(req);
       default:
         throw new Error("unknown op");
     }
@@ -97865,11 +99669,11 @@ ${advisorSpec.instructions ?? ""}`.trim();
           await new Promise((resolve2) => server.close(() => resolve2()));
           server = null;
         }
-        await fs14.rm(socket.dir, { recursive: true, force: true }).catch(() => {
+        await fs15.rm(socket.dir, { recursive: true, force: true }).catch(() => {
         });
-        await fs14.rm(lockDir(dir), { recursive: true, force: true }).catch(() => {
+        await fs15.rm(lockDir(dir), { recursive: true, force: true }).catch(() => {
         });
-        await fs14.rm(locatorPath(dir), { force: true }).catch(() => {
+        await fs15.rm(locatorPath(dir), { force: true }).catch(() => {
         });
         if (reason === "idle" && options.exitOnIdle !== false) {
           process.exit(0);
@@ -97898,13 +99702,17 @@ ${advisorSpec.instructions ?? ""}`.trim();
         (req, respond) => runSerial(async () => {
           try {
             const result = await dispatch(req);
-            respond({ ok: true, result });
+            const envelope = { ok: true, result };
+            if (req?.id != null) envelope.id = req.id;
+            respond(envelope);
           } catch (error) {
             await errors.record(error);
-            respond({
+            const envelope = {
               ok: false,
               error: sanitizeText(error instanceof Error ? error.message : "error", secrets())
-            });
+            };
+            if (req?.id != null) envelope.id = req.id;
+            respond(envelope);
           } finally {
             await persist();
           }
@@ -97913,9 +99721,9 @@ ${advisorSpec.instructions ?? ""}`.trim();
     }
     await atomicWriteJson(locatorPath(dir), locator);
   } catch (error) {
-    await fs14.rm(socket.dir, { recursive: true, force: true }).catch(() => {
+    await fs15.rm(socket.dir, { recursive: true, force: true }).catch(() => {
     });
-    await fs14.rm(lockDir(dir), { recursive: true, force: true }).catch(() => {
+    await fs15.rm(lockDir(dir), { recursive: true, force: true }).catch(() => {
     });
     throw error;
   }
@@ -97939,7 +99747,7 @@ function parseWorkerArgs(argv) {
   }
   return out;
 }
-async function main(argv = process.argv.slice(2), env = process.env) {
+async function main2(argv = process.argv.slice(2), env = process.env) {
   const args = parseWorkerArgs(argv);
   const sessionId = args.sessionId || env.CLAUDE_CODE_SESSION_ID || env.CLAUDE_SESSION_ID;
   const projectRoot = args.projectRoot || env.CLAUDE_PROJECT_DIR;
@@ -97954,19 +99762,19 @@ async function main(argv = process.argv.slice(2), env = process.env) {
 }
 var realPath = (value) => {
   try {
-    return fsSync2.realpathSync(value);
+    return fsSync3.realpathSync(value);
   } catch {
-    return path11.resolve(value);
+    return path12.resolve(value);
   }
 };
 var invokedDirectly = process.argv[1] && realPath(process.argv[1]) === realPath(fileURLToPath(import.meta.url));
 if (invokedDirectly) {
-  main().catch(() => {
+  main2().catch(() => {
     process.exitCode = 0;
   });
 }
 export {
   cwdInsideRoot,
-  main,
+  main2 as main,
   startWorker
 };

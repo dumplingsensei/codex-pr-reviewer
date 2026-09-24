@@ -70,20 +70,26 @@ function listingNames(text) {
 }
 
 describe("validateConfig", () => {
-  it("accepts a strict user-selected model config and fills omitted limits", () => {
+  it("normalizes version-1 advisors to enabled default effort and fills omitted limits", () => {
     const { limits, ...rest } = baseConfig();
     const parsed = validateConfig(rest);
     void limits;
-    assert.equal(parsed.version, 1);
+    assert.equal(parsed.version, 2);
     assert.equal(parsed.advisors[0].model, "gpt-4.1");
+    assert.equal(parsed.advisors[0].enabled, true);
+    assert.equal(parsed.advisors[0].reasoningEffort, "default");
     assert.equal(parsed.limits.maxConcurrentAdvisors, 2);
     assert.equal(parsed.limits.reviewTimeoutSeconds, 90);
     assert.deepEqual(parsed.exclude, []);
   });
 
+
   it("rejects unknown keys, ambient key values, and default-less malformed entries", () => {
     assert.throws(() => validateConfig({ ...baseConfig(), extra: true }));
     assert.throws(() => validateConfig({ ...baseConfig(), version: 2 }));
+    assert.throws(() => validateConfig({ ...baseConfig(), version: 3 }));
+
+
     assert.throws(() =>
       validateConfig({
         ...baseConfig(),
@@ -258,16 +264,297 @@ describe("validateConfig", () => {
       })
     );
   });
+
+  it("accepts empty version-2 collections and still rejects empty version-1", () => {
+    const parsed = validateConfig({ version: 2, providers: {}, advisors: [] });
+    assert.equal(parsed.version, 2);
+    assert.deepEqual(parsed.providers, {});
+    assert.deepEqual(parsed.advisors, []);
+    assert.throws(() => validateConfig({ version: 1, providers: {}, advisors: [] }));
+  });
+
+
+  it("preserves explicit version-2 enabled and reasoning effort", () => {
+    const parsed = validateConfig({
+      version: 2,
+      providers: {
+        "openai-api": { kind: "api", provider: "openai", apiKeyEnv: "OPENAI_API_KEY" }
+      },
+      advisors: [
+        {
+          name: "correctness",
+          provider: "openai-api",
+          model: "gpt-4.1",
+          instructions: "Look for observable correctness failures.",
+          enabled: false,
+          reasoningEffort: "default"
+        }
+      ]
+    });
+    assert.equal(parsed.advisors[0].enabled, false);
+    assert.equal(parsed.advisors[0].reasoningEffort, "default");
+    assert.equal(parsed.advisors[0].name, "correctness");
+    assert.equal(parsed.advisors[0].model, "gpt-4.1");
+  });
+
+  it("rejects unknown provider references and unknown future versions", () => {
+    assert.throws(() =>
+      validateConfig({
+        version: 2,
+        providers: {},
+        advisors: [
+          {
+            name: "correctness",
+            provider: "openai-api",
+            model: "gpt-4.1",
+            instructions: "Look for observable correctness failures.",
+            enabled: true,
+            reasoningEffort: "default"
+          }
+        ]
+      })
+    );
+    assert.throws(() => validateConfig({ version: 3, providers: {}, advisors: [] }));
+  });
+
+  it("rejects unpaired or malformed compatible reasoning format and map", () => {
+    const thinkingLevelMap = {
+      off: "none",
+      minimal: "low",
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: null,
+      max: null
+    };
+    const compatible = (models) =>
+      validateConfig({
+        version: 2,
+        providers: {
+          loopback: {
+            kind: "api",
+            provider: "openai-compatible",
+            apiKeyEnv: "SMOKE_KEY",
+            baseUrl: "http://127.0.0.1:8765/v1",
+            models
+          }
+        },
+        advisors: [
+          {
+            name: "smoke",
+            provider: "loopback",
+            model: "smoke-model",
+            instructions: "Inspect the fixture.",
+            enabled: true,
+            reasoningEffort: "default"
+          }
+        ]
+      });
+    const ok = compatible({
+      "smoke-model": {
+        contextWindow: 32000,
+        maxTokens: 2048,
+        reasoning: true,
+        input: ["text"],
+        thinkingFormat: "openai",
+        thinkingLevelMap
+      }
+    });
+    assert.equal(ok.providers.loopback.models["smoke-model"].thinkingFormat, "openai");
+    assert.equal("supportsReasoningEffort" in ok.providers.loopback.models["smoke-model"], false);
+    assert.equal(ok.providers.loopback.models["smoke-model"].thinkingLevelMap.high, "high");
+    assert.throws(() =>
+      compatible({
+        "smoke-model": {
+          contextWindow: 32000,
+          maxTokens: 2048,
+          reasoning: true,
+          input: ["text"],
+          thinkingFormat: "openai"
+        }
+      })
+    );
+    assert.throws(() =>
+      compatible({
+        "smoke-model": {
+          contextWindow: 32000,
+          maxTokens: 2048,
+          reasoning: true,
+          input: ["text"],
+          thinkingLevelMap
+        }
+      })
+    );
+    assert.throws(() =>
+      compatible({
+        "smoke-model": {
+          contextWindow: 32000,
+          maxTokens: 2048,
+          reasoning: true,
+          input: ["text"],
+          thinkingFormat: "anthropic",
+          thinkingLevelMap
+        }
+      })
+    );
+    assert.throws(() =>
+      compatible({
+        "smoke-model": {
+          contextWindow: 32000,
+          maxTokens: 2048,
+          reasoning: true,
+          input: ["text"],
+          thinkingFormat: "openai",
+          thinkingLevelMap: { ...thinkingLevelMap, extra: "high" }
+        }
+      })
+    );
+    assert.throws(() =>
+      compatible({
+        "smoke-model": {
+          contextWindow: 32000,
+          maxTokens: 2048,
+          reasoning: true,
+          input: ["text"],
+          thinkingFormat: "openai",
+          thinkingLevelMap: { off: "none", minimal: "low", low: "low", medium: "medium", high: "high", xhigh: null }
+        }
+      })
+    );
+    assert.throws(() =>
+      compatible({
+        "smoke-model": {
+          contextWindow: 32000,
+          maxTokens: 2048,
+          reasoning: true,
+          input: ["text"],
+          thinkingFormat: "openai",
+          thinkingLevelMap: { ...thinkingLevelMap, high: 1 }
+        }
+      })
+    );
+  });
+
+  it("accepts optional supportsReasoningEffort only with a complete thinking pair", () => {
+    const thinkingLevelMap = {
+      off: "none",
+      minimal: "low",
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: null,
+      max: null
+    };
+    const zaiMap = {
+      off: "disabled",
+      minimal: "enabled",
+      low: "enabled",
+      medium: "enabled",
+      high: "enabled",
+      xhigh: null,
+      max: null
+    };
+    const compatible = (models, version = 2) =>
+      validateConfig({
+        version,
+        providers: {
+          loopback: {
+            kind: "api",
+            provider: "openai-compatible",
+            apiKeyEnv: "SMOKE_KEY",
+            baseUrl: "http://127.0.0.1:8765/v1",
+            models
+          }
+        },
+        advisors: [
+          {
+            name: "smoke",
+            provider: "loopback",
+            model: "smoke-model",
+            instructions: "Inspect the fixture.",
+            ...(version === 2 ? { enabled: true, reasoningEffort: "default" } : {})
+          }
+        ]
+      });
+    const baseMeta = {
+      contextWindow: 32000,
+      maxTokens: 2048,
+      reasoning: true,
+      input: ["text"]
+    };
+    const native = compatible({
+      "smoke-model": {
+        ...baseMeta,
+        thinkingFormat: "openai",
+        thinkingLevelMap,
+        supportsReasoningEffort: true
+      }
+    });
+    assert.equal(native.providers.loopback.models["smoke-model"].supportsReasoningEffort, true);
+    const enableOnly = compatible({
+      "smoke-model": {
+        ...baseMeta,
+        thinkingFormat: "zai",
+        thinkingLevelMap: zaiMap,
+        supportsReasoningEffort: false
+      }
+    });
+    assert.equal(enableOnly.providers.loopback.models["smoke-model"].supportsReasoningEffort, false);
+    assert.equal(enableOnly.providers.loopback.models["smoke-model"].thinkingFormat, "zai");
+    assert.throws(() =>
+      compatible({
+        "smoke-model": { ...baseMeta, supportsReasoningEffort: true }
+      })
+    );
+    assert.throws(() =>
+      compatible({
+        "smoke-model": {
+          ...baseMeta,
+          thinkingFormat: "openai",
+          supportsReasoningEffort: true
+        }
+      })
+    );
+    assert.throws(() =>
+      compatible({
+        "smoke-model": {
+          ...baseMeta,
+          thinkingFormat: "openai",
+          thinkingLevelMap,
+          supportsReasoningEffort: "true"
+        }
+      })
+    );
+    assert.throws(() =>
+      compatible(
+        {
+          "smoke-model": { ...baseMeta, supportsReasoningEffort: false }
+        },
+        1
+      )
+    );
+  });
+
 });
 
 describe("loadConfig", () => {
-  it("loads from CLAUDE_CONFIG_DIR and throws when the file is missing", async () => {
+  it("loads from CLAUDE_CONFIG_DIR, normalizes version-1 in memory, and does not rewrite the file", async () => {
     const dir = await scratch("cma-cfg-");
-    await fs.writeFile(path.join(dir, "cross-model-advisor.json"), `${JSON.stringify(baseConfig())}\n`);
+    const file = path.join(dir, "cross-model-advisor.json");
+    const body = `${JSON.stringify(baseConfig())}\n`;
+    await fs.writeFile(file, body);
     const loaded = await loadConfig({ env: { CLAUDE_CONFIG_DIR: dir } });
+    assert.equal(loaded.version, 2);
     assert.equal(loaded.advisors[0].name, "correctness");
+    assert.equal(loaded.advisors[0].enabled, true);
+    assert.equal(loaded.advisors[0].reasoningEffort, "default");
     assert.equal(Object.hasOwn(loaded.providers["openai-api"], "apiKeyEnv"), true);
     assert.equal(Object.values(loaded.providers).some((entry) => "apiKey" in entry), false);
+    assert.equal(await fs.readFile(file, "utf8"), body);
+    const onDisk = JSON.parse(await fs.readFile(file, "utf8"));
+    assert.equal(onDisk.version, 1);
+    assert.equal(Object.hasOwn(onDisk.advisors[0], "enabled"), false);
+    assert.equal(Object.hasOwn(onDisk.advisors[0], "reasoningEffort"), false);
     const empty = await scratch("cma-cfg-missing-");
     await assert.rejects(() => loadConfig({ env: { CLAUDE_CONFIG_DIR: empty } }));
   });

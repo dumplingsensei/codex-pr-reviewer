@@ -15,11 +15,14 @@ import {
   CLAIM_LEASE_MS,
   DEBOUNCE_MS,
   DEFAULT_MAX_CONCURRENT,
+  DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_MAX_REVIEWS,
   DEFAULT_REVIEW_TIMEOUT_MS,
   DRAIN_EVENTS,
   IDLE_EXIT_MS,
+  PROTOCOL_VERSION,
   SESSION_RETENTION_MS,
+  SETTINGS_ERRORS,
   USER_TEXT_CAP,
   WORKER_UMASK
 } from "./session/constants.mjs";
@@ -27,8 +30,18 @@ import { createErrorLog } from "./session/errors.mjs";
 import {
   acknowledgeClaim,
   acceptedFinding,
+  adoptLegacyIssuance,
   claimFindings,
+  clearIssuance,
+  clientsMatch,
   discardInjectable,
+  fenceAdvisorFindings,
+  findingEligible,
+  normalizeClient,
+  ownershipDenyCode,
+  pruneIssuance,
+  recordIssuance,
+  releaseClaim,
   retainPreCompact
 } from "./session/findings.mjs";
 import { boundHistory, currentContextFits } from "./session/history.mjs";
@@ -157,6 +170,83 @@ function unsupportedProviderDiagnostic(provider) {
   };
 }
 
+function configRevisionOf(raw) {
+  return crypto.createHash("sha256").update(raw).digest("hex");
+}
+
+function normalizeAdvisorSpec(spec) {
+  if (!spec || typeof spec !== "object") return spec;
+  return {
+    name: spec.name,
+    provider: spec.provider,
+    model: spec.model,
+    instructions: spec.instructions,
+    enabled: spec.enabled !== false,
+    reasoningEffort: typeof spec.reasoningEffort === "string" ? spec.reasoningEffort : "default"
+  };
+}
+
+function providerIdentity(provider) {
+  if (!provider || typeof provider !== "object") return null;
+  return {
+    kind: provider.kind ?? "",
+    provider: provider.provider ?? "",
+    apiKeyEnv: typeof provider.apiKeyEnv === "string" ? provider.apiKeyEnv : "",
+    baseUrl: typeof provider.baseUrl === "string" ? provider.baseUrl : "",
+    models: provider.models ?? null
+  };
+}
+
+function advisorSpecKey(spec, exclude, provider) {
+  const normalized = normalizeAdvisorSpec(spec);
+  return JSON.stringify({
+    provider: normalized?.provider ?? "",
+    model: normalized?.model ?? "",
+    instructions: normalized?.instructions ?? "",
+    enabled: normalized?.enabled !== false,
+    reasoningEffort: normalized?.reasoningEffort ?? "default",
+    exclude: exclude ?? [],
+    providerDef: providerIdentity(provider)
+  });
+}
+
+function limitsIdentity(limits) {
+  return JSON.stringify(limits ?? {});
+}
+
+function outputTokenLimit(limits) {
+  const value = limits?.maxOutputTokens;
+  return Number.isInteger(value) ? value : DEFAULT_MAX_OUTPUT_TOKENS;
+}
+
+function rootsEquivalent(left, right, rootIdent) {
+  if (typeof left !== "string" || typeof right !== "string" || !left || !right) return false;
+  const a = path.resolve(left);
+  const b = path.resolve(right);
+  if (a === b) return true;
+  try {
+    if (fsSync.realpathSync(a) === fsSync.realpathSync(b)) return true;
+  } catch {
+    // fall through to inode identity
+  }
+  if (rootIdent?.dev == null || rootIdent?.ino == null) return false;
+  try {
+    const listing = fsSync.lstatSync(b);
+    return Number(listing.dev) === Number(rootIdent.dev) && Number(listing.ino) === Number(rootIdent.ino);
+  } catch {
+    return false;
+  }
+}
+
+function apiKeyMissing(provider, env) {
+  if (!provider || provider.kind !== "api") return false;
+  const name = typeof provider.apiKeyEnv === "string" ? provider.apiKeyEnv : "";
+  if (!name) return true;
+  const value = env?.[name];
+  return typeof value !== "string" || value.trim().length === 0;
+}
+
+
 function diagnosticErrorText(diagnostic) {
   const err = diagnostic?.error;
   if (typeof err === "string" && err) return err;
@@ -262,6 +352,7 @@ async function resolveDeps(options) {
   let configMod = null;
   let toolsMod = null;
   let apiMod = null;
+  let storeMod = null;
   let prompt = options.advisorSystemPrompt;
   if (!options.loadConfig || !options.validateRoot || !options.runtimeErrors || !options.configFilePath) {
     configMod = await import("./config.mjs");
@@ -271,6 +362,13 @@ async function resolveDeps(options) {
   }
   if (!options.validateApi || !options.reviewApi) {
     apiMod = await import("./backends/api.mjs");
+  }
+  if (!options.readConfigState) {
+    try {
+      storeMod = await import("./setup-store.mjs");
+    } catch {
+      storeMod = null;
+    }
   }
   if (prompt == null) {
     prompt = (await import("./prompt.mjs")).advisorSystemPrompt;
@@ -287,6 +385,7 @@ async function resolveDeps(options) {
     snapshotRoot: options.snapshotRoot ?? configMod?.snapshotRoot,
     runtimeErrors: options.runtimeErrors ?? configMod?.runtimeErrors ?? (() => []),
     configFilePath: options.configFilePath ?? configMod.configFilePath,
+    readConfigState: options.readConfigState ?? storeMod?.readConfigState,
     createReviewTools: options.createReviewTools ?? toolsMod?.createReviewTools,
     normalizeFinding: options.normalizeFinding ?? toolsMod?.normalizeFinding ?? defaultNormalize,
     validateApi: options.validateApi ?? apiMod?.validateApi,
@@ -362,6 +461,10 @@ export async function startWorker(options) {
   let state = await loadState(dir);
   state.workerGeneration = (Number(state.workerGeneration) || 0) + 1;
   if (!state.projectRoot) state.projectRoot = projectRoot;
+  if (!Array.isArray(state.issuance)) state.issuance = [];
+  adoptLegacyIssuance(state.issuance, state.inbox);
+  pruneIssuance(state.issuance);
+
   const socket = await createSocketDir();
   const controlCapability = randomCapability();
   const locator = {
@@ -389,17 +492,29 @@ export async function startWorker(options) {
 
   const secrets = () => resolveSecrets(secretNamesFromSnapshot(state.activation), env);
 
-  const persist = () => {
-    if (closed) return persistChain;
-    persistChain = persistChain
-      .then(() => {
-        if (closed) return;
-        return saveState(dir, state);
-      })
-      .catch((error) => {
-        if (!closed) errors.record(error);
-      });
+  const writeState = typeof options.saveState === "function" ? options.saveState : saveState;
+
+  const enqueuePersist = () => {
+    const run = () => {
+      if (closed) return;
+      return writeState(dir, state);
+    };
+    persistChain = persistChain.then(run, run);
     return persistChain;
+  };
+
+  const persist = () =>
+    enqueuePersist().catch((error) => {
+      if (!closed) errors.record(error);
+    });
+
+  const persistDurable = async () => {
+    try {
+      await enqueuePersist();
+    } catch (error) {
+      if (!closed) errors.record(error);
+      throw error;
+    }
   };
 
   const cancelPendingSchedule = () => {
@@ -561,12 +676,21 @@ export async function startWorker(options) {
         fingerprints: [],
         cursor: 0,
         history: [],
-        coalesced: null
+        coalesced: null,
+        epoch: 1,
+        tombstone: false,
+        identity: null,
+        enabled: true,
+        reasoningEffort: "default"
       };
     }
-    if (!Array.isArray(state.advisors[name].history)) state.advisors[name].history = [];
-    return state.advisors[name];
+    const rec = state.advisors[name];
+    if (!Array.isArray(rec.history)) rec.history = [];
+    if (!(Number(rec.epoch) > 0)) rec.epoch = 1;
+    if (rec.tombstone == null) rec.tombstone = false;
+    return rec;
   };
+
 
   const cancelReview = (name, reason) => {
     const active = reviews.get(name);
@@ -606,6 +730,9 @@ export async function startWorker(options) {
     if (!state.enabled || state.pauseReason === "off") return false;
     if (reserved.generation !== state.generation) return false;
     if (state.compaction?.phase === "pre") return false;
+    const rec = advisorRecord(reserved.name ?? "");
+    if (!rec || rec.tombstone) return false;
+    if (reserved.epoch != null && rec.epoch !== reserved.epoch) return false;
     if (
       reserved.promptId &&
       state.latestTask?.promptId &&
@@ -622,10 +749,12 @@ export async function startWorker(options) {
     const value = typeof candidate === "function" ? candidate() : candidate;
     if (!value) return null;
     const rec = advisorRecord(name);
+    if (reserved?.epoch != null && rec.epoch !== reserved.epoch) return null;
     const fp = deps.normalizeFinding(value.note);
     if (fp && rec.fingerprints.includes(fp)) return null;
     const fresh = typeof tools.isFresh === "function" ? await tools.isFresh(value.evidence) : true;
     if (!publicationAllowed(reserved)) return null;
+    if (reserved?.epoch != null && rec.epoch !== reserved.epoch) return null;
     if (!fresh) return null;
     const sanitized = {
       ...value,
@@ -638,15 +767,21 @@ export async function startWorker(options) {
     if (fp) {
       rec.fingerprints = [...rec.fingerprints, fp].slice(-4096);
     }
-    const finding = acceptedFinding(sanitized, meta);
+    const finding = acceptedFinding(sanitized, {
+      ...meta,
+      epoch: reserved?.epoch ?? rec.epoch,
+      settingsRevision: state.settingsRevision ?? 0
+    });
     state.inbox.push(finding);
     return finding;
   };
 
+
   const startReview = async (advisorSpec, observations) => {
     if (shuttingDown || closed) return;
+    if (advisorSpec?.enabled === false) return;
     const rec = advisorRecord(advisorSpec.name);
-    if (rec.paused || reviews.has(advisorSpec.name)) return;
+    if (rec.paused || rec.tombstone || reviews.has(advisorSpec.name)) return;
     if (!state.latestTask && !state.compactSummary) {
       state.contextUnavailable = true;
       return;
@@ -674,6 +809,7 @@ export async function startWorker(options) {
     const abort = new AbortController();
     const reservedGeneration = state.generation;
     const reservedPromptId = state.latestTask?.promptId ?? null;
+    const reservedEpoch = rec.epoch;
     const timeoutMs = (limits.reviewTimeoutSeconds ?? DEFAULT_REVIEW_TIMEOUT_MS / 1000) * 1000;
     const timer = setTimeout(() => {
       try {
@@ -687,7 +823,9 @@ export async function startWorker(options) {
       abort,
       generation: reservedGeneration,
       promptId: reservedPromptId,
-      timer
+      timer,
+      epoch: reservedEpoch,
+      name: advisorSpec.name
     };
     reviews.set(advisorSpec.name, reserved);
     rec.reviews = (rec.reviews ?? 0) + 1;
@@ -695,12 +833,17 @@ export async function startWorker(options) {
     const blocked = unsupportedProviderDiagnostic(provider);
     if (blocked) {
       clearTimeout(timer);
-      reviews.delete(advisorSpec.name);
+      if (reviews.get(advisorSpec.name)?.reviewId === reviewId) reviews.delete(advisorSpec.name);
       rec.reviews = Math.max(0, (rec.reviews ?? 1) - 1);
       pauseAdvisor(advisorSpec.name, blocked.error.code, blocked.error.message);
       await persist();
       return;
     }
+    const ownsReview = () => {
+      const still = reviews.get(advisorSpec.name);
+      return still?.reviewId === reviewId && still?.epoch === reservedEpoch;
+    };
+    const epochCurrent = () => advisorRecord(advisorSpec.name).epoch === reservedEpoch;
     trackWork(
       (async () => {
         let tools;
@@ -719,17 +862,13 @@ export async function startWorker(options) {
           });
         } catch (error) {
           clearTimeout(timer);
-          if (reviews.get(advisorSpec.name)?.reviewId === reviewId) reviews.delete(advisorSpec.name);
+          if (ownsReview()) reviews.delete(advisorSpec.name);
           await errors.record(error);
           return;
         }
-        if (
-          shuttingDown ||
-          !publicationAllowed(reserved) ||
-          reviews.get(advisorSpec.name)?.reviewId !== reviewId
-        ) {
+        if (shuttingDown || !publicationAllowed(reserved) || !ownsReview()) {
           clearTimeout(timer);
-          if (reviews.get(advisorSpec.name)?.reviewId === reviewId) reviews.delete(advisorSpec.name);
+          if (ownsReview()) reviews.delete(advisorSpec.name);
           try {
             abort.abort({ code: "cancel" });
           } catch {
@@ -761,10 +900,9 @@ export async function startWorker(options) {
         try {
           const result = await deps.reviewApi(args);
           clearTimeout(timer);
-          if (!publicationAllowed(reserved)) return;
-          if (reviews.get(advisorSpec.name)?.reviewId !== reviewId) return;
+          if (result?.usage) rec.usage = mergeUsage(rec.usage, result.usage);
+          if (!publicationAllowed(reserved) || !ownsReview() || !epochCurrent()) return;
           rec.history = result?.history ?? bounded.history;
-          rec.usage = mergeUsage(rec.usage, result?.usage);
           rec.consecutiveFailures = 0;
           rec.lastError = null;
           await publishCandidate(
@@ -777,6 +915,7 @@ export async function startWorker(options) {
               kind: provider.kind,
               sourcePromptId: reservedPromptId,
               generation: reservedGeneration,
+              epoch: reservedEpoch,
               observationRange: observations.length
                 ? { from: observations[0].seq, to: observations[observations.length - 1].seq }
                 : null,
@@ -787,6 +926,7 @@ export async function startWorker(options) {
         } catch (error) {
           clearTimeout(timer);
           if (error?.usage) rec.usage = mergeUsage(rec.usage, error.usage);
+          if (!epochCurrent()) return;
           const code = errorCode(error);
           rec.lastError = sanitizeText(error?.message ?? code, secrets());
           if (PAUSE_IMMEDIATE.has(code)) {
@@ -799,18 +939,17 @@ export async function startWorker(options) {
           }
         } finally {
           clearTimeout(timer);
-          const still = reviews.get(advisorSpec.name);
-          if (still?.reviewId === reviewId) {
-            reviews.delete(advisorSpec.name);
-          }
-          rec.cursor = state.observationSeq;
+          if (ownsReview()) reviews.delete(advisorSpec.name);
+          if (epochCurrent()) rec.cursor = state.observationSeq;
           await persist();
           if (
+            epochCurrent() &&
             rec.coalesced &&
             state.enabled &&
             !state.paused &&
             !state.primaryIdle &&
             !rec.paused &&
+            !rec.tombstone &&
             !shuttingDown
           ) {
             const next = rec.coalesced;
@@ -822,6 +961,7 @@ export async function startWorker(options) {
       })()
     );
   };
+
 
   const schedule = () => {
     if (shuttingDown || closed || state.primaryIdle) return;
@@ -848,8 +988,9 @@ export async function startWorker(options) {
     }
     if (state.compaction?.phase === "pre") return;
     const specs = (state.activation?.advisors ?? []).filter((spec) => {
+      if (spec.enabled === false) return false;
       const rec = advisorRecord(spec.name);
-      return !rec.paused;
+      return !rec.paused && !rec.tombstone;
     });
     const maxConcurrent = state.activation?.limits?.maxConcurrentAdvisors ?? DEFAULT_MAX_CONCURRENT;
     let busy = [...reviews.keys()].length;
@@ -873,15 +1014,36 @@ export async function startWorker(options) {
     if (state.pauseReason === "compaction") state.pauseReason = null;
   };
 
+  let hookClient = null;
+
   const drain = async (eventName, { allow } = {}) => {
-    if (!allow) return { stdout: "", claimId: null };
+    const issuer = normalizeClient(hookClient);
+    if (!allow) return { stdout: "", claimId: null, client: issuer };
     const claimed = await claimFindings(state.inbox, {
       now: now(),
       leaseMs: options.claimLeaseMs ?? CLAIM_LEASE_MS,
-      isFresh: (finding) => fileEvidenceFresh(finding.evidence, state.projectRoot)
+      isFresh: (finding) => fileEvidenceFresh(finding.evidence, state.projectRoot),
+      isEligible: (finding) => findingEligible(finding, state),
+      client: issuer
     });
-    await persist();
-    if (!claimed.claimId) return { stdout: "", claimId: null };
+    if (claimed.claimId) {
+      recordIssuance(state.issuance, {
+        claimId: claimed.claimId,
+        client: issuer,
+        findings: claimed.findings,
+        now: now()
+      });
+      try {
+        await persistDurable();
+      } catch {
+        releaseClaim(state.inbox, claimed.claimId);
+        clearIssuance(state.issuance, claimed.claimId);
+        return { stdout: "", claimId: null, client: issuer };
+      }
+    } else {
+      await persist();
+    }
+    if (!claimed.claimId) return { stdout: "", claimId: null, client: issuer };
     const additionalContext = claimed.envelopes.join("\n\n");
     return {
       stdout: `${JSON.stringify({
@@ -890,9 +1052,11 @@ export async function startWorker(options) {
           additionalContext
         }
       })}\n`,
-      claimId: claimed.claimId
+      claimId: claimed.claimId,
+      client: issuer
     };
   };
+
 
   const handleSessionStart = async (payload) => {
     const source = payload.source ?? "startup";
@@ -937,14 +1101,19 @@ export async function startWorker(options) {
       }
       return { stdout: "" };
     }
+    const nextSettings = (Number(state.settingsRevision) || 0) + 1;
     state.enabled = false;
+    state.ended = false;
     cancelAll("session-start");
     if (source === "fork") {
       state = emptyState({
         projectRoot: state.projectRoot,
         workerGeneration: state.workerGeneration,
-        transcriptPath: payload.transcript_path ?? null
+        transcriptPath: payload.transcript_path ?? null,
+        settingsRevision: nextSettings
       });
+    } else {
+      state.settingsRevision = nextSettings;
     }
     if (source === "clear") {
       recent.length = 0;
@@ -1115,6 +1284,9 @@ export async function startWorker(options) {
   };
 
   const handleSessionEnd = async () => {
+    state.ended = true;
+    state.settingsRevision = (Number(state.settingsRevision) || 0) + 1;
+    shuttingDown = true;
     cancelAll("session-end");
     await persist();
     setImmediate(() => {
@@ -1123,71 +1295,391 @@ export async function startWorker(options) {
     return { stdout: "" };
   };
 
-  const handleOn = async () => {
-    const runtime = deps.runtimeErrors({ env }) ?? [];
-    if (runtime.length) {
-      return { ok: false, enabled: false, error: runtime[0], advisors: [] };
+  const configPathOf = () => {
+    try {
+      return typeof deps.configFilePath === "function" ? deps.configFilePath(env) : null;
+    } catch {
+      return null;
     }
-    let frozenRoot = projectRoot;
-    let rootIdent = state.rootIdent ?? null;
-    if (typeof deps.snapshotRoot === "function") {
-      rootIdent = await deps.snapshotRoot(projectRoot);
-      if (rootIdent?.path) frozenRoot = rootIdent.path;
-    } else {
-      const canonical = await deps.validateRoot(projectRoot);
-      frozenRoot = typeof canonical === "string" && canonical ? canonical : projectRoot;
+  };
+
+  const settingsAdvisors = () =>
+    (state.activation?.advisors ?? [])
+      .filter((spec) => !state.advisors[spec.name]?.tombstone)
+      .map((spec) => {
+        const rec = advisorRecord(spec.name);
+        const provider = state.activation?.providers?.[spec.provider];
+        const enabled = spec.enabled !== false;
+        const available = Boolean(enabled && !rec.paused);
+        return {
+          name: spec.name,
+          enabled,
+          available,
+          provider: spec.provider,
+          model: spec.model,
+          kind: provider?.kind ?? rec.kind,
+          reasoningEffort: spec.reasoningEffort ?? rec.reasoningEffort ?? "default",
+          error: available ? undefined : rec.lastError ?? undefined
+        };
+      });
+
+  const settingsSnapshot = () => ({
+    ok: true,
+    protocolVersion: PROTOCOL_VERSION,
+    sessionId,
+    projectRoot: state.projectRoot ?? null,
+    configPath: configPathOf(),
+    workerGeneration: state.workerGeneration,
+    settingsRevision: Number(state.settingsRevision) || 0,
+    enabled: Boolean(state.enabled),
+    paused: Boolean(state.paused),
+    advisors: settingsAdvisors()
+  });
+
+  const settingsFail = (code) => ({
+    ok: false,
+    error: code,
+    code,
+    protocolVersion: PROTOCOL_VERSION,
+    sessionId,
+    projectRoot: state.projectRoot ?? null,
+    configPath: configPathOf(),
+    workerGeneration: state.workerGeneration,
+    settingsRevision: Number(state.settingsRevision) || 0,
+    enabled: Boolean(state.enabled),
+    paused: Boolean(state.paused),
+    advisors: settingsAdvisors()
+  });
+
+  const affectedAdvisorNames = (nextSpecs, nextExclude, nextProviders, nextLimits) => {
+    const oldSpecs = state.activation?.advisors ?? [];
+    const oldExclude = state.activation?.exclude ?? [];
+    const oldProviders = state.activation?.providers ?? {};
+    const oldLimits = state.activation?.limits ?? {};
+    const nextNames = new Set(nextSpecs.map((spec) => spec.name));
+    const affected = new Set();
+    const excludeChanged = JSON.stringify(oldExclude) !== JSON.stringify(nextExclude ?? []);
+    const limitsChanged = limitsIdentity(oldLimits) !== limitsIdentity(nextLimits ?? {});
+    if (excludeChanged || limitsChanged) {
+      for (const spec of oldSpecs) affected.add(spec.name);
+      for (const spec of nextSpecs) affected.add(spec.name);
+      return affected;
     }
-    const config = await deps.loadConfig({ env, projectRoot: frozenRoot });
+    const oldByName = new Map(oldSpecs.map((spec) => [spec.name, spec]));
+    for (const spec of oldSpecs) {
+      if (!nextNames.has(spec.name)) affected.add(spec.name);
+    }
+    for (const spec of nextSpecs) {
+      const prev = oldByName.get(spec.name);
+      const prevKey = prev
+        ? advisorSpecKey(prev, oldExclude, oldProviders?.[prev.provider])
+        : null;
+      const nextKey = advisorSpecKey(spec, nextExclude ?? [], nextProviders?.[spec.provider]);
+      if (!prev || prevKey !== nextKey) affected.add(spec.name);
+    }
+    return affected;
+  };
+
+  const fenceAffected = (affected) => {
+    for (const name of affected) {
+      cancelReview(name, "settings");
+      const rec = advisorRecord(name);
+      rec.epoch = (Number(rec.epoch) > 0 ? Number(rec.epoch) : 1) + 1;
+      rec.coalesced = null;
+      rec.history = [];
+    }
+    fenceAdvisorFindings(state.inbox, affected);
+  };
+
+  const diagnoseAdvisors = async (config) => {
     const advisors = [];
-    for (const advisor of config.advisors ?? []) {
+    const maxOutputTokens = outputTokenLimit(config?.limits);
+    for (const advisor of (config.advisors ?? []).map(normalizeAdvisorSpec)) {
       const provider = config.providers?.[advisor.provider];
+      if (advisor.enabled === false) {
+        advisors.push({
+          name: advisor.name,
+          enabled: false,
+          available: false,
+          provider: advisor.provider,
+          model: advisor.model,
+          kind: provider?.kind,
+          reasoningEffort: advisor.reasoningEffort,
+          error: undefined
+        });
+        continue;
+      }
       if (!provider) {
-        advisors.push({ name: advisor.name, available: false, error: "missing provider" });
+        advisors.push({
+          name: advisor.name,
+          enabled: true,
+          available: false,
+          provider: advisor.provider,
+          model: advisor.model,
+          reasoningEffort: advisor.reasoningEffort,
+          error: "missing provider"
+        });
         continue;
       }
       const diagnostic =
         unsupportedProviderDiagnostic(provider) ??
-        (await deps.validateApi({ provider, advisor, env }));
-      const errorText = diagnostic?.available
-        ? undefined
-        : sanitizeText(diagnosticErrorText(diagnostic), secrets());
+        (await deps.validateApi({ provider, advisor, env, maxOutputTokens }));
+      const available = Boolean(diagnostic?.available);
+      const reasoningInvalid = diagnostic?.reasoningInvalid === true;
       advisors.push({
         name: advisor.name,
-        available: Boolean(diagnostic?.available),
+        enabled: true,
+        available,
         provider: advisor.provider,
         model: advisor.model,
         kind: provider.kind,
-        error: errorText
+        reasoningEffort: advisor.reasoningEffort,
+        error: available ? undefined : sanitizeText(diagnosticErrorText(diagnostic), secrets()),
+        reasoningInvalid: reasoningInvalid || undefined
       });
-      const rec = advisorRecord(advisor.name);
-      rec.provider = advisor.provider;
-      rec.model = advisor.model;
-      rec.kind = provider.kind;
-      rec.paused = !diagnostic?.available;
-      rec.pauseReason = diagnostic?.available ? rec.pauseReason : diagnostic?.error?.code ?? "unavailable";
-      rec.lastError = diagnostic?.available ? rec.lastError : errorText;
     }
-    const usable = advisors.filter((item) => item.available);
+    return advisors;
+  };
+
+  const readConfigExact = async () => {
+    if (typeof deps.readConfigState === "function") {
+      return deps.readConfigState({ env });
+    }
+    const file = typeof deps.configFilePath === "function" ? deps.configFilePath(env) : null;
+    if (!file) return { path: null, revision: null, config: null, configError: "config unavailable" };
+    let raw;
+    try {
+      raw = await fs.readFile(file);
+    } catch {
+      return { path: file, revision: null, config: null, configError: "config unavailable" };
+    }
+    const revision = configRevisionOf(raw);
+    let config = null;
+    let configError = null;
+    try {
+      config = await deps.loadConfig({ env });
+    } catch (error) {
+      configError = error instanceof Error ? error.message : "invalid config";
+    }
+    return { path: file, revision, config, configError };
+  };
+
+  const activateFromConfig = async ({ config, revision, wantEnabled, mode, frozenRoot, rootIdent }) => {
+    const deny = (code, extra) =>
+      mode === "apply"
+        ? settingsFail(code)
+        : {
+            ok: false,
+            enabled: Boolean(state.enabled),
+            error: code,
+            code,
+            advisors: extra?.advisors ?? []
+          };
+    if (shuttingDown || closed || state.ended) return deny(SETTINGS_ERRORS.STALE);
+    const specs = (config.advisors ?? []).map(normalizeAdvisorSpec);
+    const exclude = config.exclude ?? [];
+    const affected = affectedAdvisorNames(specs, exclude, config.providers, config.limits);
+    pruneIssuance(state.issuance);
+    const blocked = ownershipDenyCode(state, affected);
+    if (blocked) return deny(blocked);
+    const diagnosed = await diagnoseAdvisors(config);
+    if (shuttingDown || closed || state.ended) return deny(SETTINGS_ERRORS.STALE);
+    pruneIssuance(state.issuance);
+    const blockedAfter = ownershipDenyCode(state, affected);
+    if (blockedAfter) return deny(blockedAfter);
+    if (diagnosed.some((row) => row.reasoningInvalid)) {
+      return deny(SETTINGS_ERRORS.CONFIG, { advisors: diagnosed });
+    }
+    if (shuttingDown || closed || state.ended) return deny(SETTINGS_ERRORS.STALE);
+    const priorAdvisors = new Map(
+      Object.entries(state.advisors ?? {}).map(([name, rec]) => [name, { ...rec }])
+    );
+    const priorInboxDeliverable = (state.inbox ?? []).map((item) => item.deliverable);
+    const prior = {
+      activation: state.activation,
+      activationFingerprint: state.activationFingerprint,
+      settingsRevision: state.settingsRevision,
+      enabled: state.enabled,
+      paused: state.paused,
+      pauseReason: state.pauseReason,
+      projectRoot: state.projectRoot,
+      rootIdent: state.rootIdent,
+      cwdOutsideRoot: state.cwdOutsideRoot
+    };
+    const restoreActivation = () => {
+      state.activation = prior.activation;
+      state.activationFingerprint = prior.activationFingerprint;
+      state.settingsRevision = prior.settingsRevision;
+      state.enabled = prior.enabled;
+      state.paused = prior.paused;
+      state.pauseReason = prior.pauseReason;
+      state.projectRoot = prior.projectRoot;
+      state.rootIdent = prior.rootIdent;
+      state.cwdOutsideRoot = prior.cwdOutsideRoot;
+      for (const name of Object.keys(state.advisors ?? {})) {
+        if (!priorAdvisors.has(name)) delete state.advisors[name];
+      }
+      for (const [name, rec] of priorAdvisors) state.advisors[name] = rec;
+      priorInboxDeliverable.forEach((flag, index) => {
+        if (state.inbox[index]) state.inbox[index].deliverable = flag;
+      });
+    };
+    const nextNames = new Set(specs.map((spec) => spec.name));
+    fenceAffected(affected);
+    for (const spec of state.activation?.advisors ?? []) {
+      if (!nextNames.has(spec.name)) {
+        const rec = advisorRecord(spec.name);
+        rec.tombstone = true;
+        rec.enabled = false;
+      }
+    }
+    for (const row of diagnosed) {
+      const rec = advisorRecord(row.name);
+      rec.tombstone = false;
+      rec.provider = row.provider;
+      rec.model = row.model;
+      rec.kind = row.kind;
+      rec.enabled = row.enabled !== false;
+      rec.reasoningEffort = row.reasoningEffort ?? "default";
+      rec.identity = advisorSpecKey(
+        specs.find((spec) => spec.name === row.name),
+        exclude,
+        config.providers?.[row.provider]
+      );
+      if (row.enabled === false) {
+        rec.paused = false;
+        continue;
+      }
+      if (row.available) {
+        if (mode === "on" || affected.has(row.name)) {
+          rec.paused = false;
+          rec.pauseReason = null;
+          rec.lastError = null;
+          rec.consecutiveFailures = 0;
+        }
+      } else {
+        rec.paused = true;
+        rec.pauseReason = "unavailable";
+        rec.lastError = row.error;
+      }
+    }
     state.activation = {
       version: config.version,
       providers: config.providers,
-      advisors: (config.advisors ?? []).filter((advisor) => usable.some((item) => item.name === advisor.name)),
-      exclude: config.exclude ?? [],
-      limits: config.limits ?? {}
+      advisors: specs,
+      exclude,
+      limits: config.limits ?? {},
+      configRevision: revision ?? null
     };
     state.activationFingerprint = fingerprintSnapshot(state.activation);
-    state.projectRoot = frozenRoot;
-    state.rootIdent = rootIdent;
-    state.cwdOutsideRoot = false;
-    state.enabled = usable.length > 0;
-    state.paused = !state.enabled;
-    state.pauseReason = state.enabled ? null : "no-usable-advisors";
-    await persist();
+    if (frozenRoot) {
+      state.projectRoot = frozenRoot;
+      if (rootIdent) state.rootIdent = rootIdent;
+    }
+    if (mode === "on") state.cwdOutsideRoot = false;
+    const usable = diagnosed.filter((item) => item.available);
+    if (wantEnabled) {
+      state.enabled = usable.length > 0;
+      if (state.compaction?.phase !== "pre" && !state.cwdOutsideRoot) {
+        state.paused = !state.enabled;
+        state.pauseReason = state.enabled ? null : "no-usable-advisors";
+      }
+    } else {
+      state.enabled = false;
+      if (state.pauseReason !== "cwd-outside-root" && state.compaction?.phase !== "pre") {
+        state.paused = true;
+        state.pauseReason = "off";
+      }
+    }
+    state.settingsRevision = (Number(state.settingsRevision) || 0) + 1;
+    try {
+      await persistDurable();
+    } catch {
+      restoreActivation();
+      return deny(SETTINGS_ERRORS.CONFIG);
+    }
+    return { diagnosed, usable };
+  };
+
+  const prepareActivationRoot = async () => {
+    const runtime = deps.runtimeErrors({ env }) ?? [];
+    if (runtime.length) {
+      return { ok: false, reason: "runtime", error: runtime[0] };
+    }
+    let frozenRoot = projectRoot;
+    let rootIdent = null;
+    try {
+      if (typeof deps.snapshotRoot === "function") {
+        rootIdent = await deps.snapshotRoot(projectRoot);
+        if (rootIdent?.path) frozenRoot = rootIdent.path;
+      } else {
+        const canonical = await deps.validateRoot(projectRoot);
+        frozenRoot = typeof canonical === "string" && canonical ? canonical : projectRoot;
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        reason: "root",
+        error: sanitizeText(error instanceof Error ? error.message : "invalid root", secrets())
+      };
+    }
+    if (
+      state.rootIdent?.dev != null &&
+      state.rootIdent?.ino != null &&
+      rootIdent?.dev != null &&
+      rootIdent?.ino != null &&
+      (Number(state.rootIdent.dev) !== Number(rootIdent.dev) ||
+        Number(state.rootIdent.ino) !== Number(rootIdent.ino))
+    ) {
+      return { ok: false, reason: "root", error: SETTINGS_ERRORS.ROOT };
+    }
+    if (
+      state.projectRoot &&
+      projectRoot &&
+      !rootsEquivalent(state.projectRoot, projectRoot, state.rootIdent ?? rootIdent)
+    ) {
+      return { ok: false, reason: "root", error: SETTINGS_ERRORS.ROOT };
+    }
+    if (state.rootIdent) {
+      rootIdent = state.rootIdent;
+      if (state.projectRoot) frozenRoot = state.projectRoot;
+    }
+    return { ok: true, frozenRoot, rootIdent };
+  };
+
+  const handleOn = async () => {
+    const prepared = await prepareActivationRoot();
+    if (!prepared.ok) {
+      return { ok: false, enabled: false, error: prepared.error, advisors: [] };
+    }
+    const { frozenRoot, rootIdent } = prepared;
+    let config;
+    try {
+      config = await deps.loadConfig({ env, projectRoot: frozenRoot });
+    } catch (error) {
+      return {
+        ok: false,
+        enabled: false,
+        error: sanitizeText(error instanceof Error ? error.message : "invalid config", secrets()),
+        advisors: []
+      };
+    }
+    const result = await activateFromConfig({
+      config,
+      revision: null,
+      wantEnabled: true,
+      mode: "on",
+      frozenRoot,
+      rootIdent
+    });
+    if (result?.ok === false) {
+      return { ok: false, enabled: result.enabled, error: result.error, advisors: result.advisors ?? [] };
+    }
     return {
       ok: true,
       enabled: state.enabled,
-      projectRoot: frozenRoot,
-      advisors,
+      projectRoot: state.projectRoot,
+      advisors: result.diagnosed,
       limits: state.activation.limits,
       disclosure:
         "External providers receive bounded session observations. The plugin does not persist provider conversations. Injection is best-effort and never wakes a stopped session."
@@ -1200,6 +1692,7 @@ export async function startWorker(options) {
     state.enabled = false;
     state.paused = true;
     state.pauseReason = "off";
+    state.settingsRevision = (Number(state.settingsRevision) || 0) + 1;
     await persist();
     return {
       ok: true,
@@ -1214,15 +1707,19 @@ export async function startWorker(options) {
       const rec = advisorRecord(spec.name);
       const provider = state.activation?.providers?.[spec.provider];
       let advisorState = "idle";
-      if (!state.enabled) advisorState = "disabled";
+      if (!state.enabled || spec.enabled === false) advisorState = "disabled";
+      else if (rec.paused && rec.pauseReason === "unavailable") advisorState = "unavailable";
       else if (rec.paused) advisorState = "paused";
       else if (reviews.has(spec.name)) advisorState = "busy";
       return {
         name: spec.name,
         state: advisorState,
+        enabled: spec.enabled !== false,
+        available: spec.enabled !== false && !rec.paused,
         provider: spec.provider,
         model: spec.model,
         kind: provider?.kind ?? rec.kind,
+        reasoningEffort: spec.reasoningEffort ?? rec.reasoningEffort ?? "default",
         reviews: rec.reviews ?? 0,
         usage: rec.usage ?? null,
         lastError: rec.lastError ?? null
@@ -1234,6 +1731,7 @@ export async function startWorker(options) {
       paused: Boolean(state.paused),
       reason: state.pauseReason,
       generation: state.generation,
+      settingsRevision: Number(state.settingsRevision) || 0,
       projectRoot: state.projectRoot,
       advisors,
       inbox: state.inbox.map((item) => ({
@@ -1247,6 +1745,57 @@ export async function startWorker(options) {
       })),
       emission: "best-effort"
     };
+  };
+
+  const handleSettings = async (req) => {
+    if (req?.protocolVersion !== PROTOCOL_VERSION) return settingsFail(SETTINGS_ERRORS.PROTOCOL);
+    if (shuttingDown || closed || state.ended) return settingsFail(SETTINGS_ERRORS.STALE);
+    return settingsSnapshot();
+  };
+
+  const handleApply = async (req) => {
+    if (req?.protocolVersion !== PROTOCOL_VERSION) return settingsFail(SETTINGS_ERRORS.PROTOCOL);
+    if (shuttingDown || closed || state.ended) return settingsFail(SETTINGS_ERRORS.STALE);
+    if (req.workerGeneration == null || req.settingsRevision == null || req.configRevision == null || req.configRevision === "") {
+      return settingsFail(SETTINGS_ERRORS.CONFIG);
+    }
+    if (Number(req.workerGeneration) !== Number(state.workerGeneration)) {
+      return settingsFail(SETTINGS_ERRORS.STALE);
+    }
+    if (Number(req.settingsRevision) !== Number(state.settingsRevision || 0)) {
+      return settingsFail(SETTINGS_ERRORS.STALE);
+    }
+    const first = await readConfigExact();
+    if (!first?.config || first.configError || first.revision == null) {
+      return settingsFail(SETTINGS_ERRORS.CONFIG);
+    }
+    if (first.revision !== req.configRevision) return settingsFail(SETTINGS_ERRORS.CONFIG);
+    const second = await readConfigExact();
+    if (!second || second.revision !== first.revision) return settingsFail(SETTINGS_ERRORS.CONFIG);
+    if (shuttingDown || closed || state.ended) return settingsFail(SETTINGS_ERRORS.STALE);
+    for (const advisor of first.config.advisors ?? []) {
+      if (advisor.enabled === false) continue;
+      const provider = first.config.providers?.[advisor.provider];
+      if (apiKeyMissing(provider, env)) return settingsFail(SETTINGS_ERRORS.UNAVAILABLE);
+    }
+    const prepared = await prepareActivationRoot();
+    if (!prepared.ok) {
+      return settingsFail(
+        prepared.reason === "runtime" ? SETTINGS_ERRORS.UNAVAILABLE : SETTINGS_ERRORS.ROOT
+      );
+    }
+    if (shuttingDown || closed || state.ended) return settingsFail(SETTINGS_ERRORS.STALE);
+    const wantEnabled = req.enable === true ? true : Boolean(state.enabled);
+    const result = await activateFromConfig({
+      config: first.config,
+      revision: first.revision,
+      wantEnabled,
+      mode: "apply",
+      frozenRoot: prepared.frozenRoot,
+      rootIdent: prepared.rootIdent
+    });
+    if (result?.ok === false) return result;
+    return settingsSnapshot();
   };
 
   const handleDoctor = async () => {
@@ -1277,11 +1826,12 @@ export async function startWorker(options) {
     const providerDiagnostics = [];
     const providers = snapshot?.providers ?? loadedConfig?.providers ?? {};
     const advisorList = snapshot?.advisors ?? loadedConfig?.advisors ?? [];
+    const maxOutputTokens = outputTokenLimit(snapshot?.limits ?? loadedConfig?.limits);
     for (const [slot, provider] of Object.entries(providers)) {
       const advisor = advisorList.find((item) => item.provider === slot) ?? { name: slot, provider: slot };
       const diagnostic =
         unsupportedProviderDiagnostic(provider) ??
-        (await deps.validateApi({ provider, advisor, env }));
+        (await deps.validateApi({ provider, advisor, env, maxOutputTokens }));
       const errorText = diagnostic?.available
         ? undefined
         : sanitizeText(diagnosticErrorText(diagnostic), secrets());
@@ -1311,48 +1861,54 @@ export async function startWorker(options) {
     };
   };
 
-  const handleHook = async (payload) => {
-    if (!payload || typeof payload !== "object") return { stdout: "" };
-    if (payload.agent_id) return { stdout: "" };
-    if (payload.cwd && state.projectRoot && !cwdInsideRoot(payload.cwd, state.projectRoot, state.rootIdent)) {
-      if (payload.hook_event_name !== "SessionStart") {
-        state.cwdOutsideRoot = true;
-        state.paused = true;
-        state.pauseReason = "cwd-outside-root";
-        cancelAll("cwd");
-      }
-    }
+  const handleHook = async (payload, client) => {
+    const issuer = normalizeClient(client);
+    hookClient = issuer;
     try {
-      if (payload.transcript_path) await ingestTranscript(payload.transcript_path);
-    } catch (error) {
-      await errors.record(error);
-    }
-    const event = payload.hook_event_name;
-    switch (event) {
-      case "SessionStart":
-        return handleSessionStart(payload);
-      case "UserPromptSubmit":
-        return handlePrompt(payload);
-      case "UserPromptExpansion":
-        return handleExpansion(payload);
-      case "PreToolUse":
-        return handleTool(payload, "intent");
-      case "PostToolUse":
-        return handleTool(payload, "outcome");
-      case "PostToolUseFailure":
-        return handleTool(payload, "failure");
-      case "Stop":
-        return handleStop(payload);
-      case "StopFailure":
-        return handleStopFailure(payload);
-      case "PreCompact":
-        return handlePreCompact(payload);
-      case "PostCompact":
-        return handlePostCompact(payload);
-      case "SessionEnd":
-        return handleSessionEnd(payload);
-      default:
-        return { stdout: "" };
+      if (!payload || typeof payload !== "object") return { stdout: "" };
+      if (payload.agent_id) return { stdout: "" };
+      if (payload.cwd && state.projectRoot && !cwdInsideRoot(payload.cwd, state.projectRoot, state.rootIdent)) {
+        if (payload.hook_event_name !== "SessionStart") {
+          state.cwdOutsideRoot = true;
+          state.paused = true;
+          state.pauseReason = "cwd-outside-root";
+          cancelAll("cwd");
+        }
+      }
+      try {
+        if (payload.transcript_path) await ingestTranscript(payload.transcript_path);
+      } catch (error) {
+        await errors.record(error);
+      }
+      const event = payload.hook_event_name;
+      switch (event) {
+        case "SessionStart":
+          return await handleSessionStart(payload);
+        case "UserPromptSubmit":
+          return await handlePrompt(payload);
+        case "UserPromptExpansion":
+          return await handleExpansion(payload);
+        case "PreToolUse":
+          return await handleTool(payload, "intent");
+        case "PostToolUse":
+          return await handleTool(payload, "outcome");
+        case "PostToolUseFailure":
+          return await handleTool(payload, "failure");
+        case "Stop":
+          return await handleStop(payload);
+        case "StopFailure":
+          return await handleStopFailure(payload);
+        case "PreCompact":
+          return await handlePreCompact(payload);
+        case "PostCompact":
+          return await handlePostCompact(payload);
+        case "SessionEnd":
+          return await handleSessionEnd(payload);
+        default:
+          return { stdout: "" };
+      }
+    } finally {
+      if (hookClient === issuer) hookClient = null;
     }
   };
 
@@ -1377,17 +1933,37 @@ export async function startWorker(options) {
       case "doctor":
         return handleDoctor();
       case "hook":
-        return handleHook(req.payload ?? req.hook ?? {});
-      case "ack":
+        return handleHook(req.payload ?? req.hook ?? {}, req.client);
+      case "ack": {
+        const client = normalizeClient(req.client);
+        const rec = (state.issuance ?? []).find((item) => item?.claimId === req.claimId);
+        if (rec && !clientsMatch(rec.client, client)) {
+          return { ok: false, error: SETTINGS_ERRORS.PROTOCOL, emission: "best-effort", client };
+        }
         acknowledgeClaim(state.inbox, req.claimId, now());
+        clearIssuance(state.issuance, req.claimId);
         await persist();
-        return { ok: true, emission: "best-effort" };
+        return { ok: true, emission: "best-effort", client };
+      }
       case "ping":
-        return { pid: process.pid, workerGeneration: state.workerGeneration };
+        return {
+          protocolVersion: PROTOCOL_VERSION,
+          sessionId,
+          projectRoot: state.projectRoot ?? null,
+          configPath: configPathOf(),
+          workerGeneration: state.workerGeneration,
+          settingsRevision: Number(state.settingsRevision) || 0,
+          pid: process.pid
+        };
+      case "settings":
+        return handleSettings(req);
+      case "apply":
+        return handleApply(req);
       default:
         throw new Error("unknown op");
     }
   };
+
   async function stop({ reason } = {}) {
     if (!stopPromise) {
       stopPromise = (async () => {
@@ -1437,13 +2013,17 @@ export async function startWorker(options) {
         runSerial(async () => {
           try {
             const result = await dispatch(req);
-            respond({ ok: true, result });
+            const envelope = { ok: true, result };
+            if (req?.id != null) envelope.id = req.id;
+            respond(envelope);
           } catch (error) {
             await errors.record(error);
-            respond({
+            const envelope = {
               ok: false,
               error: sanitizeText(error instanceof Error ? error.message : "error", secrets())
-            });
+            };
+            if (req?.id != null) envelope.id = req.id;
+            respond(envelope);
           } finally {
             await persist();
           }

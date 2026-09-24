@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Claude Code plugins by dumplingsensei.",
-    "version": "0.9.20"
+    "version": "0.9.21"
   },
   "plugins": [
     {
@@ -20,7 +20,7 @@
     {
       "name": "cross-model-advisor",
       "description": "Independent advisors observe the current Claude session, inspect the project themselves, and send findings back while you work.",
-      "version": "1.1.1",
+      "version": "1.2.0",
       "author": {
         "name": "dumplingsensei"
       },

@@ -10,7 +10,25 @@ var CONTROL_COMMANDS = Object.freeze([
   "cross-model-advisor:login",
   "cross-model-advisor:logout"
 ]);
-var CONTROL_OPS = Object.freeze(["on", "off", "status", "doctor", "hook", "ack"]);
+var CONTROL_OPS = Object.freeze([
+  "on",
+  "off",
+  "status",
+  "doctor",
+  "hook",
+  "ack",
+  "settings",
+  "apply"
+]);
+var PROTOCOL_VERSION = 2;
+var SETTINGS_ERRORS = Object.freeze({
+  PROTOCOL: "protocol",
+  STALE: "stale",
+  BUSY: "busy",
+  ROOT: "root",
+  CONFIG: "config",
+  UNAVAILABLE: "unavailable"
+});
 var DRAIN_EVENTS = Object.freeze([
   "UserPromptSubmit",
   "PreToolUse",
@@ -81,8 +99,10 @@ export {
   MAX_FINGERPRINTS,
   MAX_STDIN_BYTES,
   PLUGIN_NAME,
+  PROTOCOL_VERSION,
   SESSION_END_TIMEOUT_MS,
   SESSION_RETENTION_MS,
+  SETTINGS_ERRORS,
   SEVERITY_ORDER,
   SILENT_EVENTS,
   STATE_VERSION,

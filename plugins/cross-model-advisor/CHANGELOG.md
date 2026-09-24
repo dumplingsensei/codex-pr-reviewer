@@ -6,6 +6,64 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 1.2.0
+
+The session skills (`on`, `off`, `status`, `doctor`) and `setup`'s
+`menu-command` now name this plugin's data directory with
+`--plugin-data "${CLAUDE_PLUGIN_DATA}"`, which Claude Code substitutes into
+skill text. The helpers used to read `CLAUDE_PLUGIN_DATA` from the Bash tool's
+environment, which Claude Code does not set for plugins, and which another
+plugin's SessionStart can export for every Bash command through
+`CLAUDE_ENV_FILE` (openai/codex-plugin-cc does). With that plugin installed,
+`on` enabled a session under the other plugin's directory: `status` reported
+the advisor enabled and available while the hooks, which do receive the right
+directory, never scheduled a review. Hooks still take the host-provided value.
+
+Replace conversational `/cross-model-advisor:setup` with a plugin-owned
+terminal settings menu. The slash skill only prints a safely quoted
+`setup-control.mjs menu-command` for the user's own terminal; it does not
+open a TTY inside Claude, interpolate `$ARGUMENTS`, or edit configuration.
+Reusing that printed command does not cost another Claude turn and does not
+infer a session from the working directory or a transcript. The printed line
+always pins empty `CLAUDE_SESSION_ID` and `CLAUDE_PROJECT_DIR` so a leftover
+shell cannot retarget Apply. Opening the slash skill still can cost a turn.
+
+The menu adds, edits, enables, disables, and removes advisors; selects
+multiple providers and the required auth/model fields; sets model-specific
+reasoning effort; and edits literal instructions. Empty or all-disabled
+configurations are valid and start no reviews. Persistent defaults stay
+separate from a named session's snapshot: **Save defaults** writes user
+config only; **Save & Apply** targets the captured live session and
+preserves on/off unless **Enable** is used (shown only when that session is
+off). Notices are `Saved defaults.`, `Saved and applied.`,
+`Saved; not applied: …`, and `Not saved: …`. A rejected Apply does not undo
+a save another session may already have observed. Stale or replaced workers,
+busy hook deliveries, wrong root, and missing identity fail visibly rather
+than retargeting. Workers that lack the settings protocol need a fresh
+Claude session; live Apply is not a fallback to `/on`.
+
+Configuration schema is version 2. Opening a version-1 file does not write;
+the first explicit Save publishes version 2 (`enabled` and `reasoningEffort`
+on every advisor). An older plugin cannot read version 2. Version-1 input
+normalizes to enabled advisors with `reasoningEffort: "default"`.
+
+Reasoning Default leaves the previous request unchanged; Off is offered only
+where the transport can disable thinking. Native aliases and enable-only
+formats are shown rather than labelled as distinct native levels.
+Compatible endpoints stay Default-only until paired `thinkingFormat` /
+`thinkingLevelMap` metadata is present; optional `supportsReasoningEffort`
+selects native `reasoning_effort` versus enable-only. Incompatible thinking
+budgets fail instead of raising `limits.maxOutputTokens`. The Codex adapter
+still does not forward a remote output-token ceiling; that existing gap is
+unchanged.
+
+OAuth login still uses the existing terminal auth helper. The menu suspends
+while that helper owns the terminal, then restores. Model-only edits reuse
+the slot credential. New or missing API key-variable names cannot be
+injected into a live worker: Apply reports unavailable and requires a new
+Claude session with those variables exported. The launcher never prints
+capabilities, credentials, or key values.
+
 ## 1.1.1
 
 Fix doctor's bundle root inference when `CLAUDE_PLUGIN_ROOT` is absent. Both

@@ -1,6 +1,6 @@
 # Continuous cross-model advisors for Claude Code
 
-> Planning update: the terminal-settings replacement at the end of this document supersedes the conversational setup and reconfiguration design below for the next change. The original implementation plan is retained for context. The terminal replacement is planned, not implemented.
+> Planning update: the terminal-settings replacement at the end of this document supersedes the conversational setup and reconfiguration design below. The original implementation plan is retained for context. The terminal replacement is implemented and locally verified.
 
 ## Context
 
@@ -274,11 +274,11 @@ The authenticated Claude smoke proves host injection semantics; offline fixtures
 - [Anthropic authentication restrictions](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use): no third-party Claude.ai subscription login.
 - [Antigravity terms](https://antigravity.google/terms/) and [FAQ](https://antigravity.google/docs/faq/#why-cant-i-use-third-party-software-eg-claude-code-openclaw-opencode-with-my-antigravity-login): third-party OAuth prohibition and Gemini API alternative.
 
-## Terminal settings menu — next implementation plan
+## Terminal settings menu — implementation plan
 
 ### Approved direction and scope
 
-Replace Claude-driven setup with a plugin-owned terminal menu. The user is comfortable opening that menu in their own terminal. This section is the implementation plan for that approved direction; it does not authorize or claim implementation.
+Replace Claude-driven setup with a plugin-owned terminal menu. The user is comfortable opening that menu in their own terminal. This approved implementation plan is complete; historical planning text and evidence below are retained.
 
 - Keep `/cross-model-advisor:setup` as a thin launcher that prints the exact installed command.
 - All navigation, search, editing, saving, and local session controls run deterministically in Node, without Claude or advisor inference.
@@ -481,3 +481,27 @@ The implementation is complete only when all of these hold:
 17. Verify thinking budgets cannot silently enlarge configured token ceilings or violate context/answer constraints; incompatible settings fail visibly before a paid call. Effort survives save/reload/worker replacement, applies on follow-up tool-loop calls, and neither leaks reasoning text nor resets review/usage budgets.
 
 Report live provider authorization separately from local/scripted proof; no production credentials or paid probes are needed for implementation verification. After smoke proof, update affected docs/examples/changelog, remove throwaway scripts and processes, and leave unrelated user work intact. No commit, push, or release is part of this planning request.
+
+### Implementation status and deviations
+
+Implemented on `feat/advisor-terminal-settings`, after baseline commit `89b15d8`. Feature changes remain uncommitted. The original planning text and planning-time evidence above are retained.
+
+Local verification completed:
+
+- 244 advisor tests pass on Node 23.11.0 and the supported Node 22.19.0 floor, including cold-installed copies, session isolation, publication barriers, provider-observable request bodies, and auth-child termination.
+- All 11 real PTY scenarios pass on both runtimes: Luna/high Save & Apply without a review, saved-not-applied, cancellation, non-TTY refusal, providers/toggle/removal, multiline instructions, paging/unsupported effort, revision conflicts, launcher quoting, Unicode/paste/resize/signals, and scripted OAuth handoff.
+- Direct terminal interaction confirms Luna/high saving, visible defaults/target headers, and ordinary Escape exit. A separate inherited-TTY probe confirms the auth child receives input while the menu releases stdin. Default-only model transitions retain an unsupported old effort and refuse Save until explicit Default reselection.
+- Shared unit tests and all 280 repository regression checks pass. Marketplace and both plugin manifests pass strict validation; the version guard confirms the old reviewer is unchanged. A fresh distribution build is byte-for-byte identical.
+- Authorization and provider responses were local/scripted fixtures. No production credentials, live vendor authorization, or paid inference were used.
+
+Factual deviations from the planning text in landed foundation code:
+
+- `validateConfig` accepts version 1 or 2 and always returns an in-memory version-2 document (`enabled: true` and `reasoningEffort: "default"` for v1 advisors). Opening a v1 file does not write. Explicit Save publishes version 2. Version 2 allows empty `providers` / `advisors` when references remain valid. An older plugin cannot read version 2; there is no compatibility shim.
+- User-configurable compatible thinking metadata is a paired `thinkingFormat` of `openai` | `openrouter` | `zai` plus a complete seven-level `thinkingLevelMap` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). Optional `supportsReasoningEffort` is valid only with that pair. Omitted is not filled on disk; the resolver defaults openai/openrouter to true and zai to false. `reasoning: true` alone is not tunable.
+- Session settings client: `getSessionSettings` / `applySessionSettings` never start, retry, or rebind a worker. Apply preserves on/off unless `enable: true` is explicit. Sanitized failures are `identity` | `no-live` | `protocol` | `stale` | `busy` | `root` | `config` | `unavailable`.
+- Publication barrier: unrecoverable or legacy issuance (missing v2 client identity) is `protocol` and needs a fresh compatible Claude session, not a fallback to `/on`. A live v2 hook client still holding an affected envelope is `busy`.
+- `unavailable` means the live worker cannot see a newly required API key-variable. No key values or IPC capabilities travel in settings results. A fresh Claude session with those variables exported is required; the worker is not restarted under another terminal's environment.
+- Codex `openai-codex-responses` still does not serialize `maxTokens`. That existing Default gap is preserved; no unsupported output-ceiling field is invented. Anthropic/Google thinking budgets that would not leave answer space under `limits.maxOutputTokens` fail with `reasoning budget exceeds the configured output limit` rather than expanding the configured limit.
+- Effort picker values are `default` | `off` | `minimal` | `low` | `medium` | `high` | `xhigh` | `max`, labelled Default / Off / Minimal / Low / Medium / High / XHigh / Max. Default is always offered and is distinct from Off. Off is omitted unless the transport can disable. Native aliases use `Minimal — sent as Low` (and the same pattern for other mapped values). Enable-only formats (zai, and deepseek when `supportsReasoningEffort` is not true) map Off/other to disabled/enabled rather than a native effort name.
+- Mandatory catalog exclusions that the SDK still lists: Copilot Chat Completions without `supportsReasoningEffort` and without a non-openai thinking format stay Default-only. Documented Google gaps: `gemini-2.5-pro` cannot Off; `gemini-3.7-flash` and `gemini-3.8-flash` cannot Minimal; `gemini-3.1-flash-lite-image` cannot Low or Medium.
+

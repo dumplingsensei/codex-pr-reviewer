@@ -14,7 +14,28 @@ export const CONTROL_COMMANDS = Object.freeze([
   "cross-model-advisor:logout"
 ]);
 
-export const CONTROL_OPS = Object.freeze(["on", "off", "status", "doctor", "hook", "ack"]);
+export const CONTROL_OPS = Object.freeze([
+  "on",
+  "off",
+  "status",
+  "doctor",
+  "hook",
+  "ack",
+  "settings",
+  "apply"
+]);
+
+export const PROTOCOL_VERSION = 2;
+
+/** Static IPC error strings for settings/apply envelope `{ok:false, error}`. */
+export const SETTINGS_ERRORS = Object.freeze({
+  PROTOCOL: "protocol",
+  STALE: "stale",
+  BUSY: "busy",
+  ROOT: "root",
+  CONFIG: "config",
+  UNAVAILABLE: "unavailable"
+});
 
 export const DRAIN_EVENTS = Object.freeze([
   "UserPromptSubmit",

@@ -8127,15 +8127,15 @@ function defaultProviderAuthContext() {
       const value = getProcessEnv()?.[name];
       return typeof value === "string" && value.trim().length > 0 ? value : void 0;
     },
-    async fileExists(path2) {
+    async fileExists(path) {
       try {
-        const fs2 = await importNodeModule("node:fs/promises");
-        let resolved = path2;
+        const fs = await importNodeModule("node:fs/promises");
+        let resolved = path;
         if (resolved.startsWith("~")) {
           const os = await importNodeModule("node:os");
           resolved = os.homedir() + resolved.slice(1);
         }
-        await fs2.access(resolved);
+        await fs.access(resolved);
         return true;
       } catch {
         return false;
@@ -8146,13 +8146,13 @@ function defaultProviderAuthContext() {
 var __rewriteRelativeImportExtension, importNodeModule;
 var init_context = __esm({
   "node_modules/@earendil-works/pi-ai/dist/auth/context.js"() {
-    __rewriteRelativeImportExtension = function(path2, preserveJsx) {
-      if (typeof path2 === "string" && /^\.\.?\//.test(path2)) {
-        return path2.replace(/\.(tsx)$|((?:\.d)?)((?:\.[^./]+?)?)\.([cm]?)ts$/i, function(m, tsx, d, ext, cm) {
+    __rewriteRelativeImportExtension = function(path, preserveJsx) {
+      if (typeof path === "string" && /^\.\.?\//.test(path)) {
+        return path.replace(/\.(tsx)$|((?:\.d)?)((?:\.[^./]+?)?)\.([cm]?)ts$/i, function(m, tsx, d, ext, cm) {
           return tsx ? preserveJsx ? ".jsx" : ".js" : d && (!ext || !cm) ? m : d + ext + "." + cm.toLowerCase() + "js";
         });
       }
-      return path2;
+      return path;
     };
     importNodeModule = (specifier) => import(__rewriteRelativeImportExtension(specifier));
   }
@@ -8382,7 +8382,7 @@ async function resolveProviderAuthWithSignal(provider, credentials, authContext,
 function overlayEnvAuthContext(base, env) {
   return {
     env: async (name) => env[name] || await base.env(name),
-    fileExists: (path2) => base.fileExists(path2)
+    fileExists: (path) => base.fileExists(path)
   };
 }
 async function resolveStoredOAuth(credentials, providerId, oauth, stored, signal, minOAuthValidityMs) {
@@ -16726,23 +16726,23 @@ var init_parse3 = __esm({
 });
 
 // node_modules/typebox/build/value/delta/diff.mjs
-function CreateUpdate(path2, value) {
-  return { type: "update", path: path2, value };
+function CreateUpdate(path, value) {
+  return { type: "update", path, value };
 }
-function CreateInsert(path2, value) {
-  return { type: "insert", path: path2, value };
+function CreateInsert(path, value) {
+  return { type: "insert", path, value };
 }
-function CreateDelete(path2) {
-  return { type: "delete", path: path2 };
+function CreateDelete(path) {
+  return { type: "delete", path };
 }
 function AssertCanDiffObject(value) {
   if (guard_exports.IsObject(value) && guard_exports.IsEqual(guard_exports.Symbols(value).length, 0))
     return;
   throw new Error("Cannot create diffs for objects with symbols keys");
 }
-function* FromObject17(path2, left, right) {
+function* FromObject17(path, left, right) {
   if (!guard_exports.IsObject(right) || guard_exports.IsArray(right))
-    return yield CreateUpdate(path2, right);
+    return yield CreateUpdate(path, right);
   AssertCanDiffObject(left);
   AssertCanDiffObject(right);
   const leftKeys = guard_exports.Keys(left);
@@ -16752,7 +16752,7 @@ function* FromObject17(path2, left, right) {
       continue;
     if (guard_exports.IsUnsafePropertyKey(key))
       continue;
-    yield CreateInsert(`${path2}/${key}`, right[key]);
+    yield CreateInsert(`${path}/${key}`, right[key]);
   }
   for (const key of leftKeys) {
     if (!guard_exports.HasPropertyKey(right, key))
@@ -16761,52 +16761,52 @@ function* FromObject17(path2, left, right) {
       continue;
     if (Equal(left, right))
       continue;
-    yield* FromValue4(`${path2}/${key}`, left[key], right[key]);
+    yield* FromValue4(`${path}/${key}`, left[key], right[key]);
   }
   for (const key of leftKeys) {
     if (guard_exports.HasPropertyKey(right, key))
       continue;
     if (guard_exports.IsUnsafePropertyKey(key))
       continue;
-    yield CreateDelete(`${path2}/${key}`);
+    yield CreateDelete(`${path}/${key}`);
   }
 }
-function* FromArray13(path2, left, right) {
+function* FromArray13(path, left, right) {
   if (!guard_exports.IsArray(right))
-    return yield CreateUpdate(path2, right);
+    return yield CreateUpdate(path, right);
   for (let i = 0; i < Math.min(left.length, right.length); i++) {
-    yield* FromValue4(`${path2}/${i}`, left[i], right[i]);
+    yield* FromValue4(`${path}/${i}`, left[i], right[i]);
   }
   for (let i = 0; i < right.length; i++) {
     if (i < left.length)
       continue;
-    yield CreateInsert(`${path2}/${i}`, right[i]);
+    yield CreateInsert(`${path}/${i}`, right[i]);
   }
   for (let i = left.length - 1; i >= 0; i--) {
     if (i < right.length)
       continue;
-    yield CreateDelete(`${path2}/${i}`);
+    yield CreateDelete(`${path}/${i}`);
   }
 }
-function* FromTypedArray2(path2, left, right) {
+function* FromTypedArray2(path, left, right) {
   const typeLeft = globalThis.Object.getPrototypeOf(left).constructor.name;
   const typeRight = globalThis.Object.getPrototypeOf(right).constructor.name;
   const predicate = globals_exports.IsTypeArray(right) && guard_exports.IsEqual(left.length, right.length) && guard_exports.IsEqual(typeLeft, typeRight);
   if (predicate) {
     for (let index3 = 0; index3 < Math.min(left.length, right.length); index3++) {
-      yield* FromValue4(`${path2}/${index3}`, left[index3], right[index3]);
+      yield* FromValue4(`${path}/${index3}`, left[index3], right[index3]);
     }
   } else {
-    return yield CreateUpdate(path2, right);
+    return yield CreateUpdate(path, right);
   }
 }
-function* FromUnknown(path2, left, right) {
+function* FromUnknown(path, left, right) {
   if (left === right)
     return;
-  yield CreateUpdate(path2, right);
+  yield CreateUpdate(path, right);
 }
-function* FromValue4(path2, left, right) {
-  return globals_exports.IsTypeArray(left) ? yield* FromTypedArray2(path2, left, right) : guard_exports.IsArray(left) ? yield* FromArray13(path2, left, right) : guard_exports.IsObject(left) ? yield* FromObject17(path2, left, right) : yield* FromUnknown(path2, left, right);
+function* FromValue4(path, left, right) {
+  return globals_exports.IsTypeArray(left) ? yield* FromTypedArray2(path, left, right) : guard_exports.IsArray(left) ? yield* FromArray13(path, left, right) : guard_exports.IsObject(left) ? yield* FromObject17(path, left, right) : yield* FromUnknown(path, left, right);
 }
 function Diff(current, next) {
   return [...FromValue4("", current, next)];
@@ -17676,8 +17676,8 @@ function formatValidationPath(error) {
       return basePath ? `${basePath}.${requiredProperty}` : requiredProperty;
     }
   }
-  const path2 = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
-  return path2 || "root";
+  const path = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
+  return path || "root";
 }
 function validateToolCall(tools, toolCall) {
   const tool = tools.find((t) => t.name === toolCall.name);
@@ -17805,13 +17805,12 @@ var init_dist = __esm({
 });
 
 // ../../plugins/cross-model-advisor/src/auth-control.mjs
-import fs from "node:fs";
 import { spawn } from "node:child_process";
-import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
-import { configFilePath, loadConfig as defaultLoadConfig, OAUTH_PROVIDERS } from "./config.mjs";
+import { loadConfig as defaultLoadConfig, OAUTH_PROVIDERS } from "./config.mjs";
 import { AuthError, createCredentialStore as defaultCreateStore } from "./auth.mjs";
+import { formatLoginCommand, resolvedPath } from "./terminal-command.mjs";
 var COMMANDS = /* @__PURE__ */ new Set(["list", "login", "login-command", "logout", "status"]);
 var LOGIN_TIMEOUT_MS = 15 * 60 * 1e3;
 var USAGE = "usage: auth-control.mjs list | login|login-command|logout|status <configured-slot>";
@@ -17844,19 +17843,6 @@ var STATIC_ERRORS = Object.freeze({
   setup: "Missing or invalid configuration. Run /cross-model-advisor:setup.",
   auth: "authentication failed"
 });
-function resolvedPath(value) {
-  try {
-    return fs.realpathSync(value);
-  } catch {
-    return path.resolve(value);
-  }
-}
-function posixQuote(value) {
-  const text = String(value);
-  if (text.length === 0) return "''";
-  if (/^[A-Za-z0-9_./:=+-]+$/.test(text)) return text;
-  return `'${text.replace(/'/g, `'\\''`)}'`;
-}
 function parseAuthArgv(argv) {
   const command = argv[0];
   if (command === "list") {
@@ -17910,10 +17896,11 @@ function writeFailure(stderr, error) {
 `);
 }
 function loginHint(slot, env) {
-  const exe = posixQuote(resolvedPath(fileURLToPath(import.meta.url)));
-  const command = `node ${exe} login ${posixQuote(slot)}`;
-  const configDir = path.dirname(path.resolve(configFilePath(env)));
-  return `CLAUDE_CONFIG_DIR=${posixQuote(configDir)} ${command}`;
+  return formatLoginCommand({
+    env,
+    helperPath: resolvedPath(fileURLToPath(import.meta.url)),
+    slot
+  });
 }
 function question(rl, query, signals) {
   return new Promise((resolve, reject) => {

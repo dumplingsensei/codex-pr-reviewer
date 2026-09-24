@@ -23,6 +23,24 @@ export function validateSessionId(value) {
 }
 
 /**
+ * Plugin data named on a skill's command line. Claude Code substitutes
+ * `${CLAUDE_PLUGIN_DATA}` into skill text but does not export it to Bash tool
+ * commands, and another plugin's SessionStart can export its own value into
+ * every Bash command through CLAUDE_ENV_FILE. Outside hooks, only this
+ * substituted path identifies this plugin's data.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function explicitPluginData(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text || text.includes("${") || !path.isAbsolute(text)) {
+    throw new Error("invalid --plugin-data");
+  }
+  return path.resolve(text);
+}
+
+/**
  * @param {string} pluginData
  * @param {string} sessionId
  */
@@ -83,6 +101,15 @@ export function readIdentity(env = process.env, payload = {}) {
 }
 
 /**
+ * Trusted user config path from launcher/Claude env. Never inferred from cwd.
+ * @param {NodeJS.ProcessEnv} [env]
+ */
+export function userConfigPath(env = process.env) {
+  return path.join(readIdentity(env).configDir, "cross-model-advisor.json");
+}
+
+
+/**
  * @param {string} pluginData
  * @param {string} sessionId
  */
@@ -97,6 +124,25 @@ export async function readLocator(pluginData, sessionId) {
     return null;
   }
 }
+
+/**
+ * Frozen session project root from persisted state. Null when unbound.
+ * @param {string} pluginData
+ * @param {string} sessionId
+ */
+export async function readSessionProjectRoot(pluginData, sessionId) {
+  try {
+    const raw = await fs.readFile(statePath(sessionDir(pluginData, sessionId)), "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.projectRoot !== "string" || !path.isAbsolute(parsed.projectRoot)) {
+      return null;
+    }
+    return parsed.projectRoot;
+  } catch {
+    return null;
+  }
+}
+
 
 /**
  * True when `pid` still refers to a live process of this user.

@@ -18,6 +18,21 @@ export function randomId(prefix = "id") {
   return `${prefix}_${crypto.randomBytes(8).toString("hex")}`;
 }
 
+export const PROTOCOL_VERSION = 2;
+
+/**
+ * Issuance identity for hook claims. Worker tracks this until stdout
+ * acknowledgement or the client process is proven dead.
+ */
+export function createClientMeta() {
+  return {
+    pid: process.pid,
+    id: crypto.randomUUID(),
+    protocolVersion: PROTOCOL_VERSION
+  };
+}
+
+
 /**
  * @param {unknown} value
  */
@@ -148,4 +163,32 @@ export function socketExists(socketPath) {
   } catch {
     return false;
   }
+}
+
+/**
+ * Resolve only after the stream write callback. Returning true from
+ * write() is not completion; a paused writer must not be acknowledged.
+ *
+ * @param {NodeJS.WritableStream} stream
+ * @param {string|Uint8Array} data
+ */
+export function writeCompleted(stream, data) {
+  return new Promise((resolve, reject) => {
+    if (data == null || data === "") {
+      resolve();
+      return;
+    }
+    let settled = false;
+    const done = (error) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve();
+    };
+    try {
+      stream.write(data, done);
+    } catch (error) {
+      done(error);
+    }
+  });
 }

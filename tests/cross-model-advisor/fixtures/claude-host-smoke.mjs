@@ -259,6 +259,11 @@ async function main(options) {
     fs.mkdirSync(pluginData, { recursive: true });
     fs.mkdirSync(capturesDir);
     fs.mkdirSync(outsideDir);
+    // Another plugin (openai/codex-plugin-cc) exports its own CLAUDE_PLUGIN_DATA
+    // into every Bash command. Reproduce that; no advisor state may land here.
+    const decoyData = path.join(root, "other-plugin-data");
+    fs.mkdirSync(decoyData);
+    hostEnv.CLAUDE_PLUGIN_DATA = decoyData;
     fs.writeFileSync(
       path.join(projectDir, "src", "alpha.js"),
       "export function first(items) {\n  return items[items.length];\n}\n"
@@ -327,6 +332,15 @@ async function main(options) {
         process.stdout.write(`  ${kind === "prerequisite" ? "need" : "fail"} ${phase}: ${error.message}\n`);
       }
     }
+    if (fs.existsSync(path.join(decoyData, "sessions"))) {
+      outcomes.push({
+        phase: "plugin-data",
+        ok: false,
+        kind: "assert",
+        message: "a skill wrote session state under another plugin's exported CLAUDE_PLUGIN_DATA"
+      });
+      process.stdout.write("  fail plugin-data: session state landed in the decoy directory\n");
+    }
     const failed = outcomes.filter((row) => !row.ok);
     if (failed.length) {
       const text = failed.map((row) => `${row.phase} (${row.kind}): ${row.message}`).join("\n");
@@ -345,7 +359,7 @@ function shQuote(value) {
 function pluginEnvPrefix(configDir, pluginData, projectDir) {
   return [
     `CLAUDE_CONFIG_DIR=${shQuote(configDir)}`,
-    `CLAUDE_PLUGIN_DATA=${shQuote(pluginData)}`,
+    ...(pluginData ? [`CLAUDE_PLUGIN_DATA=${shQuote(pluginData)}`] : []),
     `CLAUDE_PROJECT_DIR=${shQuote(projectDir)}`,
     `${API_KEY_ENV}=${shQuote(API_KEY_VALUE)}`
   ].join(" ");
@@ -368,18 +382,24 @@ function clonePlugin(sourcePlugin, destPlugin, { configDir, pluginData, projectD
     }
   }
   fs.writeFileSync(hooksPath, `${JSON.stringify(hooks, null, 2)}\n`);
+  // Skills get no CLAUDE_PLUGIN_DATA prefix: the host does not export it to
+  // Bash, and runHost poisons it with a decoy the way another plugin's
+  // CLAUDE_ENV_FILE export does. Only the skill's own --plugin-data path,
+  // pointed at the harness data directory, may identify the session.
+  const skillPrefixed = `${pluginEnvPrefix(configDir, "", projectDir)} ${control}`;
+  const placeholder = '"${CLAUDE_PLUGIN_DATA}"';
   const skillsDir = path.join(destPlugin, "skills");
   if (!fs.existsSync(skillsDir)) return;
   for (const name of fs.readdirSync(skillsDir)) {
     const skill = path.join(skillsDir, name, "SKILL.md");
     if (!fs.existsSync(skill)) continue;
-    const text = fs.readFileSync(skill, "utf8");
+    const text = fs.readFileSync(skill, "utf8").split(placeholder).join(shQuote(pluginData));
     const parts = text.split("---");
     if (parts.length >= 3) {
-      const body = parts.slice(2).join("---").split(control).join(prefixed);
+      const body = parts.slice(2).join("---").split(control).join(skillPrefixed);
       fs.writeFileSync(skill, `---${parts[1]}---${body}`);
     } else {
-      fs.writeFileSync(skill, text.split(control).join(prefixed));
+      fs.writeFileSync(skill, text.split(control).join(skillPrefixed));
     }
   }
 }

@@ -5,13 +5,12 @@
  * user's own terminal.
  */
 
-import fs from "node:fs";
 import { spawn } from "node:child_process";
-import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
-import { configFilePath, loadConfig as defaultLoadConfig, OAUTH_PROVIDERS } from "./config.mjs";
+import { loadConfig as defaultLoadConfig, OAUTH_PROVIDERS } from "./config.mjs";
 import { AuthError, createCredentialStore as defaultCreateStore } from "./auth.mjs";
+import { formatLoginCommand, resolvedPath } from "./terminal-command.mjs";
 
 const COMMANDS = new Set(["list", "login", "login-command", "logout", "status"]);
 const LOGIN_TIMEOUT_MS = 15 * 60 * 1000;
@@ -50,26 +49,6 @@ const STATIC_ERRORS = Object.freeze({
   auth: "authentication failed"
 });
 
-/**
- * @param {string} value
- */
-function resolvedPath(value) {
-  try {
-    return fs.realpathSync(value);
-  } catch {
-    return path.resolve(value);
-  }
-}
-
-/**
- * @param {unknown} value
- */
-function posixQuote(value) {
-  const text = String(value);
-  if (text.length === 0) return "''";
-  if (/^[A-Za-z0-9_./:=+-]+$/.test(text)) return text;
-  return `'${text.replace(/'/g, `'\\''`)}'`;
-}
 
 /**
  * @param {string[]} argv
@@ -155,10 +134,11 @@ function writeFailure(stderr, error) {
  * @param {NodeJS.ProcessEnv} env
  */
 function loginHint(slot, env) {
-  const exe = posixQuote(resolvedPath(fileURLToPath(import.meta.url)));
-  const command = `node ${exe} login ${posixQuote(slot)}`;
-  const configDir = path.dirname(path.resolve(configFilePath(env)));
-  return `CLAUDE_CONFIG_DIR=${posixQuote(configDir)} ${command}`;
+  return formatLoginCommand({
+    env,
+    helperPath: resolvedPath(fileURLToPath(import.meta.url)),
+    slot
+  });
 }
 
 /**

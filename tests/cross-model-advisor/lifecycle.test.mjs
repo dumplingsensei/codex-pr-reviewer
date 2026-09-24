@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
  * Lifecycle regressions for the session worker: observation order, control
- * classification, compaction, cancellation, snapshot restart, and drain.
+ * classification, compaction, cancellation, snapshot restart, drain, and
+ * per-advisor settings epochs.
  */
-
 import assert from "node:assert/strict";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -49,6 +50,61 @@ function configFixture(overrides = {}) {
   };
 }
 
+function protocolClient(pid = process.pid) {
+  return { pid, id: randomUUID(), protocolVersion: 2 };
+}
+
+function configV2(overrides = {}) {
+  const base = configFixture(overrides);
+  return {
+    ...base,
+    version: 2,
+    advisors: (base.advisors ?? []).map((item) => ({
+      ...item,
+      enabled: item.enabled ?? true,
+      reasoningEffort: item.reasoningEffort ?? "default"
+    }))
+  };
+}
+
+function compatibleProvider(overrides = {}) {
+  return {
+    kind: "api",
+    provider: "openai-compatible",
+    apiKeyEnv: "OPENAI_API_KEY",
+    baseUrl: "http://127.0.0.1:9/v1",
+    models: {
+      "local-model": {
+        contextWindow: 8192,
+        maxTokens: 2048
+      }
+    },
+    ...overrides
+  };
+}
+
+function applySucceeded(res) {
+  return Boolean(res) && res.ok === true && res.result?.ok !== false;
+}
+
+async function writeAdvisorConfig(file, config) {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+async function applyConfig(h, config, extra = {}) {
+  await writeAdvisorConfig(h.configFile, config);
+  const ping = (await h.rpc("ping")).result;
+  const configRevision = createHash("sha256").update(await fs.readFile(h.configFile)).digest("hex");
+  return h.rpc("apply", {
+    protocolVersion: 2,
+    workerGeneration: extra.workerGeneration ?? ping.workerGeneration,
+    settingsRevision: extra.settingsRevision ?? ping.settingsRevision,
+    configRevision,
+    ...(extra.enable !== undefined ? { enable: extra.enable } : {})
+  });
+}
+
 function makeTools() {
   let staged = null;
   return {
@@ -85,10 +141,12 @@ async function waitUntil(fn, ms = 2500) {
 }
 
 async function harness(t, extra = {}) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cma-root-"));
-  const data = await fs.mkdtemp(path.join(os.tmpdir(), "cma-data-"));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cma-root-")));
+  const data = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cma-data-")));
   const sessionId = extra.sessionId ?? `sess-${Math.random().toString(16).slice(2)}`;
   const started = { count: 0, last: null, cancelled: 0 };
+  const releases = [];
+  const workers = [];
   const reviewApi =
     extra.reviewApi ??
     (async (args) => {
@@ -110,7 +168,8 @@ async function harness(t, extra = {}) {
       OPENAI_API_KEY: "sk-test-secret-value",
       CLAUDE_PLUGIN_DATA: data,
       CLAUDE_PROJECT_DIR: root,
-      CLAUDE_CODE_SESSION_ID: sessionId
+      CLAUDE_CODE_SESSION_ID: sessionId,
+      ...extra.env
     },
     exitOnIdle: false,
     idleMs: Number.POSITIVE_INFINITY,
@@ -125,18 +184,70 @@ async function harness(t, extra = {}) {
     advisorSystemPrompt: extra.advisorSystemPrompt ?? "inspect independently",
     ...extra.workerOptions
   });
+  workers.push(worker);
   t.after(async () => {
-    await worker.stop({ reason: "test" });
-    await fs.rm(root, { recursive: true, force: true });
-    await fs.rm(data, { recursive: true, force: true });
+    for (const release of releases) {
+      try {
+        release();
+      } catch {
+        /* already released */
+      }
+    }
+    for (const item of [...workers].reverse()) {
+      await item.stop({ reason: "test" }).catch(() => {});
+    }
+    await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(data, { recursive: true, force: true }).catch(() => {});
   });
   const rpc = (op, more = {}, timeoutMs = 2500) =>
     requestIpc(
       worker.socketPath,
-      { capability: worker.controlCapability, op, ...more },
+      {
+        capability: worker.controlCapability,
+        op,
+        ...more,
+        ...(op === "hook" && more.client === undefined ? { client: protocolClient() } : {})
+      },
       { timeoutMs }
     );
-  return { root, data, sessionId, worker, rpc, started };
+  return { root, data, sessionId, worker, rpc, started, releases, workers };
+}
+
+async function fileHarness(t, extra = {}) {
+
+  const configDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cma-life-cfg-")));
+  t.after(async () => {
+    await fs.rm(configDir, { recursive: true, force: true }).catch(() => {});
+  });
+  const configFile = path.join(configDir, "cross-model-advisor.json");
+  const config = extra.config ?? configV2();
+  await writeAdvisorConfig(configFile, config);
+  const h = await harness(t, {
+    ...extra,
+    env: { CLAUDE_CONFIG_DIR: configDir, ...extra.env },
+    loadConfig: extra.loadConfig ?? (async () => JSON.parse(await fs.readFile(configFile, "utf8"))),
+    workerOptions: {
+      configFilePath: () => configFile,
+      readConfigState: async () => {
+        const raw = await fs.readFile(configFile);
+        let config = null;
+        let configError = null;
+        try {
+          config = JSON.parse(raw.toString("utf8"));
+        } catch (error) {
+          configError = error instanceof Error ? error.message : "invalid config";
+        }
+        return {
+          path: configFile,
+          revision: createHash("sha256").update(raw).digest("hex"),
+          config,
+          configError
+        };
+      },
+      ...extra.workerOptions
+    }
+  });
+  return { ...h, configDir, configFile };
 }
 
 function hook(event, extra = {}) {
@@ -538,12 +649,19 @@ test("transcript partial JSONL, sidechains, queued commands, and unknown types",
 });
 
 test("activation snapshot A survives worker replace after config B", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cma-root-"));
-  const data = await fs.mkdtemp(path.join(os.tmpdir(), "cma-data-"));
+  const workers = [];
+  const dirs = [];
   t.after(async () => {
-    await fs.rm(root, { recursive: true, force: true });
-    await fs.rm(data, { recursive: true, force: true });
+    for (const item of [...workers].reverse()) {
+      await item.stop({ reason: "test" }).catch(() => {});
+    }
+    for (const dir of dirs) {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
   });
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cma-root-")));
+  const data = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cma-data-")));
+  dirs.push(root, data);
   const sessionId = "snap-sess";
   const cfgA = configFixture();
   const cfgB = configFixture({
@@ -572,6 +690,7 @@ test("activation snapshot A survives worker replace after config B", async (t) =
     advisorSystemPrompt: "inspect"
   };
   const first = await startWorker({ ...common, loadConfig: async () => cfgA });
+  workers.push(first);
   await requestIpc(
     first.socketPath,
     { capability: first.controlCapability, op: "on" },
@@ -579,7 +698,7 @@ test("activation snapshot A survives worker replace after config B", async (t) =
   );
   await first.stop({ reason: "test" });
   const second = await startWorker({ ...common, loadConfig: async () => cfgB });
-  t.after(() => second.stop({ reason: "test" }));
+  workers.push(second);
   const status = await requestIpc(
     second.socketPath,
     { capability: second.controlCapability, op: "status" },
@@ -627,8 +746,10 @@ test("claim crash before stdout redelivers; ack is best-effort emitted", async (
   await rpc("hook", {
     payload: hook("UserPromptSubmit", { prompt: "work", prompt_id: "c1" })
   });
+  const firstClient = protocolClient();
   const first = await waitUntil(async () => {
     const res = await rpc("hook", {
+      client: firstClient,
       payload: hook("PreToolUse", {
         prompt_id: "c1",
         tool_name: "Read",
@@ -642,7 +763,9 @@ test("claim crash before stdout redelivers; ack is best-effort emitted", async (
   const statusPending = (await rpc("status")).result;
   const afterExpire = statusPending.inbox.find((item) => item.id === id) ?? statusPending.inbox[0];
   assert.ok(afterExpire.status === "pending" || afterExpire.status === "claimed" || afterExpire.status === "emitted");
+  const againClient = protocolClient();
   const again = await rpc("hook", {
+    client: againClient,
     payload: hook("PostToolUse", {
       prompt_id: "c1",
       tool_name: "Read",
@@ -651,7 +774,7 @@ test("claim crash before stdout redelivers; ack is best-effort emitted", async (
     })
   });
   if (again.result?.claimId) {
-    const ack = await rpc("ack", { claimId: again.result.claimId });
+    const ack = await rpc("ack", { claimId: again.result.claimId, client: againClient });
     assert.equal(ack.result.emission, "best-effort");
     const emitted = (await rpc("status")).result.inbox.find((item) => item.status === "emitted");
     assert.ok(emitted);
@@ -660,12 +783,19 @@ test("claim crash before stdout redelivers; ack is best-effort emitted", async (
 });
 
 test("saved CLI activation fails closed and does not call the direct provider", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cma-root-"));
-  const data = await fs.mkdtemp(path.join(os.tmpdir(), "cma-data-"));
+  const workers = [];
+  const dirs = [];
   t.after(async () => {
-    await fs.rm(root, { recursive: true, force: true });
-    await fs.rm(data, { recursive: true, force: true });
+    for (const item of [...workers].reverse()) {
+      await item.stop({ reason: "test" }).catch(() => {});
+    }
+    for (const dir of dirs) {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
   });
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cma-root-")));
+  const data = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cma-data-")));
+  dirs.push(root, data);
   const sessionId = "cli-saved";
   await fs.mkdir(path.join(data, "sessions", sessionId), { recursive: true });
   await fs.writeFile(
@@ -716,7 +846,7 @@ test("saved CLI activation fails closed and does not call the direct provider", 
     },
     advisorSystemPrompt: "inspect"
   });
-  t.after(() => worker.stop({ reason: "test" }));
+  workers.push(worker);
   await requestIpc(
     worker.socketPath,
     {
@@ -914,7 +1044,7 @@ test("off during tool setup does not publish a staged candidate", async (t) => {
   const gate = new Promise((resolve) => {
     release = resolve;
   });
-  const { rpc } = await harness(t, {
+  const h = await harness(t, {
     createReviewTools: async () => {
       await gate;
       const tools = makeTools();
@@ -926,6 +1056,8 @@ test("off during tool setup does not publish a staged candidate", async (t) => {
       return tools;
     }
   });
+  h.releases.push(() => release?.());
+  const { rpc } = h;
   await rpc("on");
   await rpc("hook", {
     payload: hook("UserPromptSubmit", { prompt: "race", prompt_id: "r1" })
@@ -1216,4 +1348,704 @@ test("transcript recovery keeps the newest user request", async (t) => {
     payload: hook("SessionStart", { source: "startup", transcript_path: transcript })
   });
   assert.match(worker._state().latestTask?.text ?? "", /newest-task/);
+});
+
+test("delayed old model review cannot publish into the new epoch", async (t) => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  let entered;
+  const started = new Promise((resolve) => {
+    entered = resolve;
+  });
+  const calls = [];
+  const cfg = configV2({
+    advisors: [
+      {
+        name: "correctness",
+        provider: "openai-api",
+        model: "gpt-old",
+        instructions: "old",
+        enabled: true,
+        reasoningEffort: "default"
+      }
+    ]
+  });
+  const h = await fileHarness(t, {
+    config: cfg,
+    reviewApi: async (args) => {
+      calls.push({
+        model: args.advisor.model,
+        effort: args.advisor.reasoningEffort,
+        history: args.history
+      });
+      entered();
+      await gate;
+      await args.tools.call("advise", {
+        severity: "concern",
+        note: "poison-from-old-model",
+        evidence: [{ kind: "observation", eventId: "obs_1", detail: "late" }]
+      });
+      return {
+        usage: { costUsd: "unknown" },
+        history: [{ role: "assistant", content: "poison-history" }]
+      };
+    }
+  });
+  h.releases.push(() => release?.());
+  await h.rpc("on");
+  await h.rpc("hook", {
+    payload: hook("UserPromptSubmit", { prompt: "first", prompt_id: "ep1" })
+  });
+  await started;
+  const applied = await applyConfig(
+    h,
+    configV2({
+      advisors: [
+        {
+          name: "correctness",
+          provider: "openai-api",
+          model: "gpt-new",
+          instructions: "old",
+          enabled: true,
+          reasoningEffort: "high"
+        }
+      ]
+    })
+  );
+  assert.equal(applySucceeded(applied), true);
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const inbox = (await h.rpc("status")).result.inbox;
+  assert.equal(
+    inbox.some((item) => item.note === "poison-from-old-model" && item.status !== "discarded"),
+    false
+  );
+  const drain = await h.rpc("hook", {
+    payload: hook("PreToolUse", {
+      prompt_id: "ep1",
+      tool_name: "Read",
+      tool_use_id: "toolu_ep"
+    })
+  });
+  assert.equal((drain.result?.stdout ?? "").includes("poison-from-old-model"), false);
+});
+
+test("coalesced finally and returned history cannot poison the replacement review", async (t) => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const calls = [];
+  const cfg = configV2();
+  const h = await fileHarness(t, {
+    config: cfg,
+    reviewApi: async (args) => {
+      calls.push({
+        model: args.advisor.model,
+        effort: args.advisor.reasoningEffort,
+        history: args.history
+      });
+      if (args.advisor.model === "gpt-old" || args.advisor.model === "gpt-test") {
+        await gate;
+        await args.tools.call("advise", {
+          severity: "nit",
+          note: "coalesced-old",
+          evidence: [{ kind: "observation", eventId: "obs_1", detail: "x" }]
+        });
+        return {
+          usage: { costUsd: "unknown" },
+          history: [{ role: "assistant", content: "poison-history" }]
+        };
+      }
+      return { usage: { costUsd: "unknown" }, history: args.history ?? [] };
+    }
+  });
+  h.releases.push(() => release?.());
+  await h.rpc("on");
+  await h.rpc("hook", {
+    payload: hook("UserPromptSubmit", { prompt: "start", prompt_id: "co1" })
+  });
+  await waitUntil(async () => (await h.rpc("status")).result.advisors[0]?.state === "busy");
+  await h.rpc("hook", {
+    payload: hook("PostToolUse", {
+      prompt_id: "co1",
+      tool_name: "Read",
+      tool_use_id: "toolu_co",
+      tool_response: { success: true }
+    })
+  });
+  const applied = await applyConfig(
+    h,
+    configV2({
+      advisors: [
+        {
+          name: "correctness",
+          provider: "openai-api",
+          model: "gpt-new",
+          instructions: "Look for observable correctness failures.",
+          enabled: true,
+          reasoningEffort: "default"
+        }
+      ]
+    })
+  );
+  assert.equal(applySucceeded(applied), true);
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const afterApply = calls.length;
+  await h.rpc("hook", {
+    payload: hook("UserPromptSubmit", { prompt: "next", prompt_id: "co2" })
+  });
+  await waitUntil(() => calls.length > afterApply);
+  const neu = calls.filter((item) => item.model === "gpt-new");
+  assert.ok(neu.length >= 1);
+  assert.equal(JSON.stringify(neu).includes("poison-history"), false);
+  assert.equal(
+    calls.slice(afterApply).some((item) => item.model !== "gpt-new"),
+    false
+  );
+});
+
+test("unrelated advisor keeps running across a sibling apply", async (t) => {
+  const hanging = async ({ signal, advisor: spec }) =>
+    new Promise((resolve, reject) => {
+      const fail = () => {
+        const error = new Error("cancel");
+        error.code = "cancel";
+        reject(error);
+      };
+      if (spec?.name === "correctness") {
+        if (signal.aborted) fail();
+        else signal.addEventListener("abort", fail, { once: true });
+        return;
+      }
+      if (signal.aborted) fail();
+      else signal.addEventListener("abort", fail, { once: true });
+    });
+  const cfg = configV2({
+    advisors: [
+      {
+        name: "correctness",
+        provider: "openai-api",
+        model: "gpt-old",
+        instructions: "a",
+        enabled: true,
+        reasoningEffort: "default"
+      },
+      {
+        name: "architecture",
+        provider: "openai-api",
+        model: "gpt-arch",
+        instructions: "b",
+        enabled: true,
+        reasoningEffort: "default"
+      }
+    ]
+  });
+  const h = await fileHarness(t, { config: cfg, reviewApi: hanging });
+  await h.rpc("on");
+  await h.rpc("hook", {
+    payload: hook("UserPromptSubmit", { prompt: "both", prompt_id: "u1" })
+  });
+  await waitUntil(async () => {
+    const advisors = (await h.rpc("status")).result.advisors;
+    return advisors.filter((item) => item.state === "busy").length === 2;
+  });
+  const applied = await applyConfig(
+    h,
+    configV2({
+      advisors: [
+        {
+          name: "correctness",
+          provider: "openai-api",
+          model: "gpt-new",
+          instructions: "a",
+          enabled: true,
+          reasoningEffort: "default"
+        },
+        {
+          name: "architecture",
+          provider: "openai-api",
+          model: "gpt-arch",
+          instructions: "b",
+          enabled: true,
+          reasoningEffort: "default"
+        }
+      ]
+    })
+  );
+  assert.equal(applySucceeded(applied), true);
+  const status = (await h.rpc("status")).result;
+  const arch = status.advisors.find((item) => item.name === "architecture");
+  const cor = status.advisors.find((item) => item.name === "correctness");
+  assert.equal(arch.state, "busy");
+  assert.notEqual(cor.state, "busy");
+  assert.equal(cor.model, "gpt-new");
+  assert.equal(arch.model, "gpt-arch");
+});
+
+test("A to B to A and remove/readd start new epochs", async (t) => {
+  let releaseA;
+  const gateA = new Promise((resolve) => {
+    releaseA = resolve;
+  });
+  const calls = [];
+  const two = configV2({
+    advisors: [
+      {
+        name: "correctness",
+        provider: "openai-api",
+        model: "gpt-a",
+        instructions: "a",
+        enabled: true,
+        reasoningEffort: "default"
+      },
+      {
+        name: "architecture",
+        provider: "openai-api",
+        model: "gpt-arch",
+        instructions: "b",
+        enabled: true,
+        reasoningEffort: "default"
+      }
+    ]
+  });
+  const h = await fileHarness(t, {
+    config: two,
+    reviewApi: async (args) => {
+      calls.push(args.advisor.model);
+      if (args.advisor.model === "gpt-a" && args.advisor.name === "correctness" && calls.filter((m) => m === "gpt-a").length === 1) {
+        await gateA;
+        await args.tools.call("advise", {
+          severity: "concern",
+          note: "first-A-finding",
+          evidence: [{ kind: "observation", eventId: "obs_1", detail: "x" }]
+        });
+      }
+      if (args.advisor.name === "architecture") {
+        await args.tools.call("advise", {
+          severity: "nit",
+          note: "arch-old",
+          evidence: [{ kind: "observation", eventId: "obs_1", detail: "x" }]
+        });
+      }
+      return { usage: { costUsd: "unknown" }, history: [] };
+    }
+  });
+  h.releases.push(() => releaseA?.());
+  await h.rpc("on");
+  await h.rpc("hook", {
+    payload: hook("UserPromptSubmit", { prompt: "aba", prompt_id: "aba1" })
+  });
+  await waitUntil(() => calls.includes("gpt-a"));
+  assert.equal(
+    applySucceeded(
+      await applyConfig(
+        h,
+        configV2({
+          advisors: two.advisors.map((item) =>
+            item.name === "correctness" ? { ...item, model: "gpt-b" } : item
+          )
+        })
+      )
+    ),
+    true
+  );
+  assert.equal(
+    applySucceeded(
+      await applyConfig(
+        h,
+        configV2({
+          advisors: two.advisors.map((item) =>
+            item.name === "correctness" ? { ...item, model: "gpt-a" } : item
+          )
+        })
+      )
+    ),
+    true
+  );
+  releaseA();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const afterAba = (await h.rpc("status")).result.inbox;
+  assert.equal(
+    afterAba.some(
+      (item) => item.note === "first-A-finding" && item.status !== "discarded" && item.status !== "stale"
+    ),
+    false
+  );
+
+  await waitUntil(async () =>
+    (await h.rpc("status")).result.inbox.some((item) => item.note === "arch-old")
+  );
+  const onlyCorrectness = configV2({
+    advisors: [
+      {
+        name: "correctness",
+        provider: "openai-api",
+        model: "gpt-a",
+        instructions: "a",
+        enabled: true,
+        reasoningEffort: "default"
+      }
+    ]
+  });
+  assert.equal(applySucceeded(await applyConfig(h, onlyCorrectness)), true);
+  assert.equal(applySucceeded(await applyConfig(h, two)), true);
+  const client = protocolClient();
+  const drain = await h.rpc("hook", {
+    client,
+    payload: hook("PostToolUse", {
+      prompt_id: "aba1",
+      tool_name: "Read",
+      tool_use_id: "toolu_readd",
+      tool_response: { success: true }
+    })
+  });
+  assert.equal((drain.result?.stdout ?? "").includes("arch-old"), false);
+  assert.equal((drain.result?.stdout ?? "").includes("first-A-finding"), false);
+});
+
+test("pending old-epoch findings stay undeliverable while emitted survive restart", async (t) => {
+  const notes = [];
+  const cfg = configV2();
+  const h = await fileHarness(t, {
+    config: cfg,
+    reviewApi: async (args) => {
+      const note = notes.shift() ?? "pending-old";
+      await args.tools.call("advise", {
+        severity: "concern",
+        note,
+        evidence: [{ kind: "observation", eventId: "obs_1", detail: "x" }]
+      });
+      return { usage: { costUsd: "unknown" }, history: [] };
+    }
+  });
+  notes.push("keep-emitted");
+  await h.rpc("on");
+  await h.rpc("hook", {
+    payload: hook("UserPromptSubmit", { prompt: "one", prompt_id: "pe1" })
+  });
+  const emitClient = protocolClient();
+  const first = await waitUntil(async () => {
+    const res = await h.rpc("hook", {
+      client: emitClient,
+      payload: hook("PreToolUse", {
+        prompt_id: "pe1",
+        tool_name: "Read",
+        tool_use_id: "toolu_pe1"
+      })
+    });
+    return res.result?.claimId ? res : null;
+  });
+  await h.rpc("ack", { claimId: first.result.claimId, client: emitClient });
+  notes.push("pending-old");
+  await h.rpc("hook", {
+    payload: hook("UserPromptSubmit", { prompt: "two", prompt_id: "pe2" })
+  });
+  await waitUntil(async () =>
+    (await h.rpc("status")).result.inbox.some((item) => item.note === "pending-old")
+  );
+  const reviewsBefore = (await h.rpc("status")).result.advisors[0].reviews;
+  assert.equal(
+    applySucceeded(
+      await applyConfig(
+        h,
+        configV2({
+          advisors: [
+            {
+              name: "correctness",
+              provider: "openai-api",
+              model: "gpt-new",
+              instructions: "Look for observable correctness failures.",
+              enabled: true,
+              reasoningEffort: "off"
+            }
+          ]
+        })
+      )
+    ),
+    true
+  );
+  const after = (await h.rpc("status")).result;
+  assert.ok((after.advisors[0].reviews ?? 0) >= reviewsBefore);
+  const drain = await h.rpc("hook", {
+    payload: hook("PostToolUse", {
+      prompt_id: "pe2",
+      tool_name: "Read",
+      tool_use_id: "toolu_pe2",
+      tool_response: { success: true }
+    })
+  });
+  assert.equal((drain.result?.stdout ?? "").includes("pending-old"), false);
+  assert.ok(after.inbox.some((item) => item.status === "emitted" && item.note === "keep-emitted"));
+
+  await h.worker.stop({ reason: "replace" });
+  const restarted = await startWorker({
+    sessionId: h.sessionId,
+    projectRoot: h.root,
+    pluginData: h.data,
+    env: {
+      OPENAI_API_KEY: "sk-test-secret-value",
+      CLAUDE_PLUGIN_DATA: h.data,
+      CLAUDE_PROJECT_DIR: h.root,
+      CLAUDE_CODE_SESSION_ID: h.sessionId,
+      CLAUDE_CONFIG_DIR: h.configDir
+    },
+    exitOnIdle: false,
+    idleMs: Number.POSITIVE_INFINITY,
+    debounceMs: 0,
+    loadConfig: async () => JSON.parse(await fs.readFile(h.configFile, "utf8")),
+    configFilePath: () => h.configFile,
+    validateRoot: async () => {},
+    runtimeErrors: () => [],
+    createReviewTools: async () => makeTools(),
+    validateApi: async () => ({ available: true }),
+    reviewApi: async () => ({ usage: { costUsd: "unknown" }, history: [] }),
+    advisorSystemPrompt: "inspect independently"
+  });
+  h.workers.push(restarted);
+  const status = await requestIpc(
+    restarted.socketPath,
+    { capability: restarted.controlCapability, op: "status" },
+    { timeoutMs: 2500 }
+  );
+  assert.ok(status.result.inbox.some((item) => item.status === "emitted" && item.note === "keep-emitted"));
+  const later = await requestIpc(
+    restarted.socketPath,
+    {
+      capability: restarted.controlCapability,
+      op: "hook",
+      client: protocolClient(),
+      payload: hook("PreToolUse", {
+        prompt_id: "pe2",
+        tool_name: "Read",
+        tool_use_id: "toolu_pe3"
+      })
+    },
+    { timeoutMs: 2500 }
+  );
+  assert.equal((later.result?.stdout ?? "").includes("pending-old"), false);
+});
+
+test("same-slot provider identity changes fence in-flight reviews", async (t) => {
+  const pending = new Set();
+  const releaseAll = () => {
+    for (const resolve of pending) resolve();
+    pending.clear();
+  };
+  let entered = 0;
+  const advisorSpec = {
+    name: "correctness",
+    provider: "local",
+    model: "local-model",
+    instructions: "a",
+    enabled: true,
+    reasoningEffort: "default"
+  };
+  const cfg = (provider) =>
+    configV2({
+      providers: { local: provider },
+      advisors: [advisorSpec]
+    });
+  let seq = 0;
+  const h = await fileHarness(t, {
+    config: cfg(compatibleProvider()),
+    env: { CMA_SLOT_KEY: "sk-other-slot" },
+    reviewApi: async (args) => {
+      const mine = ++seq;
+      const gate = new Promise((resolve) => {
+        pending.add(resolve);
+      });
+      entered = mine;
+      await gate;
+      await args.tools.call("advise", {
+        severity: "concern",
+        note: `stale-slot-${mine}`,
+        evidence: [{ kind: "observation", eventId: "obs_1", detail: "late" }]
+      });
+      return { usage: { costUsd: "unknown" }, history: [] };
+    }
+  });
+  h.releases.push(releaseAll);
+  await h.rpc("on");
+
+  const fenceAndDiscard = async (nextProvider, promptId, note, expectedSeq) => {
+    await h.rpc("hook", {
+      payload: hook("UserPromptSubmit", { prompt: note, prompt_id: promptId })
+    });
+    await waitUntil(() => entered === expectedSeq);
+    assert.equal(applySucceeded(await applyConfig(h, cfg(nextProvider))), true);
+    releaseAll();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const inbox = (await h.rpc("status")).result.inbox;
+    assert.equal(
+      inbox.some((item) => item.note === note && item.status !== "discarded" && item.status !== "stale"),
+      false
+    );
+    const drain = await h.rpc("hook", {
+      payload: hook("PreToolUse", {
+        prompt_id: promptId,
+        tool_name: "Read",
+        tool_use_id: `toolu_${promptId}`
+      })
+    });
+    assert.equal((drain.result?.stdout ?? "").includes(note), false);
+  };
+
+  await fenceAndDiscard(
+    compatibleProvider({ baseUrl: "http://127.0.0.1:11/v1" }),
+    "slot-url",
+    "stale-slot-1",
+    1
+  );
+  await fenceAndDiscard(
+    compatibleProvider({
+      baseUrl: "http://127.0.0.1:11/v1",
+      apiKeyEnv: "CMA_SLOT_KEY"
+    }),
+    "slot-auth",
+    "stale-slot-2",
+    2
+  );
+  await fenceAndDiscard(
+    compatibleProvider({
+      baseUrl: "http://127.0.0.1:11/v1",
+      apiKeyEnv: "CMA_SLOT_KEY",
+      models: { "local-model": { contextWindow: 16384, maxTokens: 2048 } }
+    }),
+    "slot-meta",
+    "stale-slot-3",
+    3
+  );
+});
+
+test("independent paused advisor stays paused across sibling apply", async (t) => {
+  const cfg = configV2({
+    advisors: [
+      {
+        name: "correctness",
+        provider: "openai-api",
+        model: "gpt-old",
+        instructions: "a",
+        enabled: true,
+        reasoningEffort: "default"
+      },
+      {
+        name: "architecture",
+        provider: "openai-api",
+        model: "gpt-arch",
+        instructions: "b",
+        enabled: true,
+        reasoningEffort: "default"
+      }
+    ]
+  });
+  const h = await fileHarness(t, {
+    config: cfg,
+    reviewApi: async (args) => {
+      if (args.advisor.name === "architecture") {
+        const error = new Error("429");
+        error.code = "rate";
+        throw error;
+      }
+      return { usage: { costUsd: "unknown" }, history: [] };
+    }
+  });
+  await h.rpc("on");
+  await h.rpc("hook", {
+    payload: hook("UserPromptSubmit", { prompt: "pause-sib", prompt_id: "ps1" })
+  });
+  await waitUntil(async () => {
+    const arch = (await h.rpc("status")).result.advisors.find((item) => item.name === "architecture");
+    return arch?.state === "paused";
+  });
+  const applied = await applyConfig(
+    h,
+    configV2({
+      advisors: [
+        {
+          name: "correctness",
+          provider: "openai-api",
+          model: "gpt-new",
+          instructions: "a",
+          enabled: true,
+          reasoningEffort: "default"
+        },
+        {
+          name: "architecture",
+          provider: "openai-api",
+          model: "gpt-arch",
+          instructions: "b",
+          enabled: true,
+          reasoningEffort: "default"
+        }
+      ]
+    })
+  );
+  assert.equal(applySucceeded(applied), true);
+  const status = (await h.rpc("status")).result;
+  const arch = status.advisors.find((item) => item.name === "architecture");
+  const cor = status.advisors.find((item) => item.name === "correctness");
+  assert.equal(arch.state, "paused");
+  assert.equal(cor.model, "gpt-new");
+  const reviews = arch.reviews;
+  await h.rpc("hook", {
+    payload: hook("UserPromptSubmit", { prompt: "again", prompt_id: "ps2" })
+  });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const later = (await h.rpc("status")).result.advisors.find((item) => item.name === "architecture");
+  assert.equal(later.state, "paused");
+  assert.equal(later.reviews, reviews);
+});
+
+test("consumed usage is retained when a stale epoch is cancelled", async (t) => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  let entered;
+  const started = new Promise((resolve) => {
+    entered = resolve;
+  });
+  const h = await fileHarness(t, {
+    reviewApi: async (args) => {
+      if (args.advisor.model === "gpt-test") {
+        entered();
+        await gate;
+        const error = new Error("cancel");
+        error.code = "cancel";
+        error.usage = { inputTokens: 42, outputTokens: 3, totalTokens: 45, costUsd: "unknown" };
+        throw error;
+      }
+      return { usage: { inputTokens: 1, outputTokens: 1, costUsd: "unknown" }, history: [] };
+    }
+  });
+  h.releases.push(() => release?.());
+  await h.rpc("on");
+  await h.rpc("hook", {
+    payload: hook("UserPromptSubmit", { prompt: "paid-round", prompt_id: "pay1" })
+  });
+  await started;
+  const applied = await applyConfig(
+    h,
+    configV2({
+      advisors: [
+        {
+          name: "correctness",
+          provider: "openai-api",
+          model: "gpt-new",
+          instructions: "Look for observable correctness failures.",
+          enabled: true,
+          reasoningEffort: "default"
+        }
+      ]
+    })
+  );
+  assert.equal(applySucceeded(applied), true);
+  release();
+  await waitUntil(async () => (await h.rpc("status")).result.advisors[0]?.usage?.inputTokens >= 42);
+  const usage = (await h.rpc("status")).result.advisors[0].usage;
+  assert.equal(usage.inputTokens, 42);
 });

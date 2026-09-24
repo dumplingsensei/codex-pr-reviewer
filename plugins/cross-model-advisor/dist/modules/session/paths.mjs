@@ -13,6 +13,13 @@ function validateSessionId(value) {
   }
   return id;
 }
+function explicitPluginData(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text || text.includes("${") || !path.isAbsolute(text)) {
+    throw new Error("invalid --plugin-data");
+  }
+  return path.resolve(text);
+}
 function sessionDir(pluginData, sessionId) {
   return path.join(pluginData, "sessions", validateSessionId(sessionId));
 }
@@ -47,6 +54,9 @@ function readIdentity(env = process.env, payload = {}) {
   const configDir = env.CLAUDE_CONFIG_DIR?.trim() || path.join(os.homedir(), ".claude");
   return { sessionId, projectRoot, pluginData, pluginRoot, configDir };
 }
+function userConfigPath(env = process.env) {
+  return path.join(readIdentity(env).configDir, "cross-model-advisor.json");
+}
 async function readLocator(pluginData, sessionId) {
   const file = locatorPath(sessionDir(pluginData, sessionId));
   try {
@@ -54,6 +64,18 @@ async function readLocator(pluginData, sessionId) {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return null;
     return parsed;
+  } catch {
+    return null;
+  }
+}
+async function readSessionProjectRoot(pluginData, sessionId) {
+  try {
+    const raw = await fs.readFile(statePath(sessionDir(pluginData, sessionId)), "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.projectRoot !== "string" || !path.isAbsolute(parsed.projectRoot)) {
+      return null;
+    }
+    return parsed.projectRoot;
   } catch {
     return null;
   }
@@ -80,12 +102,15 @@ export {
   createSocketDir,
   ensurePrivateDir,
   errorLogPath,
+  explicitPluginData,
   locatorPath,
   lockDir,
   pidIsLive,
   readIdentity,
   readLocator,
+  readSessionProjectRoot,
   sessionDir,
   statePath,
+  userConfigPath,
   validateSessionId
 };
