@@ -877,6 +877,12 @@ export async function startWorker(options) {
           return;
         }
         await persist();
+        // A new prompt, off, or Apply can cancel this review while it persists.
+        if (abort.signal.aborted || !publicationAllowed(reserved) || !ownsReview()) {
+          clearTimeout(timer);
+          if (ownsReview()) reviews.delete(advisorSpec.name);
+          return;
+        }
         const systemPrompt = `${deps.advisorSystemPrompt}\n\n${advisorSpec.instructions ?? ""}`.trim();
         const reviewLimits = {
           maxToolCallsPerReview: limits.maxToolCallsPerReview,
@@ -888,8 +894,10 @@ export async function startWorker(options) {
           advisor: advisorSpec,
           observations,
           history: bounded.history,
-          latestTask: state.latestTask,
-          compactSummary: state.compactSummary,
+          // The task this review was reserved for, not whatever prompt has
+          // arrived since.
+          latestTask: current.latestTask,
+          compactSummary: current.compactSummary,
           currentContext: current,
           systemPrompt,
           tools,
