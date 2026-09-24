@@ -37,6 +37,8 @@ or prompt, often after Claude had finished.
 - **Reviewer prompt.** A problem Claude mentions in its final message but
   leaves in the code is still reported; only a fix in the diff excuses it. An
   input the request did not mention but the code mishandles is at least a nit.
+  Findings are about the code only: how Claude worded its reply, or whether it
+  followed instructions about the reply's format, is not a finding.
 
 ## 1.2.0
 
