@@ -6,6 +6,16 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.8
+
+- **`/cross-model-advisor:review [base-ref]`.** An on-demand review of
+  uncommitted changes (untracked files included), or of everything since a
+  ref's merge base, committed and uncommitted. It uses the gate's advisors,
+  tools, evidence rules, exclusions, review cap, and 270-second budget, works
+  whether the gate is on or off, and reports without blocking. The gate and
+  the command share one advisor loop. The ref is checked for shape and
+  resolved with `--end-of-options`.
+
 ## 2.1.7
 
 - **Auto-on.** `gate.autoOn` in your own config lists absolute project roots;

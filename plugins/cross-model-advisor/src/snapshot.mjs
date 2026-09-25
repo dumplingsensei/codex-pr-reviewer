@@ -90,6 +90,40 @@ export async function gitTopLevel(dir, { env = process.env } = {}) {
 }
 
 /**
+ * The tree an on-demand review compares the working tree against: HEAD's, or
+ * with `base` that of HEAD's merge base with `base`, so a branch review covers
+ * its commits and its uncommitted work together.
+ *
+ * @param {string} root repository top level
+ * @param {string | null} base a ref the caller has already checked for shape
+ * @param {{ env?: NodeJS.ProcessEnv }} [options]
+ * @returns {Promise<{ tree: string, commit: string | null }>}
+ */
+export async function reviewBaseTree(root, base, { env = process.env } = {}) {
+  let head;
+  try {
+    head = (await git(root, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], { env })).trim();
+  } catch {
+    if (base) throw new SnapshotError("git", "the repository has no commits to compare against");
+    // No commits yet: compare against the empty tree, asked of git because its
+    // id depends on the repository's object format (SHA-1 or SHA-256).
+    return { tree: (await git(root, ["hash-object", "-t", "tree", "/dev/null"], { env })).trim(), commit: null };
+  }
+  let commit = head;
+  if (base) {
+    let target;
+    try {
+      target = (await git(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${base}^{commit}`], { env })).trim();
+    } catch {
+      throw new SnapshotError("git", `\`${base}\` is not a commit in this repository`);
+    }
+    commit = (await git(root, ["merge-base", head, target], { env })).trim();
+  }
+  const tree = (await git(root, ["rev-parse", `${commit}^{tree}`], { env })).trim();
+  return { tree, commit };
+}
+
+/**
  * Untracked paths git ignores under `root`, by every rule `git add` honours:
  * .gitignore, .git/info/exclude, and core.excludesFile. Ignored directories
  * are listed once, ending in `/`.

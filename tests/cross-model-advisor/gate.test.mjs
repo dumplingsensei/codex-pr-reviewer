@@ -17,9 +17,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const modules = path.join(here, "..", "..", "plugins", "cross-model-advisor", "dist", "modules");
 const load = (rel) => import(pathToFileURL(path.join(modules, rel)).href);
 
-const { runStop, runOn } = await load("gate.mjs");
+const { runStop, runOn, runReview } = await load("gate.mjs");
 const { recordPrompt, runOff, runStatus, runSessionStart } = await load("control.mjs");
-const { snapshotTree, turnDiff } = await load("snapshot.mjs");
+const { reviewBaseTree, snapshotTree, turnDiff } = await load("snapshot.mjs");
 const { validateConfig } = await load("config.mjs");
 
 const scratchDirs = [];
@@ -319,7 +319,7 @@ test("queued advisors share the Stop hook's time, so a late one is recorded inst
   });
   const out = await w.stop();
   assert.deepEqual(w.reviews.map((args) => args.advisor.name), ["alpha"]);
-  assert.match(out.systemMessage, /beta: timeout: the Stop hook's review time ran out/);
+  assert.match(out.systemMessage, /beta: timeout: the review's time ran out before this advisor started/);
   const status = await w.status();
   assert.equal(status.advisors.beta.reviews, 0);
   assert.match(status.advisors.beta.lastError, /^timeout:/);
@@ -421,6 +421,63 @@ test("gate.autoOn in the user's config turns the gate on at session start, and /
   const unlisted = envFor("autoon-unlisted", other);
   assert.equal(await start(unlisted, "autoon-unlisted"), "");
   assert.equal((await runStatus(unlisted)).enabled, false);
+});
+
+test("an on-demand review covers uncommitted work, untracked files included, without touching the gate", async () => {
+  const w = await world();
+  await runOff(w.env);
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// uncommitted\n");
+  await fs.writeFile(path.join(w.root, "src", "new.js"), "export const n = 1;\n");
+  w.setScript(concern("real bug"));
+  const report = await runReview(w.env, {}, w.deps);
+  assert.equal(report.ok, true);
+  assert.match(report.scope, /uncommitted/);
+  assert.deepEqual(report.files.sort(), ["src/a.js", "src/new.js"]);
+  assert.equal(report.findings.length, 1);
+  assert.match(report.findings[0].note, /real bug/);
+  assert.equal(w.reviews[0].turn.final, "");
+  assert.match(w.reviews[0].turn.request, /On-demand review requested by the user/);
+  const status = await w.status();
+  assert.equal(status.enabled, false);
+  assert.equal(status.lastReview, null);
+  assert.equal(status.advisors.correctness.reviews, 1);
+});
+
+test("an on-demand review with --base covers the branch's commits and its uncommitted work", async () => {
+  const w = await world();
+  git(w.root, "tag", "start");
+  git(w.root, "checkout", "-qb", "feature");
+  await fs.writeFile(path.join(w.root, "src", "committed.js"), "export const c = 1;\n");
+  git(w.root, "add", "-A");
+  git(w.root, "commit", "-qm", "on the branch");
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// uncommitted\n");
+  const report = await runReview(w.env, { base: "start" }, w.deps);
+  assert.match(report.scope, /everything since start/);
+  assert.deepEqual(report.files.sort(), ["src/a.js", "src/committed.js"]);
+
+  await assert.rejects(runReview(w.env, { base: "--output=/tmp/x" }, w.deps), (error) => error.code === "base");
+  await assert.rejects(runReview(w.env, { base: "no-such-ref" }, w.deps), /not a commit/);
+});
+
+test("an on-demand review works in a repository with no commits, SHA-1 or SHA-256", async () => {
+  for (const format of ["sha1", "sha256"]) {
+    const root = await scratch(`cma-empty-${format}-`);
+    const scratchDir = await scratch(`cma-empty-${format}-idx-`);
+    git(root, "init", "-q", `--object-format=${format}`);
+    await fs.writeFile(path.join(root, "first.js"), "export const x = 1;\n");
+    const from = await reviewBaseTree(root, null);
+    assert.equal(from.commit, null);
+    const head = await snapshotTree(root, scratchDir);
+    const diff = await turnDiff(root, from.tree, head, { isExcluded: async () => false });
+    assert.deepEqual(diff.files.map((file) => file.path), ["first.js"], format);
+  }
+});
+
+test("an on-demand review with nothing changed makes no model request", async () => {
+  const w = await world();
+  const report = await runReview(w.env, {}, w.deps);
+  assert.equal(report.note, "nothing changed in this scope");
+  assert.equal(w.reviews.length, 0);
 });
 
 test("control commands, subagents, other prompts, and off are never reviewed", async () => {

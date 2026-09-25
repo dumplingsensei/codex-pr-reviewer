@@ -21,7 +21,7 @@ import ignoreFactory from "ignore";
 import { reviewApi, validateApi } from "./backends/api.mjs";
 import { configFilePath, loadConfig, runtimeErrors, validateRoot } from "./config.mjs";
 import { advisorSystemPrompt } from "./prompt.mjs";
-import { gitIgnoredPaths, gitTopLevel, snapshotTree, turnDiff } from "./snapshot.mjs";
+import { gitIgnoredPaths, gitTopLevel, reviewBaseTree, snapshotTree, turnDiff } from "./snapshot.mjs";
 import { createReviewTools, normalizeFinding } from "./tools.mjs";
 import {
   MAX_FINDINGS_PER_REVIEW,
@@ -44,7 +44,7 @@ import {
 import { resolveSecrets, sanitizeText, secretNamesFromSnapshot, truncateLabeled } from "./session/sanitize.mjs";
 import { loadState, saveState } from "./session/state.mjs";
 
-const USAGE = "usage: gate.mjs stop | on|doctor --plugin-data <path>";
+const USAGE = "usage: gate.mjs stop | on|doctor --plugin-data <path> | review --plugin-data <path> [--base <ref>]";
 const USER_SUMMARY_CHARS = 2_000;
 const DISCLOSURE =
   "At the end of each turn that changes files, the request, Claude's final message, and the git diff (minus excluded paths) go to the configured external providers, which may also read allowed project files. Claude's own credentials are never used.";
@@ -313,6 +313,77 @@ async function pool(tasks, limit) {
   return out;
 }
 
+/**
+ * Every runnable advisor reviews one diff, at most maxConcurrentAdvisors at a
+ * time and all inside one deadline. Shared by the Stop gate and on-demand
+ * reviews, so both apply the same tools, evidence rules, and limits. Updates
+ * per-advisor usage in `state`; the caller saves it.
+ *
+ * @param {{ runnable: any[], config: any, state: any, session: any, deps: typeof defaultDeps, env: NodeJS.ProcessEnv,
+ *   secrets: string[], credDir: string, ignoredPaths: string[], turnContext: object, observations: object[],
+ *   deadline: number, projectRoot?: string }} input
+ */
+function runAdvisors({ runnable, config, state, session, deps, env, secrets, credDir, ignoredPaths, turnContext, observations, deadline, projectRoot = state.projectRoot }) {
+  const { limits } = config;
+  return pool(
+    runnable.map((advisor) => async () => {
+      const provider = config.providers[advisor.provider];
+      const base = { name: advisor.name, provider: advisor.provider, model: advisor.model, findings: [] };
+      const stats = (state.advisors[advisor.name] ??= { reviews: 0, usage: null, lastError: null });
+      // Advisors queued behind maxConcurrentAdvisors share one budget, so their
+      // timeouts cannot add up past the point where Claude Code kills the hook.
+      const remaining = deadline - deps.now();
+      if (remaining <= 0) {
+        stats.lastError = "timeout: the review's time ran out before this advisor started";
+        return { ...base, ok: false, error: stats.lastError };
+      }
+      stats.reviews += 1;
+      const abort = new AbortController();
+      const timer = setTimeout(
+        () => abort.abort({ code: "timeout" }),
+        Math.min(limits.reviewTimeoutSeconds * 1000, remaining)
+      );
+      let tools;
+      try {
+        tools = await deps.createReviewTools({
+          root: projectRoot,
+          exclude: config.exclude,
+          observations,
+          advisor: { name: advisor.name },
+          signal: abort.signal,
+          pluginData: session.pluginData,
+          credentialDir: credDir,
+          secrets,
+          maxFindings: MAX_FINDINGS_PER_REVIEW,
+          ignoredPaths
+        });
+        const result = await deps.reviewApi({
+          provider,
+          advisor,
+          turn: turnContext,
+          systemPrompt: [advisorSystemPrompt, advisor.instructions].filter(Boolean).join("\n\n"),
+          tools,
+          limits,
+          signal: abort.signal,
+          env
+        });
+        stats.usage = mergeUsage(stats.usage, result?.usage);
+        stats.lastError = null;
+        return { ...base, ok: true, findings: tools.candidates ?? [] };
+      } catch (error) {
+        stats.usage = mergeUsage(stats.usage, error?.usage);
+        const code = typeof error?.code === "string" ? error.code : "error";
+        stats.lastError = sanitizeText(`${code}: ${error instanceof Error ? error.message : "review failed"}`, secrets);
+        // Findings staged before a cutoff passed evidence checks; keep them.
+        return { ...base, ok: false, error: stats.lastError, findings: tools?.candidates ?? [] };
+      } finally {
+        clearTimeout(timer);
+      }
+    }),
+    limits.maxConcurrentAdvisors
+  );
+}
+
 const defaultDeps = {
   loadConfig,
   validateApi,
@@ -321,6 +392,7 @@ const defaultDeps = {
   snapshotTree,
   turnDiff,
   gitIgnoredPaths,
+  reviewBaseTree,
   now: () => Date.now()
 };
 
@@ -467,63 +539,20 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
   };
   const observations = [{ eventId: "request" }, { eventId: "final" }, ...files.map((file) => ({ eventId: file.eventId }))];
 
-  const results = await pool(
-    runnable.map((advisor) => async () => {
-      const provider = config.providers[advisor.provider];
-      const base = { name: advisor.name, provider: advisor.provider, model: advisor.model, findings: [] };
-      const stats = (state.advisors[advisor.name] ??= { reviews: 0, usage: null, lastError: null });
-      // Advisors queued behind maxConcurrentAdvisors share one budget, so their
-      // timeouts cannot add up past the point where Claude Code kills the hook.
-      const remaining = deadline - deps.now();
-      if (remaining <= 0) {
-        stats.lastError = "timeout: the Stop hook's review time ran out before this advisor started";
-        return { ...base, ok: false, error: stats.lastError };
-      }
-      stats.reviews += 1;
-      const abort = new AbortController();
-      const timer = setTimeout(
-        () => abort.abort({ code: "timeout" }),
-        Math.min(limits.reviewTimeoutSeconds * 1000, remaining)
-      );
-      let tools;
-      try {
-        tools = await deps.createReviewTools({
-          root: state.projectRoot,
-          exclude: config.exclude,
-          observations,
-          advisor: { name: advisor.name },
-          signal: abort.signal,
-          pluginData: session.pluginData,
-          credentialDir: credDir,
-          secrets,
-          maxFindings: MAX_FINDINGS_PER_REVIEW,
-          ignoredPaths
-        });
-        const result = await deps.reviewApi({
-          provider,
-          advisor,
-          turn: turnContext,
-          systemPrompt: [advisorSystemPrompt, advisor.instructions].filter(Boolean).join("\n\n"),
-          tools,
-          limits,
-          signal: abort.signal,
-          env
-        });
-        stats.usage = mergeUsage(stats.usage, result?.usage);
-        stats.lastError = null;
-        return { ...base, ok: true, findings: tools.candidates ?? [] };
-      } catch (error) {
-        stats.usage = mergeUsage(stats.usage, error?.usage);
-        const code = typeof error?.code === "string" ? error.code : "error";
-        stats.lastError = sanitizeText(`${code}: ${error instanceof Error ? error.message : "review failed"}`, secrets);
-        // Findings staged before a cutoff passed evidence checks; keep them.
-        return { ...base, ok: false, error: stats.lastError, findings: tools?.candidates ?? [] };
-      } finally {
-        clearTimeout(timer);
-      }
-    }),
-    limits.maxConcurrentAdvisors
-  );
+  const results = await runAdvisors({
+    runnable,
+    config,
+    state,
+    session,
+    deps,
+    env,
+    secrets,
+    credDir,
+    ignoredPaths,
+    turnContext,
+    observations,
+    deadline
+  });
 
   state.reviewed.push(key);
   const findings = collectFindings(results);
@@ -561,6 +590,124 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
     advisors
   });
   return failed.length ? `${JSON.stringify({ systemMessage: formatPartialFailure(failed) })}\n` : "";
+}
+
+/**
+ * On-demand review, whether or not the gate is on: the working tree against
+ * HEAD, or with `base` against HEAD's merge base with it, untracked files
+ * included. Same advisors, tools, evidence rules, exclusions, and per-session
+ * review cap as the gate; it reports and never blocks, and leaves the gate's
+ * own state alone apart from advisor usage.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @param {{ base?: string | null }} [options]
+ * @param {Partial<typeof defaultDeps>} [overrides]
+ */
+export async function runReview(env, { base = null } = {}, overrides = {}) {
+  const deps = { ...defaultDeps, ...overrides };
+  const deadline = deps.now() + STOP_REVIEW_BUDGET_MS;
+  if (base !== null && (!/^[A-Za-z0-9._/@{}^~-]{1,200}$/.test(base) || base.startsWith("-"))) {
+    throw new GateError("base", "--base takes one git ref, such as main or origin/main");
+  }
+  const session = sessionFrom(env);
+  const config = await deps.loadConfig({ env }).catch((error) => {
+    throw new GateError("config", sanitizeText(error instanceof Error ? error.message : "invalid config"));
+  });
+  const top = await gitTopLevel(env.CLAUDE_PROJECT_DIR?.trim() || process.cwd(), { env });
+  if (!top) throw new GateError("git", "the project is not inside a git work tree; a review needs git to see what changed");
+  let projectRoot;
+  try {
+    projectRoot = await validateRoot(top);
+  } catch (error) {
+    throw new GateError("root", sanitizeText(error instanceof Error ? error.message : "invalid project root"));
+  }
+  await ensurePrivateDir(session.dir);
+  const state = await loadState(session.dir);
+
+  let from;
+  let head;
+  try {
+    from = await deps.reviewBaseTree(projectRoot, base, { env });
+    head = await deps.snapshotTree(projectRoot, session.dir, { env });
+  } catch (error) {
+    throw new GateError("git", sanitizeText(error instanceof Error ? error.message : "could not read the changes"));
+  }
+  const scope = base
+    ? `everything since ${base} (merge base ${from.commit?.slice(0, 12)}), committed and uncommitted`
+    : "uncommitted changes: HEAD against the working tree, untracked files included";
+  const report = { ok: true, projectRoot, scope, files: [], omitted: [], unshown: [], advisors: [], findings: [] };
+  if (head === from.tree) return { ...report, note: "nothing changed in this scope" };
+
+  const secrets = resolveSecrets(secretNamesFromSnapshot(config), env);
+  const credDir = credentialDir(env);
+  const diagnosed = await diagnoseAdvisors(config, env, deps);
+  const runnable = config.advisors.filter((advisor) => {
+    const row = diagnosed.find((item) => item.name === advisor.name);
+    return row?.available && (state.advisors[advisor.name]?.reviews ?? 0) < config.limits.maxReviewsPerAdvisorPerSession;
+  });
+  if (runnable.length === 0) {
+    return { ...report, ok: false, error: "advisors", message: "no available advisors; run /cross-model-advisor:doctor" };
+  }
+
+  let ignoredPaths;
+  let diff;
+  try {
+    ignoredPaths = await deps.gitIgnoredPaths(projectRoot, { env });
+    const probe = await deps.createReviewTools({
+      root: projectRoot,
+      exclude: config.exclude,
+      observations: [],
+      pluginData: session.pluginData,
+      credentialDir: credDir,
+      secrets,
+      ignoredPaths
+    });
+    diff = await deps.turnDiff(projectRoot, from.tree, head, { env, isExcluded: probe.excluded });
+  } catch {
+    throw new GateError("git", "could not compute the diff");
+  }
+  report.omitted = diff.omitted;
+  report.unshown = diff.unshown;
+  if (diff.files.length === 0) return { ...report, note: "only excluded files changed" };
+
+  const files = diff.files.map((file) => ({ ...file, eventId: `diff:${file.path}`, text: sanitizeText(file.text, secrets) }));
+  const turnContext = {
+    request: `On-demand review requested by the user, not a single Claude turn. Scope: ${scope}. Review the change as it stands; it may span several turns and commits.`,
+    final: "",
+    round: 1,
+    previous: [],
+    diff: { files, omitted: diff.omitted, unshown: diff.unshown }
+  };
+  const observations = [{ eventId: "request" }, ...files.map((file) => ({ eventId: file.eventId }))];
+  const results = await runAdvisors({
+    runnable,
+    config,
+    state,
+    session,
+    deps,
+    env,
+    secrets,
+    credDir,
+    ignoredPaths,
+    turnContext,
+    observations,
+    deadline,
+    projectRoot
+  });
+  await saveState(session.dir, state);
+  return {
+    ...report,
+    files: files.map((file) => file.path),
+    advisors: results.map((result) => ({
+      name: result.name,
+      provider: result.provider,
+      model: result.model,
+      ok: result.ok,
+      findings: result.findings.length,
+      error: result.error
+    })),
+    findings: collectFindings(results)
+  };
 }
 
 /**
@@ -674,7 +821,9 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     process.exitCode = 0;
     return;
   }
-  if ((op === "on" || op === "doctor") && argv.length === 3 && argv[1] === "--plugin-data") {
+  const reviewArgs =
+    op === "review" && argv[1] === "--plugin-data" && (argv.length === 3 || (argv.length === 5 && argv[3] === "--base"));
+  if (((op === "on" || op === "doctor") && argv.length === 3 && argv[1] === "--plugin-data") || reviewArgs) {
     let pluginData;
     try {
       pluginData = explicitPluginData(argv[2]);
@@ -685,7 +834,8 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     }
     const scoped = { ...env, CLAUDE_PLUGIN_DATA: pluginData };
     try {
-      const result = op === "on" ? await runOn(scoped) : await runDoctor(scoped);
+      const result =
+        op === "on" ? await runOn(scoped) : op === "review" ? await runReview(scoped, { base: argv[4] ?? null }) : await runDoctor(scoped);
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     } catch (error) {
       const code = error instanceof GateError ? error.code : "error";

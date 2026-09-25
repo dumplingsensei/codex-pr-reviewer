@@ -59,6 +59,27 @@ async function gitTopLevel(dir, { env = process.env } = {}) {
     return null;
   }
 }
+async function reviewBaseTree(root, base, { env = process.env } = {}) {
+  let head;
+  try {
+    head = (await git(root, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], { env })).trim();
+  } catch {
+    if (base) throw new SnapshotError("git", "the repository has no commits to compare against");
+    return { tree: (await git(root, ["hash-object", "-t", "tree", "/dev/null"], { env })).trim(), commit: null };
+  }
+  let commit = head;
+  if (base) {
+    let target;
+    try {
+      target = (await git(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${base}^{commit}`], { env })).trim();
+    } catch {
+      throw new SnapshotError("git", `\`${base}\` is not a commit in this repository`);
+    }
+    commit = (await git(root, ["merge-base", head, target], { env })).trim();
+  }
+  const tree = (await git(root, ["rev-parse", `${commit}^{tree}`], { env })).trim();
+  return { tree, commit };
+}
 async function gitIgnoredPaths(root, { env = process.env } = {}) {
   const out = await git(root, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"], { env });
   return out.split("\0").filter(Boolean);
@@ -140,6 +161,7 @@ export {
   changedFiles,
   gitIgnoredPaths,
   gitTopLevel,
+  reviewBaseTree,
   snapshotTree,
   turnDiff
 };
