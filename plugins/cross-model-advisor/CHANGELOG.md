@@ -6,6 +6,15 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.6
+
+- **Short credentials are redacted.** A name ending in a credential word
+  (`GITHUB_TOKEN`, `DB_PASSWORD`, `CLIENT_SECRET`) now has its value redacted
+  whatever its length, so `DB_PASSWORD=hunter2` no longer passes. Names that
+  only contain the word (`MAX_TOKENS`, `TOKEN_LIMIT`) keep the 8-character
+  rule, and comparisons like `GITHUB_TOKEN === undefined` are left alone.
+  Found by the plugin's own advisor reviewing the 2.1.4 change.
+
 ## 2.1.5
 
 - **Large turns get reviewed.** A review could send at most 60,000 characters,

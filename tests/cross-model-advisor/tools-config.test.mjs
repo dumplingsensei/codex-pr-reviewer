@@ -904,13 +904,20 @@ describe("createReviewTools confinement", () => {
         "echo ghp_abcdefghijklmnopqrstuvwxyz0123456789",
         "const MAX_TOKENS = 1500;",
         "const secretList = secrets.filter(Boolean);",
+        "DB_PASSWORD=hunter2",
+        "NPM_TOKEN=12345678",
+        "TOKEN_LIMIT = 4096",
+        "if (GITHUB_TOKEN === undefined) fail();",
         ""
       ].join("\n")
     );
     const body = await (await createReviewTools({ root })).call("read", { path: "setup.sh" });
-    assert.doesNotMatch(body, /ghp_short456|wJalrXUtnFEMIK7MDENG|ghp_abcdefghij/);
+    assert.doesNotMatch(body, /ghp_short456|wJalrXUtnFEMIK7MDENG|ghp_abcdefghij|hunter2|12345678/);
     assert.match(body, /GITHUB_TOKEN=\[redacted\]/);
+    assert.match(body, /DB_PASSWORD=\[redacted\]/);
     assert.match(body, /MAX_TOKENS = 1500;/);
+    assert.match(body, /TOKEN_LIMIT = 4096/);
+    assert.match(body, /if \(GITHUB_TOKEN === undefined\) fail\(\);/);
     assert.match(body, /const secretList = secrets\.filter\(Boolean\);/);
   });
 
