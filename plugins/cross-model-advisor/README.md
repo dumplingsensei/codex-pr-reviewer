@@ -20,7 +20,7 @@ It does not copy OMP's prompts or vendor its agent framework.
 | `/cross-model-advisor:review [base-ref]` | Review uncommitted changes, or everything since a ref's merge base, with the same advisors and rules as the gate. Reports findings; never blocks or edits. Works with the gate on or off. |
 | `/cross-model-advisor:status` | Show whether the gate is on, the last review (outcome, round, every finding with evidence, each advisor's result), the last turn that was skipped and why, and per-advisor usage and errors. |
 | `/cross-model-advisor:doctor` | Check the runtime, configuration, git, key-variable presence, advisor availability, and bundle. No model request, token refresh, or login. |
-| `/cross-model-advisor:setup` | Print the terminal command for the settings menu. Does not open a TTY inside Claude or edit configuration. |
+| `/cross-model-advisor:setup` | Add or change advisors and gate settings through Claude Code's question menu, previewing each change and saving only on your confirmation; or print the terminal command for the full menu. |
 | `/cross-model-advisor:login [provider-slot]` | Choose a configured OAuth slot when no argument is supplied, or name one directly. Get its terminal login command; never paste tokens or callback URLs into Claude. |
 | `/cross-model-advisor:logout <provider-slot>` | Remove that slot's local OAuth credential. This does not revoke the provider-side grant. |
 
@@ -94,8 +94,8 @@ are ordinary loose objects in your repository's object store, which
 
 ## Configuration
 
-`/cross-model-advisor:setup` prints a safely quoted command for **your own
-terminal**. It does not open the menu inside Claude or edit configuration.
+`/cross-model-advisor:setup` asks in Claude Code, previews, and saves only on
+your confirmation; for custom endpoints it prints a command for **your own terminal**:
 
 ```
 node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" menu-command

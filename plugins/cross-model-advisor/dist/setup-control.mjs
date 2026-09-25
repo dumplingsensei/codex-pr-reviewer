@@ -95717,7 +95717,7 @@ function sanitizeText(text, secrets = []) {
 }
 
 // ../../plugins/cross-model-advisor/src/setup-store.mjs
-var USAGE = "usage: setup-control.mjs catalog|models <provider-id>|save";
+var USAGE = "usage: setup-control.mjs catalog|summary|models <provider-id>|efforts <provider-id> <api|oauth> <model>|save|apply [--dry-run]";
 var SAVE_KEYS = Object.freeze(["revision", "config"]);
 var DEFAULT_MODEL_LIMIT = 20;
 var MAX_MODEL_LIMIT = 40;
@@ -95810,9 +95810,22 @@ function parseCount(raw, label) {
 }
 function parseSetupArgv(argv) {
   const command = argv[0];
-  if (command === "catalog" || command === "save") {
+  if (command === "catalog" || command === "save" || command === "summary") {
     if (argv.length !== 1) fail3("usage", USAGE);
     return { command };
+  }
+  if (command === "apply") {
+    if (argv.length === 1) return { command, dryRun: false };
+    if (argv.length === 2 && argv[1] === "--dry-run") return { command, dryRun: true };
+    fail3("usage", USAGE);
+  }
+  if (command === "efforts") {
+    const [, providerId2, kind, model] = argv;
+    if (argv.length !== 4 || !isSupportedProviderId(providerId2 ?? "") || kind !== "api" && kind !== "oauth") {
+      fail3("usage", USAGE);
+    }
+    if (typeof model !== "string" || model.length === 0 || model.length > MAX_QUERY_CHARS) fail3("usage", USAGE);
+    return { command, providerId: providerId2, kind, model };
   }
   if (command !== "models") fail3("usage", USAGE);
   const providerId = argv[1];
@@ -96142,6 +96155,183 @@ async function saveConfig(payload, options = {}) {
     };
   });
 }
+var ROLE_PRESETS = Object.freeze([
+  Object.freeze({
+    role: "correctness",
+    instructions: "Look for observable correctness failures and missed edge cases."
+  }),
+  Object.freeze({
+    role: "security",
+    instructions: "Focus only on security and trust boundaries; another advisor covers general correctness. Treat anything from outside the user's control as hostile: repository and pull request contents (including .gitattributes and config files), model output, environment variables, and network responses. Look for untrusted data reaching a shell, subprocess, git command, file path, or model prompt; secrets or credentials leaving the machine or landing in logs, errors, or loosely permissioned files; checks that run after the risky step or can be raced; and failure paths that fail open where they should fail closed. Report only what a concrete input could exploit, not hardening wishes or style."
+  }),
+  Object.freeze({
+    role: "tests-and-claims",
+    instructions: "Focus on whether the change is proven, not on finding new bugs. Check that each behavior change has a test that would fail without it, that tests cover the edge the change is about, and that claims in Claude's final message (tests added, cases handled, versions bumped) match the diff. A test that passes whether or not the fix is present is a concern."
+  })
+]);
+var APPLY_KEYS = Object.freeze(["revision", "change"]);
+var ADVISOR_SET_KEYS = Object.freeze(["model", "reasoningEffort", "instructions", "enabled"]);
+var GATE_SET_KEYS = Object.freeze(["mode", "maxRounds", "autoOn", "skipWhenOnly"]);
+var TERMINAL_ONLY = "Custom OpenAI-compatible endpoints are set up in the terminal menu, where the URL and model metadata are entered.";
+function summarizeSetup(state, providers) {
+  const config = state.config;
+  const slots = config ? Object.entries(config.providers).map(([slot, entry]) => ({
+    slot,
+    provider: entry.provider,
+    kind: entry.kind,
+    ...entry.apiKeyEnv ? { apiKeyEnv: entry.apiKeyEnv } : {}
+  })) : [];
+  return {
+    ok: true,
+    path: state.path,
+    revision: state.revision,
+    configError: state.configError,
+    advisors: (config?.advisors ?? []).map((advisor) => ({
+      name: advisor.name,
+      slot: advisor.provider,
+      provider: config.providers[advisor.provider]?.provider,
+      model: advisor.model,
+      reasoningEffort: advisor.reasoningEffort,
+      enabled: advisor.enabled !== false,
+      instructions: advisor.instructions
+    })),
+    slots,
+    gate: config?.gate ?? { mode: "block", maxRounds: 2 },
+    providers: providers.filter((entry) => entry.id !== "openai-compatible"),
+    presets: ROLE_PRESETS
+  };
+}
+function parseApplyPayload(raw) {
+  const text = raw.charCodeAt(0) === 65279 ? raw.slice(1) : raw;
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    fail3("input", "Apply input is not valid JSON.");
+  }
+  if (!isPlainObject2(parsed) || Object.keys(parsed).some((key) => !APPLY_KEYS.includes(key))) {
+    fail3("input", "Apply input must be { revision, change }.");
+  }
+  if (!("revision" in parsed) || !isPlainObject2(parsed.change)) fail3("input", "Apply input must be { revision, change }.");
+  return { revision: parsed.revision, change: parsed.change };
+}
+function assertOnlyKeys(value, allowed, label) {
+  if (!isPlainObject2(value)) fail3("input", `${label} must be an object.`);
+  for (const key of Object.keys(value)) {
+    if (!allowed.includes(key)) fail3("input", `${label} has an unknown key: ${sanitizeText(key).slice(0, 64)}.`);
+  }
+}
+function withChange(config, change) {
+  const next = config ? structuredClone(config) : { version: 2, providers: {}, advisors: [], exclude: [], limits: {} };
+  next.version = 2;
+  const advisorNamed = (name) => next.advisors.find((advisor) => advisor.name === name);
+  switch (change.op) {
+    case "add-advisor": {
+      assertOnlyKeys(change, ["op", "advisor", "slot"], "add-advisor");
+      assertOnlyKeys(change.advisor, ["name", "provider", "model", "instructions", "reasoningEffort", "enabled"], "advisor");
+      if (advisorNamed(change.advisor.name)) fail3("config", `An advisor named ${sanitizeText(String(change.advisor.name))} already exists.`);
+      if (change.slot !== void 0) {
+        assertOnlyKeys(change.slot, ["id", "kind", "provider", "apiKeyEnv"], "slot");
+        if (change.slot.provider === "openai-compatible") fail3("config", TERMINAL_ONLY);
+        if (Object.hasOwn(next.providers, change.slot.id)) fail3("config", `Provider slot ${sanitizeText(String(change.slot.id))} already exists; use it instead.`);
+        if (change.advisor.provider !== change.slot.id) fail3("input", "advisor.provider must name the new slot.");
+        const { id, ...entry } = change.slot;
+        next.providers[id] = entry;
+      }
+      next.advisors.push({ enabled: true, reasoningEffort: "default", ...change.advisor });
+      break;
+    }
+    case "update-advisor": {
+      assertOnlyKeys(change, ["op", "name", "set"], "update-advisor");
+      assertOnlyKeys(change.set, ADVISOR_SET_KEYS, "set");
+      const advisor = advisorNamed(change.name);
+      if (!advisor) fail3("config", `No advisor named ${sanitizeText(String(change.name))}.`);
+      Object.assign(advisor, change.set);
+      break;
+    }
+    case "remove-advisor": {
+      assertOnlyKeys(change, ["op", "name"], "remove-advisor");
+      if (!advisorNamed(change.name)) fail3("config", `No advisor named ${sanitizeText(String(change.name))}.`);
+      next.advisors = next.advisors.filter((advisor) => advisor.name !== change.name);
+      break;
+    }
+    case "set-gate": {
+      assertOnlyKeys(change, ["op", "gate"], "set-gate");
+      assertOnlyKeys(change.gate, GATE_SET_KEYS, "gate");
+      next.gate = { ...next.gate ?? { mode: "block", maxRounds: 2 }, ...change.gate };
+      for (const key of ["autoOn", "skipWhenOnly"]) {
+        if (next.gate[key] === null || Array.isArray(next.gate[key]) && next.gate[key].length === 0) delete next.gate[key];
+      }
+      break;
+    }
+    default:
+      fail3("input", "change.op must be add-advisor, update-advisor, remove-advisor, or set-gate.");
+  }
+  return next;
+}
+function describeChange(before, after) {
+  const lines = [];
+  const show = (value) => typeof value === "string" ? JSON.stringify(value.length > 120 ? `${value.slice(0, 117)}...` : value) : JSON.stringify(value);
+  for (const [slot, entry] of Object.entries(after.providers)) {
+    if (!before?.providers?.[slot]) {
+      lines.push(`add provider slot ${slot}: ${entry.provider} (${entry.kind}${entry.apiKeyEnv ? `, key from $${entry.apiKeyEnv}` : ""})`);
+    }
+  }
+  const was = new Map((before?.advisors ?? []).map((advisor) => [advisor.name, advisor]));
+  for (const advisor of after.advisors) {
+    const old = was.get(advisor.name);
+    if (!old) {
+      lines.push(`add advisor ${advisor.name}: ${advisor.provider} · ${advisor.model} · effort ${advisor.reasoningEffort}${advisor.enabled ? "" : " · disabled"}`);
+      lines.push(`  instructions: ${show(advisor.instructions)}`);
+      continue;
+    }
+    for (const key of ADVISOR_SET_KEYS) {
+      if (JSON.stringify(old[key]) !== JSON.stringify(advisor[key])) {
+        lines.push(`advisor ${advisor.name}: ${key} ${show(old[key])} → ${show(advisor[key])}`);
+      }
+    }
+    was.delete(advisor.name);
+  }
+  for (const name of was.keys()) lines.push(`remove advisor ${name}`);
+  const gateBefore = before?.gate ?? { mode: "block", maxRounds: 2 };
+  for (const key of GATE_SET_KEYS) {
+    if (JSON.stringify(gateBefore[key]) !== JSON.stringify(after.gate?.[key])) {
+      lines.push(`gate.${key}: ${show(gateBefore[key] ?? null)} → ${show(after.gate?.[key] ?? null)}`);
+    }
+  }
+  return lines;
+}
+async function applyChange(payload, options = {}) {
+  const env2 = options.env ?? process.env;
+  const state = await readConfigState({ env: env2 });
+  if (state.configError) fail3("config", `${state.configError} Fix it in the terminal menu first.`);
+  if (payload.revision !== state.revision) fail3("revision", "The configuration changed since summary. Run summary again and retry.");
+  const next = withChange(state.config, payload.change);
+  let validated;
+  try {
+    validated = validateConfig(next);
+  } catch (error) {
+    fail3("config", sanitizeText(error instanceof Error ? error.message : "invalid configuration"));
+  }
+  const createProviderFn = options.createBuiltinProvider ?? defaultCreateBuiltinProvider;
+  for (const advisor of validated.advisors) {
+    const slot = validated.providers[advisor.provider];
+    if (!slot || slot.provider === "openai-compatible") continue;
+    let known = false;
+    try {
+      known = offlineCatalogModels(await createProviderFn(slot.provider)).some((model) => model.id === advisor.model);
+    } catch {
+      fail3("catalog", STATIC_ERRORS.catalog);
+    }
+    if (!known) fail3("config", `${sanitizeText(advisor.model)} is not a ${slot.provider} model. Search with models ${slot.provider} --q <text>.`);
+  }
+  await assertAdvisorReasoning(validated, options.validateReasoning ?? defaultValidateReasoning);
+  const changes = describeChange(state.config, validated);
+  if (changes.length === 0) fail3("input", "That change leaves the configuration as it is.");
+  if (options.dryRun) return { ok: true, dryRun: true, revision: state.revision, changes };
+  const saved = await saveConfig({ revision: payload.revision, config: validated }, { env: env2, validateReasoning: options.validateReasoning });
+  return { ok: true, dryRun: false, path: saved.path, revision: saved.revision, changes };
+}
 function writeJson(stdout, value) {
   stdout.write(`${JSON.stringify(value)}
 `);
@@ -96162,6 +96352,29 @@ async function runSetup(options = {}) {
       configError: state.configError,
       providers: await getProviderCatalog({ createBuiltinProvider: createProviderFn })
     });
+    return 0;
+  }
+  if (parsed.command === "summary") {
+    writeJson(stdout, summarizeSetup(await readConfigState({ env: env2 }), await getProviderCatalog({ createBuiltinProvider: createProviderFn })));
+    return 0;
+  }
+  if (parsed.command === "efforts") {
+    const { getReasoningChoices: getReasoningChoices2 } = await Promise.resolve().then(() => (init_reasoning(), reasoning_exports));
+    const slot = { kind: parsed.kind, provider: parsed.providerId, ...parsed.kind === "api" ? { apiKeyEnv: "UNUSED" } : {} };
+    writeJson(stdout, { ok: true, ...await getReasoningChoices2(slot, parsed.model) });
+    return 0;
+  }
+  if (parsed.command === "apply") {
+    const raw2 = await readBoundedStdin(options.stdin ?? process.stdin);
+    writeJson(
+      stdout,
+      await applyChange(parseApplyPayload(raw2), {
+        env: env2,
+        dryRun: parsed.dryRun,
+        createBuiltinProvider: createProviderFn,
+        validateReasoning: options.validateReasoning
+      })
+    );
     return 0;
   }
   if (parsed.command === "models") {
@@ -97452,7 +97665,7 @@ async function runSetupMenu(options = {}) {
 }
 
 // ../../plugins/cross-model-advisor/src/setup-control.mjs
-var USAGE2 = "usage: setup-control.mjs catalog|models <provider-id>|save|menu|menu-command";
+var USAGE2 = "usage: setup-control.mjs catalog|summary|models <provider-id>|efforts <provider-id> <api|oauth> <model>|save|apply [--dry-run]|menu|menu-command";
 var MAX_ERROR_CHARS2 = 500;
 function writeFailure2(stderr, error) {
   if (error instanceof SetupError) {
@@ -97499,7 +97712,7 @@ async function main2(argv = process.argv.slice(2), env2 = process.env) {
     }
     return;
   }
-  if (command === "catalog" || command === "models" || command === "save") {
+  if (["catalog", "summary", "models", "efforts", "save", "apply"].includes(command)) {
     await main(argv, env2);
     return;
   }

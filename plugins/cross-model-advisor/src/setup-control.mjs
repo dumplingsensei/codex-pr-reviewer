@@ -12,7 +12,8 @@ import { runSetupMenu } from "./setup-menu.mjs";
 import { sanitizeText } from "./session/sanitize.mjs";
 import { formatMenuCommand, resolvedPath } from "./terminal-command.mjs";
 
-const USAGE = "usage: setup-control.mjs catalog|models <provider-id>|save|menu|menu-command";
+const USAGE =
+  "usage: setup-control.mjs catalog|summary|models <provider-id>|efforts <provider-id> <api|oauth> <model>|save|apply [--dry-run]|menu|menu-command";
 const MAX_ERROR_CHARS = 500;
 
 /**
@@ -73,7 +74,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     return;
   }
 
-  if (command === "catalog" || command === "models" || command === "save") {
+  if (["catalog", "summary", "models", "efforts", "save", "apply"].includes(command)) {
     await storeMain(argv, env);
     return;
   }

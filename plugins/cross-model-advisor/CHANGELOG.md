@@ -6,6 +6,18 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.10
+
+- **Setup in Claude Code.** `/cross-model-advisor:setup` now adds and changes
+  advisors (account, model, effort, role) and gate settings through Claude
+  Code's question menu instead of printing a terminal command. Each change is
+  one structured `apply` through the helper, previewed with `--dry-run`, and
+  saved only when you choose Save, under the menu's lock and revision check.
+  Key values are never asked for, only variable names. Models must exist in
+  the offline catalog (an unknown id used to pass with effort Default). Custom
+  endpoints and anything else stay in the terminal menu, which setup still
+  prints on request. New helper commands: `summary`, `efforts`, `apply`.
+
 ## 2.1.9
 
 - **Gate settings in the menu.** The settings menu's home screen has a

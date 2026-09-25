@@ -633,3 +633,94 @@ describe("save", () => {
 
 
 });
+
+describe("chat setup: summary and apply", () => {
+  async function run(dir, argv, stdinValue, env = {}) {
+    const stdout = stdoutSink();
+    const stderr = stdoutSink();
+    const code = await runSetup({ argv, env: { ...envFor(dir), ...env }, stdin: stdinOf(stdinValue ?? ""), stdout, stderr }).catch((error) => error);
+    return { code, stdout, stderr };
+  }
+  const summary = async (dir, env) => (await run(dir, ["summary"], "", env)).stdout.json();
+  const apply = (dir, payload, dryRun = false) => run(dir, dryRun ? ["apply", "--dry-run"] : ["apply"], payload);
+
+  it("summarizes advisors, slots, gate, providers, and presets with key names only", async () => {
+    const dir = await scratch("cma-chat-summary-");
+    await fs.writeFile(configPath(dir), JSON.stringify(baseConfig()));
+    const result = await summary(dir, { OPENAI_API_KEY: "sk-live-never-shown" });
+    assert.equal(result.ok, true);
+    assert.equal(typeof result.revision, "string");
+    assert.deepEqual(result.advisors.map((advisor) => [advisor.name, advisor.slot, advisor.provider, advisor.model]), [["correctness", "openai-api", "openai", "gpt-4.1"]]);
+    assert.deepEqual(result.slots, [{ slot: "openai-api", provider: "openai", kind: "api", apiKeyEnv: "OPENAI_API_KEY" }]);
+    assert.deepEqual(result.presets.map((preset) => preset.role), ["correctness", "security", "tests-and-claims"]);
+    assert.equal(result.providers.some((entry) => entry.id === "openai-compatible"), false);
+    assert.doesNotMatch(JSON.stringify(result), /sk-live-never-shown/);
+  });
+
+  it("previews a change without writing, then saves it under the same revision", async () => {
+    const dir = await scratch("cma-chat-apply-");
+    await fs.writeFile(configPath(dir), JSON.stringify(baseConfig()));
+    const before = await fs.readFile(configPath(dir), "utf8");
+    const { revision } = await summary(dir);
+    const change = {
+      op: "add-advisor",
+      slot: { id: "gemini-api", kind: "api", provider: "google", apiKeyEnv: "GEMINI_API_KEY" },
+      advisor: { name: "security", provider: "gemini-api", model: "gemini-2.5-pro", instructions: "Focus only on security." }
+    };
+    const preview = await apply(dir, { revision, change }, true);
+    assert.equal(preview.stdout.json().dryRun, true);
+    assert.deepEqual(preview.stdout.json().changes.slice(0, 2), [
+      "add provider slot gemini-api: google (api, key from $GEMINI_API_KEY)",
+      "add advisor security: gemini-api · gemini-2.5-pro · effort default"
+    ]);
+    assert.equal(await fs.readFile(configPath(dir), "utf8"), before);
+
+    const saved = (await apply(dir, { revision, change })).stdout.json();
+    assert.equal(saved.dryRun, false);
+    assert.notEqual(saved.revision, revision);
+    const written = JSON.parse(await fs.readFile(configPath(dir), "utf8"));
+    assert.deepEqual(written.advisors.map((advisor) => advisor.name), ["correctness", "security"]);
+    assert.equal(written.advisors[1].enabled, true);
+    assert.equal((await fs.stat(configPath(dir))).mode & 0o777, 0o600);
+  });
+
+  it("refuses unknown models, custom endpoints, stale revisions, and unknown fields", async () => {
+    const dir = await scratch("cma-chat-refuse-");
+    await fs.writeFile(configPath(dir), JSON.stringify(baseConfig()));
+    const before = await fs.readFile(configPath(dir), "utf8");
+    const { revision } = await summary(dir);
+    const refused = async (payload, pattern) => {
+      const result = await apply(dir, payload, true);
+      assert.ok(result.code instanceof Error, JSON.stringify(payload));
+      assert.match(result.code.message, pattern);
+    };
+    await refused({ revision, change: { op: "update-advisor", name: "correctness", set: { model: "gpt-does-not-exist" } } }, /is not a openai model/);
+    await refused(
+      {
+        revision,
+        change: {
+          op: "add-advisor",
+          slot: { id: "custom", kind: "api", provider: "openai-compatible", apiKeyEnv: "K" },
+          advisor: { name: "x", provider: "custom", model: "m", instructions: "x" }
+        }
+      },
+      /terminal menu/
+    );
+    await refused({ revision: "0".repeat(64), change: { op: "remove-advisor", name: "correctness" } }, /changed since summary/);
+    await refused({ revision, change: { op: "update-advisor", name: "correctness", set: { provider: "elsewhere" } } }, /unknown key: provider/);
+    await refused({ revision, change: { op: "rewrite-everything" } }, /change.op must be/);
+    assert.equal(await fs.readFile(configPath(dir), "utf8"), before);
+  });
+
+  it("set-gate with an empty list removes that key", async () => {
+    const dir = await scratch("cma-chat-gate-");
+    const v2 = baseConfig({ version: 2, gate: { mode: "block", maxRounds: 2, skipWhenOnly: ["*.md"] } });
+    v2.advisors = v2.advisors.map((advisor) => ({ ...advisor, enabled: true, reasoningEffort: "default" }));
+    await fs.writeFile(configPath(dir), JSON.stringify(v2));
+    const { revision } = await summary(dir);
+    const saved = (await apply(dir, { revision, change: { op: "set-gate", gate: { skipWhenOnly: [], mode: "report" } } })).stdout.json();
+    assert.deepEqual(saved.changes, ['gate.mode: "block" → "report"', 'gate.skipWhenOnly: ["*.md"] → null']);
+    const written = JSON.parse(await fs.readFile(configPath(dir), "utf8"));
+    assert.equal("skipWhenOnly" in written.gate, false);
+  });
+});

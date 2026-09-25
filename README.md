@@ -51,7 +51,7 @@ claude --plugin-dir ./plugins/cross-model-advisor
 | `/cross-model-advisor:review [base-ref]` | Review uncommitted changes, or everything since a ref's merge base, with the same advisors and rules as the gate. Reports findings; never blocks or edits. Works with the gate on or off. |
 | `/cross-model-advisor:status` | Show the last review (outcome, round, findings with evidence, each advisor's result), the last skipped turn and why, and per-advisor usage and errors. |
 | `/cross-model-advisor:doctor` | Check the runtime, configuration, git, key-variable presence, advisor availability, and bundle. No model request, token refresh, or login. |
-| `/cross-model-advisor:setup` | Print the exact terminal command for the settings menu. Does not open the menu inside Claude or edit configuration. |
+| `/cross-model-advisor:setup` | Add or change advisors and gate settings through Claude Code's question menu; each change is previewed and saved only when you confirm. Custom endpoints and the full menu: it prints the terminal command. |
 | `/cross-model-advisor:login [provider-slot]` | Choose a configured OAuth provider, or name its slot directly, then get the terminal login command. Complete authorization in your terminal, not in Claude's transcript. |
 | `/cross-model-advisor:logout <provider-slot>` | Delete that slot's local OAuth credential. |
 
@@ -66,7 +66,7 @@ node "${CLAUDE_PLUGIN_ROOT}/dist/gate.mjs" doctor --plugin-data "${CLAUDE_PLUGIN
 
 ## Configuration and provider selection
 
-Start with `/cross-model-advisor:setup`: it prints a safely quoted command for your own terminal that opens the settings menu (`CLAUDE_CONFIG_DIR=<dir> node <abs>/setup-control.mjs menu`). Its home actions are **Add advisor**, **Provider accounts**, **Gate settings**, **Save**, and **Quit**. The gate reads the saved file at every Stop, so a save applies from the next reviewed turn in every session. Manual JSON remains supported. Setup neither collects key values nor starts OAuth by itself. When adding API slots or changing key-variable names, export the keys in your own terminal and start a new Claude session: hooks inherit Claude's environment from when it started.
+Start with `/cross-model-advisor:setup`: it asks in Claude Code what to add or change, previews each change, and saves only on your confirmation; for custom endpoints it prints a safely quoted command for your own terminal that opens the settings menu (`CLAUDE_CONFIG_DIR=<dir> node <abs>/setup-control.mjs menu`). Its home actions are **Add advisor**, **Provider accounts**, **Gate settings**, **Save**, and **Quit**. The gate reads the saved file at every Stop, so a save applies from the next reviewed turn in every session. Manual JSON remains supported. Setup neither collects key values nor starts OAuth by itself. When adding API slots or changing key-variable names, export the keys in your own terminal and start a new Claude session: hooks inherit Claude's environment from when it started.
 
 One trusted user file: `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cross-model-advisor.json`. Schema version is `2`. Version-1 files open without being rewritten; the first explicit Save publishes version 2. Unknown keys are rejected. There is no silent default provider or model, and the plugin never uses Claude's current credentials. `gate.mode` is `block` (default: concerns and blockers send Claude back) or `report` (findings are only shown to you); `gate.maxRounds` (default 2) bounds how many times one prompt is sent back.
 
