@@ -24341,12 +24341,11 @@ var openAICompletionsApi = () => lazyApi(() => Promise.resolve().then(() => (ini
 import { createCredentialStore } from "../auth.mjs";
 import { createBuiltinProvider, createCompatibleModel } from "../providers.mjs";
 import { planReasoningCompletion, validateReasoning } from "../reasoning.mjs";
-import { MAX_FINDINGS_PER_REVIEW } from "../session/constants.mjs";
+import { MAX_FINDINGS_PER_REVIEW, REVIEW_CONTEXT_CHARS } from "../session/constants.mjs";
 import { groupHistory } from "../session/history.mjs";
 import { toolSchemas } from "../tools.mjs";
 import { API_PROVIDERS, OAUTH_PROVIDERS } from "../config.mjs";
 var HOST_TOOL_NAMES = new Set(toolSchemas.map((tool) => tool.name));
-var CONTEXT_CHAR_BOUND = 6e4;
 var TOOL_RESULT_HEADROOM_TOKENS = 2048;
 var DEFAULT_MAX_TOOL_CALLS = 8;
 var MAX_ADVISE_CALLS = 2 * MAX_FINDINGS_PER_REVIEW;
@@ -24794,7 +24793,7 @@ function measureChars(value) {
 }
 function contextFits(messages, systemPrompt, model, maxOutputTokens) {
   const chars = measureChars(systemPrompt) + measureChars(messages);
-  if (chars > CONTEXT_CHAR_BOUND) return false;
+  if (chars > REVIEW_CONTEXT_CHARS) return false;
   const estimatedTokens = Math.ceil(chars / 4);
   const outputRoom = Math.min(maxOutputTokens, model.maxTokens);
   const available = model.contextWindow - outputRoom - TOOL_RESULT_HEADROOM_TOKENS;
@@ -25140,6 +25139,12 @@ ${WATCHDOG_CLOSE}` : "";
         try {
           const result = await tools.call(call.name, args);
           messages.push(toolResultMessage(call, result, false));
+          if (!evictUntilFits(messages, currentUser, system, model, maxOutputTokens)) {
+            messages.pop();
+            if (typeof tools.withdrawLastResult === "function") tools.withdrawLastResult();
+            const withheld = `Result not shown: its ${measureChars(result)} characters do not fit the remaining review context. Read a narrower range with offset and limit, or search for something more specific.`;
+            messages.push(toolResultMessage(call, withheld, true));
+          }
         } catch (error) {
           if (signal?.aborted || error instanceof Error && error.name === "AbortError") {
             fail(abortCode(signal), "review aborted");

@@ -99349,6 +99349,9 @@ async function readOwner(lockPath) {
     return { kind: "owner", pid, token: parsed.token };
   } catch (error) {
     if (error instanceof AuthError && error.code === "symlink") throw error;
+    if (error?.code === "ENOENT" || !sameIdent(st, await lstatOrNull(ownerFile).catch(() => null))) {
+      return { kind: "missing" };
+    }
     return { kind: "malformed" };
   }
 }

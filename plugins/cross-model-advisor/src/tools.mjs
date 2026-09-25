@@ -433,6 +433,8 @@ export async function createReviewTools({
   const findingLimit = Number.isInteger(maxFindings) && maxFindings > 0 ? maxFindings : 1;
   /** @type {{ severity: string, note: string, evidence: object[] }[]} */
   const staged = [];
+  /** Restores `reads` to before the latest call, if that call was a read. */
+  let undoLastRead = null;
 
   function checkAbort() {
     if (signal?.aborted) {
@@ -651,6 +653,8 @@ export async function createReviewTools({
     const shown = new Set();
     for (let i = 0; i < bounded.kept.length; i += 1) shown.add(offset + i);
     const prev = reads.get(located.relPosix);
+    const before = prev ? { hash: prev.hash, lines: new Set(prev.lines) } : null;
+    undoLastRead = () => (before ? reads.set(located.relPosix, before) : reads.delete(located.relPosix));
     if (prev && prev.hash === opened.hash) {
       for (const line of shown) prev.lines.add(line);
     } else {
@@ -959,6 +963,7 @@ export async function createReviewTools({
   }
 
   async function call(name, args) {
+    undoLastRead = null;
     checkAbort();
     if (!(await rootStillValid())) return denied();
     if (name === "read") return toolRead(args);
@@ -987,6 +992,11 @@ export async function createReviewTools({
   return {
     call,
     isFresh,
+    /** The host withheld the latest result from the model: its lines are no longer evidence. */
+    withdrawLastResult() {
+      undoLastRead?.();
+      undoLastRead = null;
+    },
     /** The same exclusion rules the read/list/search tools apply. */
     excluded: (relPosix) => isExcluded(relPosix, false),
     get candidate() {

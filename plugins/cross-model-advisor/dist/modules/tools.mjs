@@ -1178,6 +1178,7 @@ async function createReviewTools({
   const reads = /* @__PURE__ */ new Map();
   const findingLimit = Number.isInteger(maxFindings) && maxFindings > 0 ? maxFindings : 1;
   const staged = [];
+  let undoLastRead = null;
   function checkAbort() {
     if (signal?.aborted) {
       const reason = signal.reason;
@@ -1378,6 +1379,8 @@ async function createReviewTools({
     const shown = /* @__PURE__ */ new Set();
     for (let i = 0; i < bounded.kept.length; i += 1) shown.add(offset + i);
     const prev = reads.get(located.relPosix);
+    const before = prev ? { hash: prev.hash, lines: new Set(prev.lines) } : null;
+    undoLastRead = () => before ? reads.set(located.relPosix, before) : reads.delete(located.relPosix);
     if (prev && prev.hash === opened.hash) {
       for (const line of shown) prev.lines.add(line);
     } else {
@@ -1663,6 +1666,7 @@ ${TRUNCATED_MARKER}` : TRUNCATED_MARKER;
     return true;
   }
   async function call(name, args) {
+    undoLastRead = null;
     checkAbort();
     if (!await rootStillValid()) return denied();
     if (name === "read") return toolRead(args);
@@ -1689,6 +1693,11 @@ ${TRUNCATED_MARKER}` : TRUNCATED_MARKER;
   return {
     call,
     isFresh,
+    /** The host withheld the latest result from the model: its lines are no longer evidence. */
+    withdrawLastResult() {
+      undoLastRead?.();
+      undoLastRead = null;
+    },
     /** The same exclusion rules the read/list/search tools apply. */
     excluded: (relPosix) => isExcluded(relPosix, false),
     get candidate() {

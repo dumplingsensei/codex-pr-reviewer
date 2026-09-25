@@ -439,6 +439,11 @@ async function readOwner(lockPath) {
     return { kind: "owner", pid, token: parsed.token };
   } catch (error) {
     if (error instanceof AuthError && error.code === "symlink") throw error;
+    // Released or re-acquired between the lstat and the read: the lock is
+    // changing hands, not stale, so wait like any other missing owner.
+    if (error?.code === "ENOENT" || !sameIdent(st, await lstatOrNull(ownerFile).catch(() => null))) {
+      return { kind: "missing" };
+    }
     return { kind: "malformed" };
   }
 }

@@ -6,6 +6,20 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.5
+
+- **Large turns get reviewed.** A review could send at most 60,000 characters,
+  but the diff alone may be 61,440, so large turns failed with `context-limit`
+  before the advisor saw anything. The limit is now 240,000 (the model's own
+  window still applies), and a test pins the diff, request, and final message
+  to half of it. A read too large for what remains is withheld with a note to
+  read a narrower range, and its lines stop counting as evidence.
+- **No false stale-lock errors.** When a credential lock was released just as
+  another process checked it, the waiter read a vanished owner file as
+  corrupt and failed, telling you to delete a lock that was already gone. It
+  now waits and retries. Seen as 2 to 5 failures per 640 updates across 8
+  processes, and as a failed CI run on 2.1.4.
+
 ## 2.1.4
 
 - **Git-ignored files.** Advisor tools now exclude every path git ignores,

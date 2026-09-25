@@ -698,35 +698,63 @@ test("old history groups that miss the model allowance are evicted", async (t) =
   assert.equal(tools.candidate, null);
 });
 
-test("a large tool result cannot overflow the next provider call", async (t) => {
-  let calls = 0;
-  const harness = await startServer(async (_record, res) => {
-    calls += 1;
-    writeSse(
-      res,
-      chunk({
-        toolCalls: [{ id: "call_read", name: "read", arguments: JSON.stringify({ path: "src/app.mjs" }) }]
-      })
-    );
+test("a tool result too large for the context is withheld and the review continues", async (t) => {
+  const harness = await startServer(async (record, res) => {
+    if (harness.requests.length === 1) {
+      writeSse(res, chunk({ toolCalls: [{ id: "call_read", name: "read", arguments: JSON.stringify({ path: "src/app.mjs" }) }] }));
+      return;
+    }
+    writeSse(res, chunk({ text: "done" }));
   });
   t.after(() => harness.close());
   const tools = makeTools();
   const original = tools.call.bind(tools);
+  let withdrawn = 0;
+  tools.withdrawLastResult = () => {
+    withdrawn += 1;
+  };
   tools.call = async (name, args) => {
     if (name === "read") return "x".repeat(64 * 1024);
     return original(name, args);
   };
-  await assert.rejects(
-    () =>
-      reviewApi({
-        provider: compatibleProvider(harness.baseUrl),
-        advisor,
-        observations: [{ eventId: "obs_1", phase: "prompt", userText: "x" }],
-        tools,
-        env: { [KEY_ENV]: CONFIGURED_KEY }
-      }),
-    (error) => codeOf(error) === "context-limit" && calls === 1 && tools.candidate === null
-  );
+  await reviewApi({
+    provider: compatibleProvider(harness.baseUrl),
+    advisor,
+    observations: [{ eventId: "obs_1", phase: "prompt", userText: "x" }],
+    tools,
+    env: { [KEY_ENV]: CONFIGURED_KEY }
+  });
+  assert.equal(harness.requests.length, 2);
+  const second = JSON.stringify(harness.requests[1].body.messages);
+  assert.match(second, /Result not shown: its 65536 characters do not fit the remaining review context/);
+  assert.doesNotMatch(second, /x{1000}/);
+  assert.equal(withdrawn, 1);
+});
+
+test("a maximum-size turn still reaches a large-window model, with room to read", async (t) => {
+  const harness = await startServer(async (_record, res) => {
+    if (harness.requests.length <= 2) {
+      const n = harness.requests.length;
+      writeSse(res, chunk({ toolCalls: [{ id: `call_read_${n}`, name: "read", arguments: JSON.stringify({ path: `src/${n}.mjs` }) }] }));
+      return;
+    }
+    writeSse(res, chunk({ text: "done" }));
+  });
+  t.after(() => harness.close());
+  const tools = makeTools();
+  const original = tools.call.bind(tools);
+  tools.call = async (name, args) => (name === "read" ? "r".repeat(64 * 1024) : original(name, args));
+  const files = Array.from({ length: 4 }, (_, i) => ({ path: `src/f${i}.js`, status: "M", eventId: `diff:src/f${i}.js`, text: "d".repeat(15 * 1024) }));
+  await reviewApi({
+    provider: compatibleProvider(harness.baseUrl, { contextWindow: 400_000 }),
+    advisor,
+    observations: [],
+    turn: { request: "q".repeat(8 * 1024), final: "f".repeat(8 * 1024), round: 1, previous: [], diff: { files, omitted: [], unshown: [] } },
+    tools,
+    env: { [KEY_ENV]: CONFIGURED_KEY }
+  });
+  assert.equal(harness.requests.length, 3);
+  assert.doesNotMatch(JSON.stringify(harness.requests[2].body.messages), /Result not shown/);
 });
 
 test("unknown remote models are config errors", async (t) => {

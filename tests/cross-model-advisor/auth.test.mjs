@@ -116,6 +116,34 @@ test("logout waits for an in-flight locked refresh then removes it", async () =>
   assert.equal(await writer.read("openai-codex"), undefined);
 });
 
+test("a lock released while another process polls it is waited for, not reported stale", async () => {
+  // Between a waiter's lstat of owner.json and its read, the holder can release
+  // the lock. That once read as a malformed owner and failed with stale-lock.
+  // Eight processes contending for one slot hit that window every few hundred
+  // acquisitions.
+  const dir = await scratch("cma-auth-contend-");
+  // A shared start time, so process startup does not stagger the contention.
+  const startAt = Date.now() + 1500;
+  const worker = `
+    const { createCredentialStore } = await import(${JSON.stringify(pathToFileURL(path.join(modules, "auth.mjs")).href)});
+    const store = createCredentialStore({ env: { CLAUDE_CONFIG_DIR: ${JSON.stringify(dir)} }, slot: "codex", provider: "openai-codex" });
+    const errors = [];
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, ${startAt} - Date.now())));
+    for (let i = 0; i < 150; i += 1) {
+      await store.modify("openai-codex", async () => ({ type: "oauth", access: "a" + i, refresh: "r" + i, expires: 1e13 }))
+        .catch((error) => errors.push(error.code));
+    }
+    process.stdout.write(JSON.stringify(errors));
+  `;
+  const { execFile } = await import("node:child_process");
+  const run = () =>
+    new Promise((resolve, reject) =>
+      execFile(process.execPath, ["--input-type=module", "-e", worker], (error, stdout) => (error ? reject(error) : resolve(JSON.parse(stdout))))
+    );
+  const errors = (await Promise.all(Array.from({ length: 8 }, run))).flat();
+  assert.deepEqual(errors, []);
+});
+
 test("locked refresh does not overwrite a later login", async () => {
   const dir = await scratch("cma-auth-login-");
   const a = store(dir);

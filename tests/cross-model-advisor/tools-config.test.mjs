@@ -914,6 +914,21 @@ describe("createReviewTools confinement", () => {
     assert.match(body, /const secretList = secrets\.filter\(Boolean\);/);
   });
 
+  it("lines from a withdrawn read stop counting as evidence", async () => {
+    const root = await scratch("cma-withdraw-");
+    await fs.writeFile(path.join(root, "a.js"), "one\ntwo\nthree\n");
+    const tools = await createReviewTools({ root, maxFindings: 5 });
+    const cite = (line) =>
+      tools.call("advise", { severity: "nit", note: `line ${line} is odd`, evidence: [{ kind: "file", path: "a.js", line, detail: "seen" }] });
+    await tools.call("read", { path: "a.js", limit: 1 });
+    await tools.call("read", { path: "a.js", offset: 2, limit: 2 });
+    tools.withdrawLastResult();
+    assert.equal(await cite(2), "Error: invalid evidence");
+    assert.equal(await cite(1), "staged");
+    tools.withdrawLastResult();
+    assert.equal(await cite(1), "Error: duplicate finding");
+  });
+
   it("rejects a replaced project root when activation identity is pinned", async () => {
     const root = await scratch("cma-ident-");
     await fs.writeFile(path.join(root, "ok.js"), "ORIGINAL_ROOT\n");

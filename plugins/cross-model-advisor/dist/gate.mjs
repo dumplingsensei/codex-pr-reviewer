@@ -90990,6 +90990,7 @@ var CONTROL_COMMANDS = Object.freeze([
 var SEVERITY_ORDER = Object.freeze({ blocker: 0, concern: 1, nit: 2 });
 var MAX_FINDINGS_PER_REVIEW = 5;
 var USER_TEXT_CAP = 8 * 1024;
+var REVIEW_CONTEXT_CHARS = 24e4;
 var MAX_REASON_CHARS = 8e3;
 var MAX_STDIN_BYTES = 1048576;
 var STOP_REVIEW_BUDGET_MS = 27e4;
@@ -91383,6 +91384,9 @@ async function readOwner(lockPath) {
     return { kind: "owner", pid, token: parsed.token };
   } catch (error) {
     if (error instanceof AuthError && error.code === "symlink") throw error;
+    if (error?.code === "ENOENT" || !sameIdent(st, await lstatOrNull(ownerFile).catch(() => null))) {
+      return { kind: "missing" };
+    }
     return { kind: "malformed" };
   }
 }
@@ -94250,6 +94254,7 @@ async function createReviewTools({
   const reads = /* @__PURE__ */ new Map();
   const findingLimit = Number.isInteger(maxFindings) && maxFindings > 0 ? maxFindings : 1;
   const staged = [];
+  let undoLastRead = null;
   function checkAbort() {
     if (signal?.aborted) {
       const reason = signal.reason;
@@ -94450,6 +94455,8 @@ async function createReviewTools({
     const shown = /* @__PURE__ */ new Set();
     for (let i2 = 0; i2 < bounded.kept.length; i2 += 1) shown.add(offset + i2);
     const prev = reads.get(located.relPosix);
+    const before = prev ? { hash: prev.hash, lines: new Set(prev.lines) } : null;
+    undoLastRead = () => before ? reads.set(located.relPosix, before) : reads.delete(located.relPosix);
     if (prev && prev.hash === opened.hash) {
       for (const line of shown) prev.lines.add(line);
     } else {
@@ -94735,6 +94742,7 @@ ${TRUNCATED_MARKER}` : TRUNCATED_MARKER;
     return true;
   }
   async function call(name, args) {
+    undoLastRead = null;
     checkAbort();
     if (!await rootStillValid()) return denied();
     if (name === "read") return toolRead(args);
@@ -94761,6 +94769,11 @@ ${TRUNCATED_MARKER}` : TRUNCATED_MARKER;
   return {
     call,
     isFresh,
+    /** The host withheld the latest result from the model: its lines are no longer evidence. */
+    withdrawLastResult() {
+      undoLastRead?.();
+      undoLastRead = null;
+    },
     /** The same exclusion rules the read/list/search tools apply. */
     excluded: (relPosix) => isExcluded(relPosix, false),
     get candidate() {
@@ -94778,7 +94791,6 @@ ${TRUNCATED_MARKER}` : TRUNCATED_MARKER;
 
 // ../../plugins/cross-model-advisor/src/backends/api.mjs
 var HOST_TOOL_NAMES = new Set(toolSchemas.map((tool) => tool.name));
-var CONTEXT_CHAR_BOUND = 6e4;
 var TOOL_RESULT_HEADROOM_TOKENS = 2048;
 var DEFAULT_MAX_TOOL_CALLS = 8;
 var MAX_ADVISE_CALLS = 2 * MAX_FINDINGS_PER_REVIEW;
@@ -95226,7 +95238,7 @@ function measureChars(value) {
 }
 function contextFits(messages, systemPrompt, model, maxOutputTokens) {
   const chars = measureChars(systemPrompt) + measureChars(messages);
-  if (chars > CONTEXT_CHAR_BOUND) return false;
+  if (chars > REVIEW_CONTEXT_CHARS) return false;
   const estimatedTokens = Math.ceil(chars / 4);
   const outputRoom = Math.min(maxOutputTokens, model.maxTokens);
   const available = model.contextWindow - outputRoom - TOOL_RESULT_HEADROOM_TOKENS;
@@ -95572,6 +95584,12 @@ ${WATCHDOG_CLOSE}` : "";
         try {
           const result = await tools.call(call.name, args);
           messages.push(toolResultMessage(call, result, false));
+          if (!evictUntilFits(messages, currentUser, system, model, maxOutputTokens)) {
+            messages.pop();
+            if (typeof tools.withdrawLastResult === "function") tools.withdrawLastResult();
+            const withheld = `Result not shown: its ${measureChars(result)} characters do not fit the remaining review context. Read a narrower range with offset and limit, or search for something more specific.`;
+            messages.push(toolResultMessage(call, withheld, true));
+          }
         } catch (error) {
           if (signal?.aborted || error instanceof Error && error.name === "AbortError") {
             fail3(abortCode(signal), "review aborted");

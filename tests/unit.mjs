@@ -1045,6 +1045,11 @@ const advisorDir = path.join(root, "plugins", "cross-model-advisor");
 const { STOP_REVIEW_BUDGET_MS } = await import(path.join(advisorDir, "src", "session", "constants.mjs"));
 const stopTimeout = readJson(path.join(advisorDir, "hooks", "hooks.json")).hooks.Stop[0].hooks[0].timeout;
 eq("the budget leaves the Stop hook 30 seconds", stopTimeout * 1000 - STOP_REVIEW_BUDGET_MS, 30_000);
+// The first request carries the whole diff plus the request and final message;
+// at most half the review context, so reading always has room.
+const { REVIEW_CONTEXT_CHARS, USER_TEXT_CAP } = await import(path.join(advisorDir, "src", "session", "constants.mjs"));
+const { MAX_TOTAL_DIFF_CHARS } = await import(path.join(advisorDir, "src", "snapshot.mjs"));
+eq("the diff and turn text fit in half the review context", MAX_TOTAL_DIFF_CHARS + 2 * USER_TEXT_CAP <= REVIEW_CONTEXT_CHARS / 2, true);
 
 console.log(failures === 0 ? "\nAll unit tests passed." : `\n${failures} test(s) failed.`);
 process.exitCode = failures === 0 ? 0 : 1;

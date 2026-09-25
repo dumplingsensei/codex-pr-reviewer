@@ -22,6 +22,11 @@ export const MAX_FINDINGS_PER_REVIEW = 5;
 export const USER_TEXT_CAP = 8 * 1024;
 /** Characters of provider context kept during one review's tool loop. */
 export const HISTORY_CHAR_BOUND = 60_000;
+/**
+ * Characters one review may send a provider: system prompt, turn, and every
+ * tool result so far. The model's own context window can lower it further.
+ */
+export const REVIEW_CONTEXT_CHARS = 240_000;
 /** Characters of findings handed back to Claude in a block reason. */
 export const MAX_REASON_CHARS = 8_000;
 export const MAX_STDIN_BYTES = 1_048_576;
