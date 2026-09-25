@@ -146,7 +146,7 @@ Compatible endpoints still require explicit URL and model metadata.
   stay unchanged unless an action explicitly changes them. Logout is a
   separate credential command.
 
-Home actions are **Add advisor**, **Provider accounts**, **Save**, and **Quit**.
+Home actions are **Add advisor**, **Provider accounts**, **Gate settings**, **Save**, and **Quit**.
 Leaving a dirty menu offers **Discard** or **Return**. No file write occurs
 until **Save**. A revision conflict keeps the
 draft for inspection and refuses overwrite: reload or discard, not merge or

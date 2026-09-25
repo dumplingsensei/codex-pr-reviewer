@@ -6,6 +6,15 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.9
+
+- **Gate settings in the menu.** The settings menu's home screen has a
+  **Gate settings** entry for mode, max rounds (1 to 5), auto-on projects,
+  and skip patterns, so `gate.autoOn` and `gate.skipWhenOnly` no longer need
+  hand-edited JSON. Lists take one entry per line; a relative path or a
+  negated pattern is refused before save, and an emptied list removes its key.
+  Quitting with unsaved gate edits asks first, as advisor edits always did.
+
 ## 2.1.8
 
 - **`/cross-model-advisor:review [base-ref]`.** An on-demand review of

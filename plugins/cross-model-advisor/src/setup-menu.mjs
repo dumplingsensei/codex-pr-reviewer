@@ -33,6 +33,7 @@ const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const ACTION_ADD = "Add advisor";
 const ACTION_PROVIDERS = "Provider accounts";
+const ACTION_GATE = "Gate settings";
 const ACTION_SAVE = "Save";
 const ACTION_QUIT = "Quit";
 const AUTH_CHILD_KILL_MS = 2000;
@@ -110,12 +111,29 @@ function effortLabel(choices, value) {
  */
 function isDirty(ctx) {
   if (!ctx.saved) {
-    return ctx.draft.advisors.length > 0 || Object.keys(ctx.draft.providers).length > 0;
+    return (
+      ctx.draft.advisors.length > 0 || Object.keys(ctx.draft.providers).length > 0 || gateKey(ctx.draft.gate) !== gateKey(undefined)
+    );
   }
   return (
-    JSON.stringify({ providers: ctx.draft.providers, advisors: ctx.draft.advisors }) !==
-    JSON.stringify({ providers: ctx.saved.providers, advisors: ctx.saved.advisors })
+    JSON.stringify({ providers: ctx.draft.providers, advisors: ctx.draft.advisors, gate: gateKey(ctx.draft.gate) }) !==
+    JSON.stringify({ providers: ctx.saved.providers, advisors: ctx.saved.advisors, gate: gateKey(ctx.saved.gate) })
   );
+}
+
+/**
+ * Gate settings in a fixed key order, missing ones as their defaults, so an
+ * unedited gate compares equal however it was built.
+ *
+ * @param {any} gate
+ */
+function gateKey(gate) {
+  return JSON.stringify({
+    mode: gate?.mode ?? "block",
+    maxRounds: gate?.maxRounds ?? 2,
+    autoOn: gate?.autoOn ?? [],
+    skipWhenOnly: gate?.skipWhenOnly ?? []
+  });
 }
 
 /**
@@ -195,6 +213,7 @@ function homeItems(ctx) {
   }));
   items.push({ value: ACTION_ADD, label: ACTION_ADD });
   items.push({ value: ACTION_PROVIDERS, label: ACTION_PROVIDERS });
+  items.push({ value: ACTION_GATE, label: ACTION_GATE, description: gateSummary(ctx) });
   items.push({ value: ACTION_SAVE, label: ACTION_SAVE });
   items.push({ value: ACTION_QUIT, label: ACTION_QUIT });
   return items;
@@ -1162,6 +1181,108 @@ async function editProviders(ctx) {
 }
 
 /**
+ * The draft's gate settings, created with the defaults when the file has none.
+ *
+ * @param {object} ctx
+ */
+function gateOf(ctx) {
+  ctx.draft.gate ??= { mode: "block", maxRounds: 2 };
+  return ctx.draft.gate;
+}
+
+/**
+ * @param {object} ctx
+ */
+function gateSummary(ctx) {
+  const gate = gateOf(ctx);
+  const count = (list, noun) => `${list?.length ?? 0} ${noun}${list?.length === 1 ? "" : "s"}`;
+  return `${gate.mode} · up to ${gate.maxRounds} round${gate.maxRounds === 1 ? "" : "s"} · auto-on in ${count(gate.autoOn, "project")} · ${count(gate.skipWhenOnly, "skip pattern")}`;
+}
+
+/**
+ * One entry per line; an emptied list removes the key rather than saving [].
+ *
+ * @param {object} ctx
+ * @param {"autoOn" | "skipWhenOnly"} key
+ * @param {string} title
+ * @param {(line: string) => string | null} lineError
+ */
+async function editGateList(ctx, key, title, lineError) {
+  const gate = gateOf(ctx);
+  const raw = await promptText(ctx, {
+    title,
+    value: (gate[key] ?? []).join("\n"),
+    multiline: true,
+    maxBytes: 16 * 1024,
+    validate: (text) => {
+      const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+      if (lines.length > 64) return "At most 64 entries.";
+      for (const line of lines) {
+        const error = lineError(line);
+        if (error) return `${display(line)}: ${error}`;
+      }
+      return null;
+    }
+  });
+  if (raw == null) return;
+  const lines = raw.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (lines.length) gate[key] = lines;
+  else delete gate[key];
+}
+
+/**
+ * @param {object} ctx
+ */
+async function editGate(ctx) {
+  while (true) {
+    const gate = gateOf(ctx);
+    const list = (items) => (items?.length ? items.join(", ").slice(0, 80) : "none");
+    const picked = await ctx.ui.choose({
+      title: ACTION_GATE,
+      items: [
+        {
+          value: "mode",
+          label: "Mode",
+          description: gate.mode === "block" ? "block: concerns and blockers send Claude back" : "report: findings are only shown to you"
+        },
+        { value: "rounds", label: "Max rounds", description: String(gate.maxRounds) },
+        { value: "autoOn", label: "Auto-on projects", description: list(gate.autoOn) },
+        { value: "skip", label: "Skip turns that only change", description: list(gate.skipWhenOnly) }
+      ]
+    });
+    if (picked == null) return;
+    if (picked.value === "mode") {
+      const mode = await ctx.ui.choose({
+        title: "Mode",
+        items: [
+          { value: "block", label: "block", description: "Concerns and blockers send Claude back to address them." },
+          { value: "report", label: "report", description: "Findings are only shown to you." }
+        ]
+      });
+      if (mode?.action === "select") gate.mode = mode.value;
+    } else if (picked.value === "rounds") {
+      const rounds = await promptInteger(ctx, "Max rounds (1 to 5)", gate.maxRounds);
+      if (rounds != null && rounds <= 5) gate.maxRounds = rounds;
+      else if (rounds != null) await ctx.ui.notice({ title: "Max rounds", text: "Max rounds is 1 to 5." });
+    } else if (picked.value === "autoOn") {
+      await editGateList(
+        ctx,
+        "autoOn",
+        "Auto-on projects: one absolute git project root per line. The gate turns on at session start there; /cross-model-advisor:off still wins.",
+        (line) => (path.isAbsolute(line) ? null : "must be an absolute path")
+      );
+    } else if (picked.value === "skip") {
+      await editGateList(
+        ctx,
+        "skipWhenOnly",
+        "Skip turns that only change: one gitignore pattern per line, such as *.md. Matching files stay visible to advisors in other turns.",
+        (line) => (line.startsWith("!") ? "patterns cannot be negated" : null)
+      );
+    }
+  }
+}
+
+/**
  * @param {object} ctx
  */
 async function homeLoop(ctx) {
@@ -1187,6 +1308,10 @@ async function homeLoop(ctx) {
     }
     if (value === ACTION_PROVIDERS) {
       await editProviders(ctx);
+      continue;
+    }
+    if (value === ACTION_GATE) {
+      await editGate(ctx);
       continue;
     }
     if (value === ACTION_SAVE) {

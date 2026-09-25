@@ -229,6 +229,123 @@ test("v1 config opens without mutation and explicit save writes v2", async () =>
   assert.ok(saveUi.notices.some((note) => note.title === "Saved"));
 });
 
+test("gate settings edit mode, rounds, auto-on projects, and skip patterns, refusing unsafe entries", async () => {
+  const world = await makeWorld("cma-gate-");
+  await writeConfig(world.configFile, configV2());
+  const texts = {
+    autoOn: ["relative/project", "/abs/one\n\n/abs/two"],
+    skip: ["*.md\n!src/**", "*.md\ndocs/**"]
+  };
+  const steps = ["mode", "rounds", "autoOn", "skip"];
+  const ui = scriptedUi(async (kind, opts) => {
+    if (kind === "choose" && isHome(opts)) {
+      assert.ok(opts.items.some((item) => item.value === "Gate settings"));
+      if (!ui._gate) {
+        ui._gate = true;
+        return select(opts.items, "Gate settings");
+      }
+      if (!ui._saved) {
+        ui._saved = true;
+        return select(opts.items, "Save");
+      }
+      return select(opts.items, "Quit");
+    }
+    if (kind === "choose" && opts.title === "Gate settings") {
+      const next = steps.shift();
+      return next ? { action: "select", value: next } : null;
+    }
+    if (kind === "choose" && opts.title === "Mode") return select(opts.items, "report");
+    if (kind === "text" && /^Max rounds/.test(opts.title)) return "3";
+    if (kind === "text" && /^Auto-on projects/.test(opts.title)) return texts.autoOn.shift();
+    if (kind === "text" && /^Skip turns/.test(opts.title)) return texts.skip.shift();
+    throw new Error(`unexpected ${kind}\n${dumpItems(opts)}`);
+  });
+  await runMenu(world, ui);
+  const written = await readConfig(world.configFile);
+  assert.deepEqual(written.gate, {
+    mode: "report",
+    maxRounds: 3,
+    autoOn: ["/abs/one", "/abs/two"],
+    skipWhenOnly: ["*.md", "docs/**"]
+  });
+  assert.ok(ui.notices.some((note) => /must be an absolute path/.test(note.text)));
+  assert.ok(ui.notices.some((note) => /cannot be negated/.test(note.text)));
+
+  const clearUi = scriptedUi(async (kind, opts) => {
+    if (kind === "choose" && isHome(opts)) {
+      if (!clearUi._gate) {
+        clearUi._gate = true;
+        return select(opts.items, "Gate settings");
+      }
+      if (!clearUi._saved) {
+        clearUi._saved = true;
+        return select(opts.items, "Save");
+      }
+      return select(opts.items, "Quit");
+    }
+    if (kind === "choose" && opts.title === "Gate settings") {
+      if (!clearUi._cleared) {
+        clearUi._cleared = true;
+        return { action: "select", value: "autoOn" };
+      }
+      return null;
+    }
+    if (kind === "text" && /^Auto-on projects/.test(opts.title)) return "  \n";
+    throw new Error(`unexpected ${kind}\n${dumpItems(opts)}`);
+  });
+  await runMenu(world, clearUi);
+  const cleared = await readConfig(world.configFile);
+  assert.equal("autoOn" in cleared.gate, false);
+  assert.deepEqual(cleared.gate.skipWhenOnly, ["*.md", "docs/**"]);
+});
+
+test("an unsaved gate edit asks before quitting, and an unedited gate does not", async () => {
+  const world = await makeWorld("cma-gate-dirty-");
+  await writeConfig(world.configFile, configV2());
+  const before = await fs.readFile(world.configFile, "utf8");
+  const prompts = [];
+  const ui = scriptedUi(async (kind, opts) => {
+    if (kind === "choose" && isHome(opts)) {
+      if (!ui._gate) {
+        ui._gate = true;
+        assert.match(opts.title, /Saved/);
+        return select(opts.items, "Gate settings");
+      }
+      assert.match(opts.title, /Unsaved changes/);
+      return select(opts.items, "Quit");
+    }
+    if (kind === "choose" && opts.title === "Gate settings") {
+      if (!ui._mode) {
+        ui._mode = true;
+        return { action: "select", value: "mode" };
+      }
+      return null;
+    }
+    if (kind === "choose" && opts.title === "Mode") return select(opts.items, "report");
+    if (kind === "choose" && opts.title === "Unsaved changes") {
+      prompts.push(opts.title);
+      return select(opts.items, "Discard");
+    }
+    throw new Error(`unexpected ${kind}\n${dumpItems(opts)}`);
+  });
+  await runMenu(world, ui);
+  assert.deepEqual(prompts, ["Unsaved changes"]);
+  assert.equal(await fs.readFile(world.configFile, "utf8"), before);
+
+  const untouched = scriptedUi(async (kind, opts) => {
+    if (kind === "choose" && isHome(opts)) {
+      if (!untouched._gate) {
+        untouched._gate = true;
+        return select(opts.items, "Gate settings");
+      }
+      return select(opts.items, "Quit");
+    }
+    if (kind === "choose" && opts.title === "Gate settings") return null;
+    throw new Error(`unexpected ${kind}\n${dumpItems(opts)}`);
+  });
+  await runMenu(world, untouched);
+});
+
 test("luna model and high effort are saved from the advisor editor", async () => {
   const world = await makeWorld("cma-luna-");
   await writeConfig(world.configFile, configV2());
