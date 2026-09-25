@@ -5,6 +5,18 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.18
+
+Closes the gap `SECURITY.md` listed as accepted: a pull request's
+`.gitattributes` could route files through any filter driver a git config
+defines (git-crypt writes one into the repository's own config), and
+checkout ran it outside the review sandbox. Only LFS was neutralised. A
+pull request can only name drivers some config defines, so the script now
+lists them (global, system, and each repository it touches) and forces each
+to pass-through. Such files are reviewed as stored, as LFS pointers already
+were. Regression cases cover a driver in the user's config and one in the
+repository's own config; both ran on the old script.
+
 ## 0.9.17
 
 A pull request's `.gitattributes` could name a diff driver from the user's own

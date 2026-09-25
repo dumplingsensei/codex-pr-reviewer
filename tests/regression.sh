@@ -1049,8 +1049,9 @@ git -C "$SYMUP" checkout --quiet -b feature
 ln -s /etc/passwd "$SYMUP/escape.txt"
 echo change >>"$SYMUP/f.txt"
 printf 'Implemented by acme/service#9.\n' >"$SYMUP/refs.md"
-# The pull request also names a diff driver; see "cannot run the user's diff drivers".
-printf 'refs.md diff=cprprobe\n' >"$SYMUP/.gitattributes"
+# The pull request also names a diff driver and a filter driver; see "cannot
+# run the user's diff drivers" and "cannot run the user's filter drivers".
+printf 'refs.md diff=cprprobe filter=cprfilter\n' >"$SYMUP/.gitattributes"
 git -C "$SYMUP" add -A && git -C "$SYMUP" commit --quiet -m "add a link out of the tree"
 git -C "$SYMUP" update-ref refs/pull/7/head refs/heads/feature
 git -C "$SYMUP" checkout --quiet main
@@ -1177,6 +1178,35 @@ out="$(GIT_CONFIG_GLOBAL="$SANDBOX/probe.gitconfig" prepare_sym)"
 check "prepare still succeeds" "$([[ -d "$SYMWT" ]] && echo yes || echo no)" "yes"
 check "prepare never ran the textconv the pull request named" \
   "$([[ -e "$SANDBOX/textconv-ran" ]] && echo ran || echo "not run")" "not run"
+
+# Regression: the same for filter drivers, which checkout (smudge) and any
+# comparison with the worktree (clean) run. git-crypt, for one, writes such a
+# driver into the repository's own config. The worktree is removed first so
+# the checkout really writes refs.md and would smudge it.
+note "a pull request cannot run the user's filter drivers"
+cat >"$SANDBOX/probe-filter" <<PROBE
+#!/bin/sh
+touch "$SANDBOX/filter-ran"
+cat
+PROBE
+chmod +x "$SANDBOX/probe-filter"
+printf '[filter "cprfilter"]\n\tsmudge = %s\n\tclean = %s\n' "$SANDBOX/probe-filter" "$SANDBOX/probe-filter" >>"$SANDBOX/probe.gitconfig"
+rm -rf "$SYMWT" "$SANDBOX/filter-ran"
+out="$(GIT_CONFIG_GLOBAL="$SANDBOX/probe.gitconfig" prepare_sym)"
+check "prepare rebuilt the worktree" "$([[ -f "$SYMWT/refs.md" ]] && echo yes || echo no)" "yes"
+check "prepare never ran the filter driver the pull request named" \
+  "$([[ -e "$SANDBOX/filter-ran" ]] && echo ran || echo "not run")" "not run"
+check "the file is checked out as stored" "$(cat "$SYMWT/refs.md")" "Implemented by acme/service#9."
+# git-crypt's case: the driver lives in the repository's own config, not the
+# user's, so only the per-repository scan can find it.
+SYMGITDIR="$(git -C "$SYMWT" rev-parse --path-format=absolute --git-common-dir)"
+git --git-dir="$SYMGITDIR" config filter.cprfilter.smudge "$SANDBOX/probe-filter"
+git --git-dir="$SYMGITDIR" config filter.cprfilter.clean "$SANDBOX/probe-filter"
+rm -rf "$SYMWT" "$SANDBOX/filter-ran"
+out="$(prepare_sym)"
+check "a filter driver in the repository's own config is not run either" \
+  "$([[ -e "$SANDBOX/filter-ran" ]] && echo ran || echo "not run")" "not run"
+git --git-dir="$SYMGITDIR" config --remove-section filter.cprfilter
 
 
 note "an open context uses the contributor head"

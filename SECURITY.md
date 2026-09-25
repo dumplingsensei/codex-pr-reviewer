@@ -90,10 +90,6 @@ worse *is* in scope.
   unexpected command prompts you is your permission mode's call — under `auto` a
   read-only command outside the grant simply runs. So the narrow rules are
   scoping the prompts are written to keep, not a wall that stops them.
-- **Filter drivers other than Git LFS.** Hooks are disabled and LFS filters are
-  neutralised for every git this plugin runs. A driver you have configured under
-  some other name that a pull request can guess is not covered; closing that
-  completely needs a plugin-owned clone with its own configuration.
 - **`-s read-only` bounds writes, not reads.** Codex's read-only sandbox forbids
   writing anywhere; it does not confine reading to the worktree, and on every
   platform it can read any file your account can. The plugin closes the route a

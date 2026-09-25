@@ -51,7 +51,7 @@ before it is saved.
 A pull request is code written by a stranger, so what it could otherwise reach
 is closed off. Codex runs with project documents disabled, so an `AGENTS.md` in
 the diff cannot become instructions to the reviewer reading it. Every git this
-plugin runs has hooks, LFS filters, and diff drivers neutralised, because checkout writes the
+plugin runs has hooks, filter drivers, and diff drivers neutralised, because checkout writes the
 PR's bytes to disk before Codex's sandbox exists — a repo that puts hooks in the
 tree, as Husky does, would otherwise run one. And symlinks are checked out as
 plain files naming their target rather than as links: `-s read-only` bounds what

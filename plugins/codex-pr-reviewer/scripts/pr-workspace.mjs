@@ -118,8 +118,14 @@ function runChecked(command, args, options = {}) {
   return result;
 }
 
-const git = (dir, args) => run("git", ["-C", dir, ...args]);
-const gitChecked = (dir, args) => runChecked("git", ["-C", dir, ...args]);
+const git = (dir, args) => {
+  neutralizeFilterDrivers(dir);
+  return run("git", ["-C", dir, ...args]);
+};
+const gitChecked = (dir, args) => {
+  neutralizeFilterDrivers(dir);
+  return runChecked("git", ["-C", dir, ...args]);
+};
 const gitOut = (dir, args) => gitChecked(dir, args).stdout.trim();
 
 /**
@@ -923,6 +929,7 @@ function scanWorktreeDiffHints(worktree, baseBranch, limit = 50) {
     const errFd = fs.openSync(errFile, "w");
     let result;
     try {
+      neutralizeFilterDrivers(worktree);
       result = spawnSync("git", args, {
         stdio: ["ignore", outFd, errFd],
         timeout: DEFAULT_TIMEOUT_MS
@@ -2063,6 +2070,7 @@ function landedTarget(entry) {
  * GitHub's exact merge commit.
  */
 function prepareContextSnapshot(entry) {
+  neutralizeFilterDrivers(entry.worktree);
   runChecked(
     "git",
     ["-C", entry.worktree, "diff", "--no-textconv", "--no-ext-diff", "--binary", entry.baseBranch, "--"],
@@ -3935,10 +3943,9 @@ const USAGE = `pr-workspace.mjs — review GitHub PRs with Codex
  * Set through GIT_CONFIG_* rather than `-c` because it has to reach the git
  * that `gh repo clone` runs, where there is no command line to add flags to.
  *
- * What this does not close: a filter driver other than LFS that the user has
- * configured under a name a pull request can guess. Enumerating those is not
- * possible from here; a plugin-owned clone with its own config file is the
- * complete fix, and it is a larger change than this one.
+ * Filter drivers other than LFS are closed by `neutralizeFilterDrivers`: a
+ * pull request can only name drivers some config already defines, so those
+ * are listed and forced to pass-through the same way.
  */
 function hardenGitEnvironment() {
   // Deliberately never created. Git is content with a hooksPath that does not
@@ -3954,11 +3961,72 @@ function hardenGitEnvironment() {
     ["filter.lfs.process", ""],
     ["filter.lfs.required", "false"]
   ];
-  process.env.GIT_CONFIG_COUNT = String(forced.length);
-  forced.forEach(([key, value], index) => {
-    process.env[`GIT_CONFIG_KEY_${index}`] = key;
-    process.env[`GIT_CONFIG_VALUE_${index}`] = value;
+  process.env.GIT_CONFIG_COUNT = "0";
+  forceGitConfig(forced);
+  // Global and system drivers (and the current directory's repository, if
+  // any); each repository git later runs in is scanned on first use.
+  neutralizeFilterDrivers(null);
+}
+
+/**
+ * Appends to the GIT_CONFIG_* list, which applies to every git this process
+ * or `gh` starts, above any config file.
+ *
+ * @param {[string, string][]} pairs
+ */
+function forceGitConfig(pairs) {
+  let count = Number(process.env.GIT_CONFIG_COUNT ?? 0);
+  for (const [key, value] of pairs) {
+    process.env[`GIT_CONFIG_KEY_${count}`] = key;
+    process.env[`GIT_CONFIG_VALUE_${count}`] = value;
+    count += 1;
+  }
+  process.env.GIT_CONFIG_COUNT = String(count);
+}
+
+const neutralizedFilters = new Set(["lfs"]);
+const scannedForFilters = new Set();
+
+/**
+ * Forces every filter driver visible from `dir` to pass-through.
+ *
+ * A pull request's .gitattributes can route files through any filter driver
+ * the user has configured — git-crypt writes one into the repository's own
+ * .git/config — and checkout, status, and diff against the worktree run it
+ * outside the review sandbox. The pull request can only name drivers some
+ * config defines, so listing them here closes the set: each gets `cat` for
+ * smudge and clean, no long-running process, and required=false. Reviews then
+ * read those files as stored, as they already do for LFS pointers.
+ *
+ * @param {string | null} dir a repository or worktree, or null for global scope
+ */
+function neutralizeFilterDrivers(dir) {
+  const scope = dir ?? "";
+  if (scannedForFilters.has(scope)) return;
+  const listed = spawnSync("git", [...(dir ? ["-C", dir] : []), "config", "--null", "--get-regexp", "^filter\\."], {
+    encoding: "utf8",
+    timeout: DEFAULT_TIMEOUT_MS,
+    maxBuffer: 4 * 1024 * 1024
   });
+  // 1 means no filter drivers are configured. Anything else (a path that does
+  // not exist yet) is not an answer, so the scope is scanned again next time.
+  if (listed.status === 1) scannedForFilters.add(scope);
+  if (listed.status !== 0) return;
+  scannedForFilters.add(scope);
+  const pairs = [];
+  for (const record of listed.stdout.split("\0")) {
+    const key = record.split("\n", 1)[0];
+    const name = /^filter\.(.+)\.[^.]+$/.exec(key)?.[1];
+    if (!name || neutralizedFilters.has(name)) continue;
+    neutralizedFilters.add(name);
+    pairs.push(
+      [`filter.${name}.smudge`, "cat"],
+      [`filter.${name}.clean`, "cat"],
+      [`filter.${name}.process`, ""],
+      [`filter.${name}.required`, "false"]
+    );
+  }
+  if (pairs.length) forceGitConfig(pairs);
 }
 
 async function main() {
