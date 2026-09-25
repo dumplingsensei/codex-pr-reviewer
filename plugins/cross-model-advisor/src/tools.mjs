@@ -45,8 +45,11 @@ const TRUNCATED_MARKER = "[truncated]";
  * @param {string} note
  */
 export function normalizeFinding(note) {
+  // Markdown and sentence punctuation only: `i < n` and `i > n` stay distinct.
   return String(note ?? "")
     .toLowerCase()
+    .replace(/[`*]/g, "")
+    .replace(/[.,;:!?]+(?=\s|$)/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }

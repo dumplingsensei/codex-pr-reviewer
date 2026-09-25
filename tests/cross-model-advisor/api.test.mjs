@@ -512,7 +512,7 @@ test("oversized required context is a context-limit error without a provider cal
   );
 });
 
-test("tool-call limit is an audit failure", async (t) => {
+test("reading past the tool-call limit is refused once, then an audit failure", async (t) => {
   const harness = await startServer(async (record, res) => {
     const n = record.body?.messages?.filter((msg) => msg.role === "tool").length ?? 0;
     writeSse(
@@ -538,6 +538,49 @@ test("tool-call limit is an audit failure", async (t) => {
       }),
     (error) => codeOf(error) === "audit" && tools.candidate === null
   );
+  assert.equal(tools.calls.length, 2);
+  assert.equal(harness.requests.length, 4);
+  assert.match(JSON.stringify(harness.requests[3].body.messages), /Tool budget spent: all 2 read, list, and search calls are used/);
+  assert.match(JSON.stringify(harness.requests[0].body.messages), /at most 2 read, list, and search calls/);
+});
+
+test("an advisor out of reads can still report, and advise does not count toward the limit", async (t) => {
+  const harness = await startServer(async (record, res) => {
+    const n = record.body?.messages?.filter((msg) => msg.role === "tool").length ?? 0;
+    if (n < 2) {
+      writeSse(res, chunk({ toolCalls: [{ id: `call_read_${n}`, name: "read", arguments: JSON.stringify({ path: "src/app.mjs" }) }] }));
+      return;
+    }
+    writeSse(
+      res,
+      chunk({
+        toolCalls: [
+          {
+            id: "call_advise",
+            name: "advise",
+            arguments: JSON.stringify({
+              severity: "concern",
+              note: "unused is assigned and never read",
+              evidence: [{ kind: "file", path: "src/app.mjs", line: 1, detail: "const unused = 1" }]
+            })
+          }
+        ]
+      })
+    );
+  });
+  t.after(() => harness.close());
+  const tools = makeTools();
+  await reviewApi({
+    provider: compatibleProvider(harness.baseUrl),
+    advisor,
+    observations: [{ eventId: "obs_1", phase: "prompt", userText: "x" }],
+    tools,
+    limits: { maxToolCallsPerReview: 1, maxOutputTokens: 1500 },
+    env: { [KEY_ENV]: CONFIGURED_KEY }
+  });
+  assert.deepEqual(tools.calls.map((call) => call.name), ["read", "advise"]);
+  assert.equal(tools.candidate?.severity, "concern");
+  assert.match(JSON.stringify(harness.requests[2].body.messages), /Tool budget spent/);
 });
 
 test("priced compatible models report numeric costUsd", async (t) => {

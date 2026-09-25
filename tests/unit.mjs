@@ -1038,5 +1038,13 @@ const initGuardRepo = () => {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+describe("advisor review budget");
+// Advisors share STOP_REVIEW_BUDGET_MS; the rest of the Stop hook's timeout is
+// for snapshots, the diff, and saving state. Moving one must move the other.
+const advisorDir = path.join(root, "plugins", "cross-model-advisor");
+const { STOP_REVIEW_BUDGET_MS } = await import(path.join(advisorDir, "src", "session", "constants.mjs"));
+const stopTimeout = readJson(path.join(advisorDir, "hooks", "hooks.json")).hooks.Stop[0].hooks[0].timeout;
+eq("the budget leaves the Stop hook 30 seconds", stopTimeout * 1000 - STOP_REVIEW_BUDGET_MS, 30_000);
+
 console.log(failures === 0 ? "\nAll unit tests passed." : `\n${failures} test(s) failed.`);
 process.exitCode = failures === 0 ? 0 : 1;

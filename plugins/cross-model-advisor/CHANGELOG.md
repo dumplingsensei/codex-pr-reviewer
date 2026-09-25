@@ -6,6 +6,15 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.3
+
+- **Duplicates.** Findings that differ only in markdown or sentence punctuation
+  now merge. Code punctuation still counts, so `i < n` and `i > n` stay apart.
+- **Tool limit.** `maxToolCallsPerReview` now counts only read, list, and
+  search, and the advisor is told the limit. Past it, a read is refused once so
+  the advisor can still report; findings made before a cutoff are kept. A
+  10-file turn used to fail outright when all 8 calls went to reading.
+
 ## 2.1.2
 
 - **Failed advisors are named when the others found something.** When some

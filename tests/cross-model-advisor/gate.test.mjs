@@ -242,7 +242,7 @@ test("a partial failure with no findings is not reported as a silent pass", asyn
   };
   const out = await w.stop();
   assert.equal(out.decision, undefined);
-  assert.match(out.systemMessage, /no findings, but one advisor did not review this turn \(beta: rate_limit:/);
+  assert.match(out.systemMessage, /no findings, but one advisor did not finish reviewing this turn \(beta: rate_limit:/);
   assert.doesNotMatch(out.systemMessage, /alpha/);
   assert.equal((await w.status()).lastReview.outcome, "passed");
 });
@@ -268,7 +268,7 @@ test("a failed advisor is named to the user when the rest send Claude back or re
   assert.equal(out.decision, "block");
   assert.match(out.reason, /real bug/);
   assert.doesNotMatch(out.reason, /rate_limit/);
-  assert.match(out.systemMessage, /one advisor did not review this turn \(beta: rate_limit:.*\)\. Claude was sent back with the findings from the rest\./);
+  assert.match(out.systemMessage, /one advisor did not finish reviewing this turn \(beta: rate_limit:.*\)\. Claude was sent back with the findings reported\./);
 
   const reported = await world({ advisors: [advisor("alpha"), advisor("beta")], gate: { mode: "report", maxRounds: 2 } });
   await reported.prompt("change");
@@ -276,7 +276,7 @@ test("a failed advisor is named to the user when the rest send Claude back or re
   reported.setScript(concern("real bug"));
   failBeta(reported);
   const summary = (await reported.stop()).systemMessage.split("\n");
-  assert.match(summary[1], /^- one advisor did not review this turn \(beta: rate_limit:/);
+  assert.match(summary[1], /^- one advisor did not finish reviewing this turn \(beta: rate_limit:/);
   assert.match(summary[2], /\[concern\] alpha: real bug/);
 
   const clean = await world({ advisors: [advisor("alpha"), advisor("beta")] });
@@ -286,6 +286,25 @@ test("a failed advisor is named to the user when the rest send Claude back or re
   const cleanOut = await clean.stop();
   assert.equal(cleanOut.decision, "block");
   assert.equal(cleanOut.systemMessage, undefined);
+});
+
+test("findings an advisor reported before being cut off still count", async () => {
+  const w = await world();
+  await w.prompt("change");
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+  w.setScript(async (args) => {
+    await concern("real bug")(args);
+    const error = new Error("max tool calls per review exceeded");
+    error.code = "audit";
+    throw error;
+  });
+  const out = await w.stop();
+  assert.equal(out.decision, "block");
+  assert.match(out.reason, /real bug/);
+  assert.match(out.systemMessage, /one advisor did not finish reviewing this turn \(correctness: audit: max tool calls/);
+  const review = (await w.status()).lastReview;
+  assert.equal(review.outcome, "blocked");
+  assert.deepEqual(review.advisors.map(({ ok, findings }) => ({ ok, findings })), [{ ok: false, findings: 1 }]);
 });
 
 test("queued advisors share the Stop hook's time, so a late one is recorded instead of the hook being killed", async () => {

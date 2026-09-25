@@ -93889,7 +93889,7 @@ var PROJECT_IGNORE = ".cross-model-advisorignore";
 var WATCHDOG_NAME = "WATCHDOG.md";
 var TRUNCATED_MARKER = "[truncated]";
 function normalizeFinding(note) {
-  return String(note ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+  return String(note ?? "").toLowerCase().replace(/[`*]/g, "").replace(/[.,;:!?]+(?=\s|$)/g, "").replace(/\s+/g, " ").trim();
 }
 function sanitizeText(text, secrets = []) {
   if (typeof text !== "string" || text.length === 0) return "";
@@ -94730,6 +94730,7 @@ var HOST_TOOL_NAMES = new Set(toolSchemas.map((tool) => tool.name));
 var CONTEXT_CHAR_BOUND = 6e4;
 var TOOL_RESULT_HEADROOM_TOKENS = 2048;
 var DEFAULT_MAX_TOOL_CALLS = 8;
+var MAX_ADVISE_CALLS = 2 * MAX_FINDINGS_PER_REVIEW;
 var DEFAULT_MAX_OUTPUT_TOKENS = 1500;
 var SEALED_AUTH = Object.freeze({
   env: async () => void 0,
@@ -95415,7 +95416,8 @@ async function reviewApi({
   if (piTools.length === 0) fail3("config", "host tool schemas are missing");
   const allowed = HOST_TOOL_NAMES;
   const guidance = typeof tools.guidance === "string" ? tools.guidance : "";
-  const system = [systemPrompt, guidance].filter((part) => typeof part === "string" && part.length > 0).join("\n\n");
+  const budget = `You may make at most ${maxToolCalls} read, list, and search calls in this review. advise does not count toward that limit, so report what you have found before it runs out.`;
+  const system = [systemPrompt, budget, guidance].filter((part) => typeof part === "string" && part.length > 0).join("\n\n");
   const currentUser = {
     role: "user",
     content: renderTaskContext({ observations, latestTask, compactSummary, turn }, apiKey),
@@ -95456,11 +95458,12 @@ async function reviewApi({
   if (kind === "api") requestOptions.apiKey = apiKey;
   const completion = planReasoningCompletion(model, advisor, requestOptions);
   const requestModel = completion.model ?? model;
-  let toolCalls = 0;
+  let investigations = 0;
+  let adviseCalls = 0;
+  let refusedTurns = 0;
   try {
     for (; ; ) {
       if (signal?.aborted) fail3(abortCode(signal), "review aborted");
-      if (toolCalls >= maxToolCalls) fail3("audit", "max tool calls per review exceeded");
       if (!evictUntilFits(messages, currentUser, system, model, maxOutputTokens)) {
         fail3("context-limit", "required review context exceeds the model or character bound");
       }
@@ -95488,18 +95491,25 @@ async function reviewApi({
           fail3("audit", `model called unknown tool ${call.name}`);
         }
       }
-      if (toolCalls + calls.length > maxToolCalls) {
-        fail3("audit", "max tool calls per review exceeded");
-      }
+      let refused = false;
       for (const call of calls) {
         if (signal?.aborted) fail3(abortCode(signal), "review aborted");
+        if (call.name === "advise") {
+          if (++adviseCalls > MAX_ADVISE_CALLS) fail3("audit", "too many advise calls");
+        } else if (investigations >= maxToolCalls) {
+          const spent = `Tool budget spent: all ${maxToolCalls} read, list, and search calls are used. Report what you found with advise, or finish without calling tools.`;
+          messages.push(toolResultMessage(call, spent, true));
+          refused = true;
+          continue;
+        } else {
+          investigations += 1;
+        }
         let args;
         try {
           args = validateToolCall(piTools, call);
         } catch (error) {
           const text = error instanceof Error ? error.message : "invalid tool arguments";
           messages.push(toolResultMessage(call, redactSecret(text, apiKey), true));
-          toolCalls += 1;
           continue;
         }
         try {
@@ -95512,8 +95522,8 @@ async function reviewApi({
           const text = error instanceof Error ? error.message : "tool failed";
           messages.push(toolResultMessage(call, redactSecret(text, apiKey), true));
         }
-        toolCalls += 1;
       }
+      if (refused && ++refusedTurns > 1) fail3("audit", "max tool calls per review exceeded");
       if (signal?.aborted) fail3(abortCode(signal), "review aborted");
       if (reviewDone(tools)) break;
     }
@@ -95938,10 +95948,10 @@ function formatUserSummary(findings, failed = []) {
 }
 function notReviewedBy(failed) {
   const detail = failed.map((result) => `${result.name}: ${result.error}`).join("; ");
-  return `${failed.length === 1 ? "one advisor" : `${failed.length} advisors`} did not review this turn (${detail})`;
+  return `${failed.length === 1 ? "one advisor" : `${failed.length} advisors`} did not finish reviewing this turn (${detail})`;
 }
 function formatPartialFailure(failed, { blocked = false } = {}) {
-  const text = blocked ? `cross-model-advisor: ${notReviewedBy(failed)}. Claude was sent back with the findings from the rest.` : `cross-model-advisor: no findings, but ${notReviewedBy(failed)}`;
+  const text = blocked ? `cross-model-advisor: ${notReviewedBy(failed)}. Claude was sent back with the findings reported.` : `cross-model-advisor: no findings, but ${notReviewedBy(failed)}`;
   return truncateLabeled(sanitizeText2(text), USER_SUMMARY_CHARS);
 }
 function collectFindings(results) {
@@ -96101,8 +96111,9 @@ async function runStop(payload, { env: env2 = process.env, deps: overrides = {} 
         () => abort.abort({ code: "timeout" }),
         Math.min(limits.reviewTimeoutSeconds * 1e3, remaining)
       );
+      let tools;
       try {
-        const tools = await deps.createReviewTools({
+        tools = await deps.createReviewTools({
           root: state2.projectRoot,
           exclude: config.exclude,
           observations,
@@ -96130,7 +96141,7 @@ async function runStop(payload, { env: env2 = process.env, deps: overrides = {} 
         stats.usage = mergeUsage(stats.usage, error?.usage);
         const code = typeof error?.code === "string" ? error.code : "error";
         stats.lastError = sanitizeText2(`${code}: ${error instanceof Error ? error.message : "review failed"}`, secrets);
-        return { ...base, ok: false, error: stats.lastError };
+        return { ...base, ok: false, error: stats.lastError, findings: tools?.candidates ?? [] };
       } finally {
         clearTimeout(timer);
       }
@@ -96138,7 +96149,7 @@ async function runStop(payload, { env: env2 = process.env, deps: overrides = {} 
     limits.maxConcurrentAdvisors
   );
   state2.reviewed.push(key);
-  const findings = collectFindings(results.filter((result) => result.ok));
+  const findings = collectFindings(results);
   const advisors = results.map((result) => ({
     name: result.name,
     provider: result.provider,

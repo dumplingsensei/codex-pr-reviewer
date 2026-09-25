@@ -892,4 +892,9 @@ describe("normalizeFinding", () => {
   it("normalizes whitespace and case", () => {
     assert.equal(normalizeFinding("  Hello\nWorld "), "hello world");
   });
+  it("ignores markdown and sentence punctuation but not code", () => {
+    assert.equal(normalizeFinding("`items[i]` reads past the end, so use `i - 1`."), normalizeFinding("items[i] reads past the end so use i - 1"));
+    assert.notEqual(normalizeFinding("use `i < n`"), normalizeFinding("use `i > n`"));
+    assert.equal(normalizeFinding("use `obj.prop` or 1.5"), "use obj.prop or 1.5");
+  });
 });

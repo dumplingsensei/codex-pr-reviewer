@@ -18,6 +18,7 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 import { createCredentialStore } from "../auth.mjs";
 import { createBuiltinProvider, createCompatibleModel } from "../providers.mjs";
 import { planReasoningCompletion, validateReasoning } from "../reasoning.mjs";
+import { MAX_FINDINGS_PER_REVIEW } from "../session/constants.mjs";
 import { groupHistory } from "../session/history.mjs";
 import { toolSchemas } from "../tools.mjs";
 import { API_PROVIDERS, OAUTH_PROVIDERS } from "../config.mjs";
@@ -28,6 +29,8 @@ const HOST_TOOL_NAMES = new Set(toolSchemas.map((tool) => tool.name));
 const CONTEXT_CHAR_BOUND = 60_000;
 const TOOL_RESULT_HEADROOM_TOKENS = 2_048;
 const DEFAULT_MAX_TOOL_CALLS = 8;
+/** advise calls per review, rejected attempts included. */
+const MAX_ADVISE_CALLS = 2 * MAX_FINDINGS_PER_REVIEW;
 const DEFAULT_MAX_OUTPUT_TOKENS = 1_500;
 
 const SEALED_AUTH = Object.freeze({
@@ -989,7 +992,8 @@ export async function reviewApi({
   const allowed = HOST_TOOL_NAMES;
 
   const guidance = typeof tools.guidance === "string" ? tools.guidance : "";
-  const system = [systemPrompt, guidance].filter((part) => typeof part === "string" && part.length > 0).join("\n\n");
+  const budget = `You may make at most ${maxToolCalls} read, list, and search calls in this review. advise does not count toward that limit, so report what you have found before it runs out.`;
+  const system = [systemPrompt, budget, guidance].filter((part) => typeof part === "string" && part.length > 0).join("\n\n");
   const currentUser = {
     role: "user",
     content: renderTaskContext({ observations, latestTask, compactSummary, turn }, apiKey),
@@ -1026,11 +1030,16 @@ export async function reviewApi({
   const completion = planReasoningCompletion(model, advisor, requestOptions);
   const requestModel = completion.model ?? model;
 
-  let toolCalls = 0;
+  // read, list, and search share maxToolCalls; advise has its own cap, so
+  // reporting never competes with reading. Past the limit a read is refused
+  // with a nudge to report, and a second turn that keeps reading ends the
+  // review.
+  let investigations = 0;
+  let adviseCalls = 0;
+  let refusedTurns = 0;
   try {
     for (;;) {
       if (signal?.aborted) fail(abortCode(signal), "review aborted");
-      if (toolCalls >= maxToolCalls) fail("audit", "max tool calls per review exceeded");
       if (!evictUntilFits(messages, currentUser, system, model, maxOutputTokens)) {
         fail("context-limit", "required review context exceeds the model or character bound");
       }
@@ -1065,19 +1074,25 @@ export async function reviewApi({
           fail("audit", `model called unknown tool ${call.name}`);
         }
       }
-      if (toolCalls + calls.length > maxToolCalls) {
-        fail("audit", "max tool calls per review exceeded");
-      }
-
+      let refused = false;
       for (const call of calls) {
         if (signal?.aborted) fail(abortCode(signal), "review aborted");
+        if (call.name === "advise") {
+          if (++adviseCalls > MAX_ADVISE_CALLS) fail("audit", "too many advise calls");
+        } else if (investigations >= maxToolCalls) {
+          const spent = `Tool budget spent: all ${maxToolCalls} read, list, and search calls are used. Report what you found with advise, or finish without calling tools.`;
+          messages.push(toolResultMessage(call, spent, true));
+          refused = true;
+          continue;
+        } else {
+          investigations += 1;
+        }
         let args;
         try {
           args = validateToolCall(piTools, call);
         } catch (error) {
           const text = error instanceof Error ? error.message : "invalid tool arguments";
           messages.push(toolResultMessage(call, redactSecret(text, apiKey), true));
-          toolCalls += 1;
           continue;
         }
         try {
@@ -1090,8 +1105,8 @@ export async function reviewApi({
           const text = error instanceof Error ? error.message : "tool failed";
           messages.push(toolResultMessage(call, redactSecret(text, apiKey), true));
         }
-        toolCalls += 1;
       }
+      if (refused && ++refusedTurns > 1) fail("audit", "max tool calls per review exceeded");
 
       if (signal?.aborted) fail(abortCode(signal), "review aborted");
       if (reviewDone(tools)) break;

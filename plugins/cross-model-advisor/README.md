@@ -79,10 +79,10 @@ network bootstrap at install time. From a local checkout,
      shown to you.
    - Nothing found: Claude stops silently.
 5. **Failures fail open.** A timeout, provider error, or failed login lets
-   Claude stop, tells you the turn was not reviewed, and records the error for
-   `status`. A failed review is never reported as a pass.
+   Claude stop, names each advisor that did not finish reviewing, and records
+   the error for `status`. A failed review is never reported as a pass.
 
-You wait for the review: a turn that changed files ends 30 to 120 seconds later
+You wait for the review: a turn that changed files ends 10 to 120 seconds later
 than it otherwise would, and sometimes with another round of fixes. A turn that
 changed nothing costs nothing.
 
@@ -229,7 +229,7 @@ default. Choose real model IDs. An example and schema also ship under
 
 `gate.mode` is `block` or `report`; `gate.maxRounds` (1 to 5) bounds how many
 times one prompt can be sent back. `limits.reviewTimeoutSeconds` (at most 240)
-is each advisor's deadline inside the Stop hook's 300-second budget.
+is each advisor's deadline; all advisors share 270 of the hook's 300 seconds.
 
 ### Reasoning effort
 

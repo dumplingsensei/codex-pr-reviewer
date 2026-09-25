@@ -86,7 +86,7 @@ The hook helpers and bundled SDK are trusted local code under the same OS user. 
 
 OAuth credentials live under `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cross-model-advisor/credentials` (normally outside the project), with private directory/file permissions and atomic serialized writes. They are not encrypted against your OS user and are never copied from Claude, OMP, or other tools. Provider conversations last one review and stay in memory; the last review is kept locally for seven days. External providers have their own retention policies.
 
-**Fail-open.** A timeout, provider error, or failed login lets Claude stop, says the turn was not reviewed, and is recorded for `status`. It is never reported as a pass.
+**Fail-open.** A timeout, provider error, or failed login lets Claude stop, names each advisor that did not finish reviewing, and is recorded for `status`. It is never reported as a pass.
 
 # codex-pr-reviewer
 

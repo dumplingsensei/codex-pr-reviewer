@@ -863,7 +863,7 @@ var PROJECT_IGNORE = ".cross-model-advisorignore";
 var WATCHDOG_NAME = "WATCHDOG.md";
 var TRUNCATED_MARKER = "[truncated]";
 function normalizeFinding(note) {
-  return String(note ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+  return String(note ?? "").toLowerCase().replace(/[`*]/g, "").replace(/[.,;:!?]+(?=\s|$)/g, "").replace(/\s+/g, " ").trim();
 }
 function sanitizeText(text, secrets = []) {
   if (typeof text !== "string" || text.length === 0) return "";

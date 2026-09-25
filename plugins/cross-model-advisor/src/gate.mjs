@@ -246,7 +246,7 @@ export function formatUserSummary(findings, failed = []) {
  */
 function notReviewedBy(failed) {
   const detail = failed.map((result) => `${result.name}: ${result.error}`).join("; ");
-  return `${failed.length === 1 ? "one advisor" : `${failed.length} advisors`} did not review this turn (${detail})`;
+  return `${failed.length === 1 ? "one advisor" : `${failed.length} advisors`} did not finish reviewing this turn (${detail})`;
 }
 
 /**
@@ -259,7 +259,7 @@ function notReviewedBy(failed) {
  */
 export function formatPartialFailure(failed, { blocked = false } = {}) {
   const text = blocked
-    ? `cross-model-advisor: ${notReviewedBy(failed)}. Claude was sent back with the findings from the rest.`
+    ? `cross-model-advisor: ${notReviewedBy(failed)}. Claude was sent back with the findings reported.`
     : `cross-model-advisor: no findings, but ${notReviewedBy(failed)}`;
   return truncateLabeled(sanitizeText(text), USER_SUMMARY_CHARS);
 }
@@ -464,8 +464,9 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
         () => abort.abort({ code: "timeout" }),
         Math.min(limits.reviewTimeoutSeconds * 1000, remaining)
       );
+      let tools;
       try {
-        const tools = await deps.createReviewTools({
+        tools = await deps.createReviewTools({
           root: state.projectRoot,
           exclude: config.exclude,
           observations,
@@ -493,7 +494,8 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
         stats.usage = mergeUsage(stats.usage, error?.usage);
         const code = typeof error?.code === "string" ? error.code : "error";
         stats.lastError = sanitizeText(`${code}: ${error instanceof Error ? error.message : "review failed"}`, secrets);
-        return { ...base, ok: false, error: stats.lastError };
+        // Findings staged before a cutoff passed evidence checks; keep them.
+        return { ...base, ok: false, error: stats.lastError, findings: tools?.candidates ?? [] };
       } finally {
         clearTimeout(timer);
       }
@@ -502,7 +504,7 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
   );
 
   state.reviewed.push(key);
-  const findings = collectFindings(results.filter((result) => result.ok));
+  const findings = collectFindings(results);
   const advisors = results.map((result) => ({
     name: result.name,
     provider: result.provider,
