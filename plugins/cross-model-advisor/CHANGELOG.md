@@ -6,6 +6,16 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.12
+
+- 2.1.11 scoped the catalog check to the advisors a change selects, but the
+  reasoning check still covered every advisor, so one saved with a since
+  retired model and a non-default effort blocked unrelated changes such as
+  gate settings. Both checks, and the one the final save runs, now cover only
+  advisors whose model, provider, or effort the change sets. Repairing or
+  removing such an advisor already worked and still does. Found by the
+  cross-model advisor on 2.1.11.
+
 ## 2.1.11
 
 Three fixes to 2.1.10's chat setup, found by the cross-model advisor:

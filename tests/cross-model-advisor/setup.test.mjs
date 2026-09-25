@@ -739,6 +739,19 @@ describe("chat setup: summary and apply", () => {
     assert.match(back.code.message, /is not a openai model/);
   });
 
+  it("a retired model with a non-default effort blocks nothing unrelated, and can be repaired or removed", async () => {
+    const dir = await scratch("cma-chat-legacy-effort-");
+    await fs.writeFile(configPath(dir), JSON.stringify(v2With([{ name: "legacy", model: "gpt-retired-model", reasoningEffort: "high" }, { name: "current", model: "gpt-4.1" }])));
+    let { revision } = await summary(dir);
+    ({ revision } = (await apply(dir, { revision, change: { op: "set-gate", gate: { mode: "report" } } })).stdout.json());
+    const effortOnly = await apply(dir, { revision, change: { op: "update-advisor", name: "legacy", set: { reasoningEffort: "medium" } } }, true);
+    assert.ok(effortOnly.code instanceof Error, "a new effort on a retired model is still checked");
+    const repaired = (await apply(dir, { revision, change: { op: "update-advisor", name: "legacy", set: { reasoningEffort: "default" } } }, true)).stdout.json();
+    assert.deepEqual(repaired.changes, ['advisor legacy: reasoningEffort "high" → "default"']);
+    const removed = (await apply(dir, { revision, change: { op: "remove-advisor", name: "legacy" } })).stdout.json();
+    assert.deepEqual(removed.changes, ["remove advisor legacy"]);
+  });
+
   it("the preview shows long instructions in full", async () => {
     const dir = await scratch("cma-chat-long-");
     await fs.writeFile(configPath(dir), JSON.stringify(baseConfig()));

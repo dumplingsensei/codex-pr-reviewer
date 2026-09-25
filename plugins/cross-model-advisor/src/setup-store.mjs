@@ -835,11 +835,26 @@ export async function applyChange(payload, options = {}) {
     }
     if (!known) fail("config", `${sanitizeText(advisor.model)} is not a ${slot.provider} model. Search with models ${slot.provider} --q <text>.`);
   }
-  await assertAdvisorReasoning(validated, options.validateReasoning ?? defaultValidateReasoning);
+  // Reasoning is checked for advisors whose model, provider, or effort this
+  // change sets, the same scope as the catalog check: an untouched advisor
+  // saved before its model left the catalog must not block unrelated edits.
+  // saveConfig gets the same scoped check, so the write agrees with the preview.
+  const validateFn = options.validateReasoning ?? defaultValidateReasoning;
+  const touched = new Set(
+    validated.advisors
+      .filter((advisor) => {
+        const old = before.get(advisor.name);
+        return !old || old.model !== advisor.model || old.provider !== advisor.provider || old.reasoningEffort !== advisor.reasoningEffort;
+      })
+      .map((advisor) => advisor.name)
+  );
+  const scopedReasoning = (slot, advisor, maxOutputTokens) =>
+    touched.has(advisor.name) ? validateFn(slot, advisor, maxOutputTokens) : { ok: true };
+  await assertAdvisorReasoning(validated, scopedReasoning);
   const changes = describeChange(state.config, validated);
   if (changes.length === 0) fail("input", "That change leaves the configuration as it is.");
   if (options.dryRun) return { ok: true, dryRun: true, revision: state.revision, changes };
-  const saved = await saveConfig({ revision: payload.revision, config: validated }, { env, validateReasoning: options.validateReasoning });
+  const saved = await saveConfig({ revision: payload.revision, config: validated }, { env, validateReasoning: scopedReasoning });
   return { ok: true, dryRun: false, path: saved.path, revision: saved.revision, changes };
 }
 

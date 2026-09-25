@@ -96329,11 +96329,19 @@ async function applyChange(payload, options = {}) {
     }
     if (!known) fail3("config", `${sanitizeText(advisor.model)} is not a ${slot.provider} model. Search with models ${slot.provider} --q <text>.`);
   }
-  await assertAdvisorReasoning(validated, options.validateReasoning ?? defaultValidateReasoning);
+  const validateFn = options.validateReasoning ?? defaultValidateReasoning;
+  const touched = new Set(
+    validated.advisors.filter((advisor) => {
+      const old = before.get(advisor.name);
+      return !old || old.model !== advisor.model || old.provider !== advisor.provider || old.reasoningEffort !== advisor.reasoningEffort;
+    }).map((advisor) => advisor.name)
+  );
+  const scopedReasoning = (slot, advisor, maxOutputTokens) => touched.has(advisor.name) ? validateFn(slot, advisor, maxOutputTokens) : { ok: true };
+  await assertAdvisorReasoning(validated, scopedReasoning);
   const changes = describeChange(state.config, validated);
   if (changes.length === 0) fail3("input", "That change leaves the configuration as it is.");
   if (options.dryRun) return { ok: true, dryRun: true, revision: state.revision, changes };
-  const saved = await saveConfig({ revision: payload.revision, config: validated }, { env: env2, validateReasoning: options.validateReasoning });
+  const saved = await saveConfig({ revision: payload.revision, config: validated }, { env: env2, validateReasoning: scopedReasoning });
   return { ok: true, dryRun: false, path: saved.path, revision: saved.revision, changes };
 }
 function writeJson(stdout, value) {
