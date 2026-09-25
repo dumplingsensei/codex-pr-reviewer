@@ -1049,6 +1049,8 @@ git -C "$SYMUP" checkout --quiet -b feature
 ln -s /etc/passwd "$SYMUP/escape.txt"
 echo change >>"$SYMUP/f.txt"
 printf 'Implemented by acme/service#9.\n' >"$SYMUP/refs.md"
+# The pull request also names a diff driver; see "cannot run the user's diff drivers".
+printf 'refs.md diff=cprprobe\n' >"$SYMUP/.gitattributes"
 git -C "$SYMUP" add -A && git -C "$SYMUP" commit --quiet -m "add a link out of the tree"
 git -C "$SYMUP" update-ref refs/pull/7/head refs/heads/feature
 git -C "$SYMUP" checkout --quiet main
@@ -1158,6 +1160,23 @@ check "the checkout is still clean" \
   "$(symgit status --porcelain --untracked-files=all | wc -l | tr -d ' ')" "0"
 check "the entry is still a symlink as far as the diff is concerned" \
   "$(symgit diff --raw codex-pr/o__r/7-base -- escape.txt | grep -c 120000)" "1"
+
+# Regression: a pull request's .gitattributes can name any diff driver the user
+# has configured, and prepare diffs the worktree outside the review sandbox. The
+# user's config here defines one whose textconv leaves a marker.
+note "a pull request cannot run the user's diff drivers"
+cat >"$SANDBOX/probe-textconv" <<PROBE
+#!/bin/sh
+touch "$SANDBOX/textconv-ran"
+cat "\$1"
+PROBE
+chmod +x "$SANDBOX/probe-textconv"
+printf '[diff "cprprobe"]\n\ttextconv = %s\n' "$SANDBOX/probe-textconv" >"$SANDBOX/probe.gitconfig"
+rm -f "$SANDBOX/textconv-ran"
+out="$(GIT_CONFIG_GLOBAL="$SANDBOX/probe.gitconfig" prepare_sym)"
+check "prepare still succeeds" "$([[ -d "$SYMWT" ]] && echo yes || echo no)" "yes"
+check "prepare never ran the textconv the pull request named" \
+  "$([[ -e "$SANDBOX/textconv-ran" ]] && echo ran || echo "not run")" "not run"
 
 
 note "an open context uses the contributor head"

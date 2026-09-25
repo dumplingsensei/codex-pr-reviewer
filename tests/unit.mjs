@@ -1038,6 +1038,14 @@ const initGuardRepo = () => {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+describe("pull request diffs");
+// A pull request's .gitattributes can name any diff driver the user has
+// configured, and the script diffs its worktree outside the review sandbox.
+for (const [index, line] of fs.readFileSync(path.join(pluginDir, "scripts", "pr-workspace.mjs"), "utf8").split("\n").entries()) {
+  if (!line.includes('"diff"')) continue;
+  eq(`line ${index + 1} diffs without textconv or external drivers`, line.includes('"--no-textconv"') && line.includes('"--no-ext-diff"'), true);
+}
+
 describe("advisor review budget");
 // Advisors share STOP_REVIEW_BUDGET_MS; the rest of the Stop hook's timeout is
 // for snapshots, the diff, and saving state. Moving one must move the other.

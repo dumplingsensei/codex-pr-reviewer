@@ -5,6 +5,15 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.17
+
+A pull request's `.gitattributes` could name a diff driver from the user's own
+git config (`exiftool`, `sops -d`, `git-crypt diff`), and `prepare` diffed the
+checkout outside the review sandbox, so that command ran on the pull request's
+files. Every diff of a pull request now passes `--no-textconv --no-ext-diff`. A
+regression case runs `prepare` with such a driver configured, and a unit check
+fails any new `git diff` call without the two flags.
+
 ## 0.9.16
 
 A repository-wide audit hardens cross-repository review context around the

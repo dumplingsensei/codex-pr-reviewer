@@ -914,7 +914,10 @@ function scanWorktreeDiffHints(worktree, baseBranch, limit = 50) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cpr-diff-"));
   const outFile = path.join(dir, "patch");
   const errFile = path.join(dir, "err");
-  const args = ["-C", worktree, "diff", "--unified=0", "--no-color", baseBranch, "--"];
+  // --no-textconv and --no-ext-diff on every diff of a pull request: its
+  // .gitattributes can name any diff driver the user has configured (exiftool,
+  // `sops -d`, git-crypt), and this runs outside the review sandbox.
+  const args = ["-C", worktree, "diff", "--no-textconv", "--no-ext-diff", "--unified=0", "--no-color", baseBranch, "--"];
   try {
     const outFd = fs.openSync(outFile, "w");
     const errFd = fs.openSync(errFile, "w");
@@ -1991,7 +1994,7 @@ function prepare(options, positionals, cwd) {
 
   // Also warms lazily-fetched blobs while the network is still available,
   // so the read-only sandboxed review never needs to reach out.
-  const changed = gitOut(worktree, ["diff", "--numstat", baseBranch, "--"])
+  const changed = gitOut(worktree, ["diff", "--no-textconv", "--no-ext-diff", "--numstat", baseBranch, "--"])
     .split("\n")
     .filter(Boolean).length;
   const referenceScan = scanWorktreeDiffHints(worktree, baseBranch);
@@ -2062,7 +2065,7 @@ function landedTarget(entry) {
 function prepareContextSnapshot(entry) {
   runChecked(
     "git",
-    ["-C", entry.worktree, "diff", "--no-ext-diff", "--binary", entry.baseBranch, "--"],
+    ["-C", entry.worktree, "diff", "--no-textconv", "--no-ext-diff", "--binary", entry.baseBranch, "--"],
     { stdio: ["ignore", "ignore", "pipe"] }
   );
 
