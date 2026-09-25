@@ -96271,7 +96271,7 @@ function withChange(config, change) {
 }
 function describeChange(before, after) {
   const lines = [];
-  const show = (value) => typeof value === "string" ? JSON.stringify(value.length > 120 ? `${value.slice(0, 117)}...` : value) : JSON.stringify(value);
+  const show = (value) => JSON.stringify(value);
   for (const [slot, entry] of Object.entries(after.providers)) {
     if (!before?.providers?.[slot]) {
       lines.push(`add provider slot ${slot}: ${entry.provider} (${entry.kind}${entry.apiKeyEnv ? `, key from $${entry.apiKeyEnv}` : ""})`);
@@ -96314,7 +96314,11 @@ async function applyChange(payload, options = {}) {
     fail3("config", sanitizeText(error instanceof Error ? error.message : "invalid configuration"));
   }
   const createProviderFn = options.createBuiltinProvider ?? defaultCreateBuiltinProvider;
-  for (const advisor of validated.advisors) {
+  const before = new Map((state.config?.advisors ?? []).map((advisor) => [advisor.name, advisor]));
+  const selected = validated.advisors.filter(
+    (advisor) => before.get(advisor.name)?.model !== advisor.model || before.get(advisor.name)?.provider !== advisor.provider
+  );
+  for (const advisor of selected) {
     const slot = validated.providers[advisor.provider];
     if (!slot || slot.provider === "openai-compatible") continue;
     let known = false;

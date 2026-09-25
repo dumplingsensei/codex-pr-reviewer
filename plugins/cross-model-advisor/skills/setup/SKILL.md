@@ -34,7 +34,7 @@ Change: `{ "op": "add-advisor", "slot": { "id", "kind", "provider", "apiKeyEnv"?
 
 ### Change an advisor
 
-Pick the advisor, then what to change: **Model**, **Effort**, **Instructions**, **Turn on/off**, or **Remove**. Gather the value as in **Add**. Change: `{ "op": "update-advisor", "name", "set": { <one of model, reasoningEffort, instructions, enabled> } }`, or `{ "op": "remove-advisor", "name" }`. A model change keeps the effort only if `efforts` still lists it; otherwise ask again.
+Pick the advisor, then what to change: **Model**, **Effort**, **Instructions**, **Turn on/off**, or **Remove**. Gather the value as in **Add**. Change: `{ "op": "update-advisor", "name", "set": { … } }` with the fields that change, or `{ "op": "remove-advisor", "name" }`. A model change always sends `model` and `reasoningEffort` together in one `set`: keep the current effort only if `efforts` lists it for the new model, otherwise ask for one of its choices. Sent separately, each half is checked against the other's old value and refused.
 
 ### Gate settings
 

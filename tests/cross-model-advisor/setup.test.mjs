@@ -712,6 +712,42 @@ describe("chat setup: summary and apply", () => {
     assert.equal(await fs.readFile(configPath(dir), "utf8"), before);
   });
 
+  const v2With = (advisors, extra = {}) => ({
+    ...baseConfig({ version: 2, ...extra }),
+    advisors: advisors.map((advisor) => ({ provider: "openai-api", instructions: "check", enabled: true, reasoningEffort: "default", ...advisor }))
+  });
+
+  it("changes model and effort together when the new model lacks the old effort", async () => {
+    const dir = await scratch("cma-chat-model-effort-");
+    await fs.writeFile(configPath(dir), JSON.stringify(v2With([{ name: "deep", model: "gpt-5", reasoningEffort: "high" }])));
+    const { revision } = await summary(dir);
+    const alone = await apply(dir, { revision, change: { op: "update-advisor", name: "deep", set: { model: "gpt-4.1" } } }, true);
+    assert.ok(alone.code instanceof Error);
+    const together = (await apply(dir, { revision, change: { op: "update-advisor", name: "deep", set: { model: "gpt-4.1", reasoningEffort: "default" } } })).stdout.json();
+    assert.deepEqual(together.changes, ['advisor deep: model "gpt-5" → "gpt-4.1"', 'advisor deep: reasoningEffort "high" → "default"']);
+  });
+
+  it("an advisor whose model left the catalog does not block other edits or its own repair", async () => {
+    const dir = await scratch("cma-chat-legacy-");
+    await fs.writeFile(configPath(dir), JSON.stringify(v2With([{ name: "legacy", model: "gpt-retired-model" }, { name: "current", model: "gpt-4.1" }])));
+    let { revision } = await summary(dir);
+    ({ revision } = (await apply(dir, { revision, change: { op: "set-gate", gate: { mode: "report" } } })).stdout.json());
+    ({ revision } = (await apply(dir, { revision, change: { op: "update-advisor", name: "current", set: { enabled: false } } })).stdout.json());
+    const moved = (await apply(dir, { revision, change: { op: "update-advisor", name: "legacy", set: { model: "gpt-4.1" } } })).stdout.json();
+    assert.deepEqual(moved.changes, ['advisor legacy: model "gpt-retired-model" → "gpt-4.1"']);
+    const back = await apply(dir, { revision: moved.revision, change: { op: "update-advisor", name: "legacy", set: { model: "gpt-retired-model" } } }, true);
+    assert.match(back.code.message, /is not a openai model/);
+  });
+
+  it("the preview shows long instructions in full", async () => {
+    const dir = await scratch("cma-chat-long-");
+    await fs.writeFile(configPath(dir), JSON.stringify(baseConfig()));
+    const { revision } = await summary(dir);
+    const instructions = `${"Review carefully. ".repeat(12)}THE-TAIL-MUST-BE-VISIBLE`;
+    const preview = (await apply(dir, { revision, change: { op: "update-advisor", name: "correctness", set: { instructions } } }, true)).stdout.json();
+    assert.ok(preview.changes.join("\n").includes(JSON.stringify(instructions)));
+  });
+
   it("set-gate with an empty list removes that key", async () => {
     const dir = await scratch("cma-chat-gate-");
     const v2 = baseConfig({ version: 2, gate: { mode: "block", maxRounds: 2, skipWhenOnly: ["*.md"] } });

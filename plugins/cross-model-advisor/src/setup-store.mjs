@@ -763,7 +763,8 @@ function withChange(config, change) {
  */
 function describeChange(before, after) {
   const lines = [];
-  const show = (value) => (typeof value === "string" ? JSON.stringify(value.length > 120 ? `${value.slice(0, 117)}...` : value) : JSON.stringify(value));
+  // Whole values, never shortened: the preview is what the user confirms.
+  const show = (value) => JSON.stringify(value);
   for (const [slot, entry] of Object.entries(after.providers)) {
     if (!before?.providers?.[slot]) {
       lines.push(`add provider slot ${slot}: ${entry.provider} (${entry.kind}${entry.apiKeyEnv ? `, key from $${entry.apiKeyEnv}` : ""})`);
@@ -817,7 +818,13 @@ export async function applyChange(payload, options = {}) {
     fail("config", sanitizeText(error instanceof Error ? error.message : "invalid configuration"));
   }
   const createProviderFn = options.createBuiltinProvider ?? defaultCreateBuiltinProvider;
-  for (const advisor of validated.advisors) {
+  // Only models this change selects: an advisor saved earlier whose model has
+  // since left the pinned catalog must not block editing, or removing, it.
+  const before = new Map((state.config?.advisors ?? []).map((advisor) => [advisor.name, advisor]));
+  const selected = validated.advisors.filter(
+    (advisor) => before.get(advisor.name)?.model !== advisor.model || before.get(advisor.name)?.provider !== advisor.provider
+  );
+  for (const advisor of selected) {
     const slot = validated.providers[advisor.provider];
     if (!slot || slot.provider === "openai-compatible") continue;
     let known = false;

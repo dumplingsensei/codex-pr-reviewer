@@ -6,6 +6,19 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.11
+
+Three fixes to 2.1.10's chat setup, found by the cross-model advisor:
+
+- A model change sends `model` and `reasoningEffort` in one `set`. The skill
+  asked for one field at a time, so moving to a model without the current
+  effort was refused either way.
+- The catalog check covers only models the change selects. An advisor saved
+  earlier whose model has since left the pinned catalog blocked every change,
+  including gate settings and that advisor's own repair.
+- The preview shows values whole. It cut text at 120 characters, so custom
+  instructions could be saved without being seen in full.
+
 ## 2.1.10
 
 - **Setup in Claude Code.** `/cross-model-advisor:setup` now adds and changes

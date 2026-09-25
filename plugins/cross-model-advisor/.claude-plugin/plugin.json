@@ -1,6 +1,6 @@
 {
   "name": "cross-model-advisor",
-  "version": "2.1.10",
+  "version": "2.1.11",
   "description": "A review gate from other model families: when Claude finishes a turn that changed files, configured advisors review the git diff with read-only tools and send Claude back to address evidence-backed concerns.",
   "author": {
     "name": "dumplingsensei"
