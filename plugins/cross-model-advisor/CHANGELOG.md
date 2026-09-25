@@ -6,6 +6,18 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.7
+
+- **Auto-on.** `gate.autoOn` in your own config lists absolute project roots;
+  a new SessionStart hook turns the gate on there without
+  `/cross-model-advisor:on` and shows a one-line notice (never context for
+  Claude). `/cross-model-advisor:off` wins for the rest of that session, even
+  after a resume. A project cannot list itself; only this user file can.
+- **Skip docs-only turns.** `gate.skipWhenOnly` takes gitignore patterns such
+  as `*.md`; a turn whose changed files all match is not reviewed. Unlike
+  `exclude`, the files stay visible to advisors in other turns.
+- An older plugin rejects a config that uses either key.
+
 ## 2.1.6
 
 - **Short credentials are redacted.** A name ending in a credential word

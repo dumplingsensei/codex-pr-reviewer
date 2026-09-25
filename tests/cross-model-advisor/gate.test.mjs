@@ -18,7 +18,7 @@ const modules = path.join(here, "..", "..", "plugins", "cross-model-advisor", "d
 const load = (rel) => import(pathToFileURL(path.join(modules, rel)).href);
 
 const { runStop, runOn } = await load("gate.mjs");
-const { recordPrompt, runOff, runStatus } = await load("control.mjs");
+const { recordPrompt, runOff, runStatus, runSessionStart } = await load("control.mjs");
 const { snapshotTree, turnDiff } = await load("snapshot.mjs");
 const { validateConfig } = await load("config.mjs");
 
@@ -360,6 +360,67 @@ test("advisors cannot read files git ignores through .git/info/exclude", async (
   assert.match(seen[0], /^Error:/);
   assert.doesNotMatch(seen[1], /local-secrets/);
   assert.doesNotMatch(seen[2], /local-secrets/);
+});
+
+test("a turn that only touches gate.skipWhenOnly files is skipped, a mixed turn is not", async () => {
+  const w = await world({ gate: { mode: "block", maxRounds: 2, skipWhenOnly: ["*.md", "docs/**"] } });
+  await w.prompt("fix the readme typo");
+  await fs.writeFile(path.join(w.root, "README.md"), "# fixed\n");
+  await fs.mkdir(path.join(w.root, "docs"));
+  await fs.writeFile(path.join(w.root, "docs", "guide.txt"), "guide\n");
+  assert.equal(await w.stop(), null);
+  assert.equal(w.reviews.length, 0);
+  assert.equal((await w.status()).lastSkip.reason, "only files matching gate.skipWhenOnly changed");
+
+  await w.prompt("document and change last()");
+  await fs.appendFile(path.join(w.root, "README.md"), "more\n");
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+  await w.stop();
+  assert.equal(w.reviews.length, 1);
+  assert.ok(w.reviews[0].turn.diff.files.some((file) => file.path === "README.md"));
+});
+
+test("gate.autoOn in the user's config turns the gate on at session start, and /off wins", async () => {
+  const root = await scratch("cma-autoon-repo-");
+  git(root, "init", "-q");
+  await fs.writeFile(path.join(root, "a.js"), "x\n");
+  git(root, "add", "-A");
+  git(root, "commit", "-qm", "init");
+  const other = await scratch("cma-autoon-other-");
+  git(other, "init", "-q");
+  const configDir = await scratch("cma-autoon-cfg-");
+  const data = await scratch("cma-autoon-data-");
+  await fs.writeFile(
+    path.join(configDir, "cross-model-advisor.json"),
+    JSON.stringify({
+      version: 2,
+      providers: { local: { kind: "api", provider: "openai", apiKeyEnv: "CMA_TEST_KEY" } },
+      advisors: [{ name: "correctness", provider: "local", model: "gpt-test", instructions: "check", enabled: true, reasoningEffort: "default" }],
+      gate: { mode: "block", maxRounds: 2, autoOn: [root] }
+    })
+  );
+  const envFor = (sessionId, projectDir) => {
+    const env = { ...process.env, CLAUDE_CODE_SESSION_ID: sessionId, CLAUDE_PLUGIN_DATA: data, CLAUDE_PROJECT_DIR: projectDir, CLAUDE_CONFIG_DIR: configDir };
+    delete env.CLAUDE_SESSION_ID;
+    return env;
+  };
+  const start = (env, sessionId) => runSessionStart({ session_id: sessionId, hook_event_name: "SessionStart", source: "startup" }, { env });
+
+  const listed = envFor("autoon-listed", root);
+  const out = JSON.parse(await start(listed, "autoon-listed"));
+  assert.match(out.systemMessage, /review gate on for .* \(gate\.autoOn\)/);
+  assert.equal(out.additionalContext, undefined);
+  const status = await runStatus(listed);
+  assert.equal(status.enabled, true);
+  assert.equal(status.projectRoot, await fs.realpath(root));
+
+  await runOff(listed);
+  assert.equal(await start(listed, "autoon-listed"), "");
+  assert.equal((await runStatus(listed)).enabled, false);
+
+  const unlisted = envFor("autoon-unlisted", other);
+  assert.equal(await start(unlisted, "autoon-unlisted"), "");
+  assert.equal((await runStatus(unlisted)).enabled, false);
 });
 
 test("control commands, subagents, other prompts, and off are never reviewed", async () => {

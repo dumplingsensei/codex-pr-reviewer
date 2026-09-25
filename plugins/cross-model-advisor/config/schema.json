@@ -194,6 +194,18 @@
           "maximum": 5,
           "default": 2,
           "description": "How many times one prompt can be sent back before Claude is allowed to stop."
+        },
+        "autoOn": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "description": "Absolute git project roots where the gate turns on at session start, without /cross-model-advisor:on. /cross-model-advisor:off still wins for that session. Only this user file can list a project."
+        },
+        "skipWhenOnly": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "minLength": 1, "maxLength": 1024, "not": { "pattern": "^\\s*!" } },
+          "description": "gitignore-style patterns. A turn whose changed files all match is not reviewed; matching files stay visible to advisors in other turns."
         }
       }
     },

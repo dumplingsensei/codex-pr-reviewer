@@ -49,6 +49,806 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
+// node_modules/ignore/index.js
+var require_ignore = __commonJS({
+  "node_modules/ignore/index.js"(exports, module) {
+    function makeArray(subject) {
+      return Array.isArray(subject) ? subject : [subject];
+    }
+    var UNDEFINED = void 0;
+    var EMPTY3 = "";
+    var SPACE2 = " ";
+    var ESCAPE = "\\";
+    var REGEX_LITERAL_SPECIAL = /[.*+?()[\]{}^$|\\/]/;
+    var REGEX_TEST_BLANK_LINE = /^ +$/;
+    var REGEX_INVALID_TRAILING_BACKSLASH = /(?:[^\\]|^)\\$/;
+    var REGEX_REPLACE_LEADING_EXCAPED_EXCLAMATION = /^\\!/;
+    var REGEX_REPLACE_LEADING_EXCAPED_HASH = /^\\#/;
+    var REGEX_SPLITALL_CRLF = /\r?\n/g;
+    var DOUBLE_SLASH = "//";
+    var SLASH_CODE = 47;
+    var DOT_CODE = 46;
+    var SLASH = "/";
+    var TMP_KEY_IGNORE = "node-ignore";
+    if (typeof Symbol !== "undefined") {
+      TMP_KEY_IGNORE = /* @__PURE__ */ Symbol.for("node-ignore");
+    }
+    var KEY_IGNORE = TMP_KEY_IGNORE;
+    var define2 = (object, key, value) => {
+      Object.defineProperty(object, key, { value });
+      return value;
+    };
+    var RETURN_FALSE = () => false;
+    var cleanRangeBackSlash = (slashes) => {
+      const { length } = slashes;
+      return slashes.slice(0, length - length % 2);
+    };
+    var POSIX_CLASSES = {
+      alnum: "0-9A-Za-z",
+      alpha: "A-Za-z",
+      blank: " \\t",
+      cntrl: "\\x00-\\x1f\\x7f",
+      digit: "0-9",
+      graph: "!-.0-~",
+      lower: "a-z",
+      print: " -.0-~",
+      punct: "!-.:-@\\[-`{-~",
+      // git's `sane-ctype.h` classifies \v and \f as control, not space,
+      //   unlike C's `isspace`
+      space: " \\t\\n\\r",
+      upper: "A-Z",
+      xdigit: "0-9A-Fa-f"
+    };
+    var CLASS_MEMBERS_TO_ESCAPE = "\\]^-[";
+    var escapeMember = (char) => CLASS_MEMBERS_TO_ESCAPE.indexOf(char) < 0 ? char : ESCAPE + char;
+    var NON_SLASH = "(?!\\/)";
+    var classSource = (negated, body) => {
+      if (negated) {
+        return `[^\\/${body}]`;
+      }
+      const source = `[${body}]`;
+      return new RegExp(source).test("/") ? NON_SLASH + source : source;
+    };
+    var scanBracket = (pattern, start) => {
+      const { length } = pattern;
+      let index3 = start + 1;
+      let negated = EMPTY3;
+      const lead = pattern[index3];
+      if (lead === "!" || lead === "^") {
+        negated = "^";
+        index3++;
+      }
+      let body = EMPTY3;
+      let prev = EMPTY3;
+      for (; ; ) {
+        const char = pattern[index3];
+        if (char === UNDEFINED) {
+          return null;
+        }
+        if (char === ESCAPE) {
+          const escaped = pattern[index3 + 1];
+          if (escaped === UNDEFINED) {
+            return null;
+          }
+          body += escapeMember(escaped);
+          prev = escaped;
+          index3++;
+        } else if (char === "-" && prev && index3 + 1 < length && pattern[index3 + 1] !== "]") {
+          index3++;
+          let to = pattern[index3];
+          if (to === ESCAPE) {
+            to = pattern[index3 += 1];
+          }
+          if (prev <= to) {
+            body += `-${escapeMember(to)}`;
+          }
+          prev = EMPTY3;
+        } else if (char === "[" && pattern[index3 + 1] === ":") {
+          const nameStart = index3 + 2;
+          let end = nameStart;
+          while (end < length && pattern[end] !== "]") {
+            end++;
+          }
+          if (end === length) {
+            return null;
+          }
+          if (end > nameStart && pattern[end - 1] === ":") {
+            const expanded = POSIX_CLASSES[pattern.slice(nameStart, end - 1)];
+            if (expanded === UNDEFINED) {
+              return null;
+            }
+            body += expanded;
+            prev = EMPTY3;
+            index3 = end;
+          } else {
+            body += escapeMember("[");
+            prev = "[";
+            index3 = nameStart - 2;
+          }
+        } else {
+          body += escapeMember(char);
+          prev = char;
+        }
+        index3++;
+        if (pattern[index3] === "]") {
+          return {
+            end: index3,
+            source: classSource(negated, body)
+          };
+        }
+      }
+    };
+    var NEVER_MATCH = "[]";
+    var PLACEHOLDER = "\0";
+    var REGEX_RESTORE_PLACEHOLDER = new RegExp(
+      `${PLACEHOLDER}(\\d+)${PLACEHOLDER}`,
+      "g"
+    );
+    var TRAILING_WILDCARD = "";
+    var extractBrackets = (pattern) => {
+      const sources = [];
+      const hold = (source) => `${PLACEHOLDER}${sources.push(source) - 1}${PLACEHOLDER}`;
+      const { length } = pattern;
+      let out = EMPTY3;
+      let index3 = 0;
+      while (index3 < length) {
+        const char = pattern[index3];
+        if (char === ESCAPE) {
+          const escaped = pattern[index3 + 1];
+          if (escaped === "*" || escaped === "[" || escaped === SPACE2 || escaped === ESCAPE) {
+            out += pattern.slice(index3, index3 + 2);
+          } else {
+            out += hold(
+              REGEX_LITERAL_SPECIAL.test(escaped) ? ESCAPE + escaped : escaped
+            );
+          }
+          index3 += 2;
+        } else if (char === PLACEHOLDER) {
+          out += hold(`[${PLACEHOLDER}]`);
+          index3++;
+        } else if (char === "[") {
+          const scanned = scanBracket(pattern, index3);
+          if (scanned === null) {
+            out += hold(NEVER_MATCH);
+            index3 = length;
+          } else {
+            out += hold(scanned.source);
+            index3 = scanned.end + 1;
+          }
+        } else {
+          out += char;
+          index3++;
+        }
+      }
+      return {
+        source: out,
+        sources
+      };
+    };
+    var DIRECT = null;
+    var REGEX_INNER_SLASH = /\/(?!$)/;
+    var REPLACERS = [
+      [
+        // Remove BOM
+        // TODO:
+        // Other similar zero-width characters?
+        /^\uFEFF/,
+        () => EMPTY3,
+        "\uFEFF"
+      ],
+      [
+        // A trailing line terminator, left on when a whole file's contents are
+        //   added as one pattern rather than split into lines. git never sees one
+        //   -- it reads a `.gitignore` line by line -- so it is not part of the
+        //   pattern and is dropped here, apart from the trailing-space trimming,
+        //   which follows git in touching spaces and nothing else.
+        /[\r\n]+$/,
+        () => EMPTY3
+      ],
+      // > Trailing spaces are ignored unless they are quoted with backslash ("\")
+      [
+        // Only spaces, never tabs or other whitespace: git trims a trailing run
+        //   of `' '` and nothing else (dir.c, `trim_trailing_spaces`, a single
+        //   `case ' '`), so a pattern ending in a tab keeps it as a literal.
+        // (a\ ) -> (a )
+        // (a  ) -> (a)
+        // (a ) -> (a)
+        // (a \ ) -> (a  )
+        /((?:\\\\)*?)(\\? +)$/,
+        (_, m1, m2) => m1 + (m2.indexOf("\\") === 0 ? SPACE2 : EMPTY3)
+      ],
+      // Replace (\ ) with ' '
+      // Only a space: an escaped tab or other whitespace is already a literal by
+      //   the time it reaches here, and a bare tab must be left as one, not turned
+      //   into a space.
+      // (\ ) -> ' '
+      // (\\ ) -> '\\ '
+      // (\\\ ) -> '\\ '
+      [
+        /(\\+?) /g,
+        (_, m1) => {
+          const { length } = m1;
+          return m1.slice(0, length - length % 2) + SPACE2;
+        }
+      ],
+      // Escape metacharacters
+      // which is written down by users but means special for regular expressions.
+      // > There are 12 characters with special meanings:
+      // > - the backslash \,
+      // > - the caret ^,
+      // > - the dollar sign $,
+      // > - the period or dot .,
+      // > - the vertical bar or pipe symbol |,
+      // > - the question mark ?,
+      // > - the asterisk or star *,
+      // > - the plus sign +,
+      // > - the opening parenthesis (,
+      // > - the closing parenthesis ),
+      // > - and the opening square bracket [,
+      // > - the opening curly brace {,
+      // > These special characters are often called "metacharacters".
+      [
+        /[\\$.|*+(){^]/g,
+        (match2) => `\\${match2}`
+      ],
+      [
+        // > a question mark (?) matches a single character
+        /(?!\\)\?/g,
+        () => "[^/]",
+        "?"
+      ],
+      // leading slash
+      [
+        // > A leading slash matches the beginning of the pathname.
+        // > For example, "/*.c" matches "cat-file.c" but not "mozilla-sha1/sha1.c".
+        // A leading slash matches the beginning of the pathname
+        /^\//,
+        () => "^",
+        SLASH
+      ],
+      // replace special metacharacter slash after the leading slash
+      [
+        /\//g,
+        () => "\\/",
+        SLASH
+      ],
+      [
+        // > A leading "**" followed by a slash means match in all directories.
+        // > For example, "**/foo" matches file or directory "foo" anywhere,
+        // > the same as pattern "foo".
+        // > "**/foo/bar" matches file or directory "bar" anywhere that is directly
+        // >   under directory "foo".
+        // Notice that the '*'s have been replaced as '\\*'
+        /^\^*(?:\\\*\\\*\\\/)+/,
+        // '**/foo' <-> 'foo'
+        () => "^(?:.*\\/)?",
+        "*"
+      ],
+      // starting
+      [
+        // there will be no leading '/'
+        //   (which has been replaced by section "leading slash")
+        // If starts with '**', adding a '^' to the regular expression also works
+        DIRECT,
+        (source, pattern) => {
+          if (!source || source[0] === "^") {
+            return source;
+          }
+          const anchor = !REGEX_INNER_SLASH.test(pattern) ? "(?:^|\\/)" : "^";
+          return anchor + source;
+        }
+      ],
+      // two globstars
+      [
+        // Use lookahead assertions so that we could match more than one `'/**'`
+        /\\\/\\\*\\\*(?=\\\/|$)/g,
+        // Zero, one or several directories
+        // should not use '*', or it will be replaced by the next replacer
+        // Check if it is not the last `'/**'`
+        (_, index3, str2) => index3 + 6 < str2.length ? str2.slice(index3 + 6) === "\\/" ? "(?:\\/[^\\/]+)+" : "(?:\\/[^\\/]+)*" : "\\/.+",
+        "*"
+      ],
+      // normal intermediate wildcards
+      [
+        // Never replace escaped '*'
+        // ignore rule '\*' will match the path '*'
+        // 'abc.*/' -> go
+        // 'abc.*'  -> skip this rule,
+        //    coz trailing single wildcard will be handed by [trailing wildcard]
+        /(^|[^\\]+)(\\\*)+(?=.+)/g,
+        // '*.js' matches '.js'
+        // '*.js' doesn't match 'abc'
+        (_, p1, p2) => {
+          const unescaped = p2.replace(/\\\*/g, "[^\\/]*");
+          return p1 + unescaped;
+        },
+        "*"
+      ],
+      // trailing wildcard, held apart from a literal star
+      [
+        // The step above leaves a trailing `*` alone, so a single `\*` is all that
+        //   can be left at the end here. Whether it is a wildcard or a literal
+        //   turns on the backslashes the user put in front of it: the escaper has
+        //   since doubled every one, so what stands here is those `2N` doubled
+        //   backslashes and then the star's own escape. An even number of the
+        //   original `N` leaves the star unescaped -- a wildcard -- and an odd
+        //   number escapes it -- a literal. This runs while the two are still
+        //   distinct, before the unescape steps below collapse the literal onto
+        //   the very `\*` a wildcard leaves behind.
+        /(^|[^\\])((?:\\\\)*)\\\*$/,
+        (match2, p1, p2) => (
+          // `p2` holds the doubled user backslashes; half of them is `N`.
+          p2.length / 2 % 2 === 0 ? p1 + p2 + TRAILING_WILDCARD : match2
+        ),
+        "*"
+      ],
+      [
+        // unescape, revert step 3 except for back slash
+        // For example, if a user escape a '\\*',
+        // after step 3, the result will be '\\\\\\*'
+        /\\\\\\(?=[$.|*+(){^])/g,
+        () => ESCAPE,
+        ESCAPE + ESCAPE
+      ],
+      [
+        // '\\\\' -> '\\'
+        /\\\\/g,
+        () => ESCAPE,
+        ESCAPE + ESCAPE
+      ],
+      [
+        // Every real bracket expression -- POSIX classes included -- has already
+        //   been held aside by `extractBrackets`, so the only `[` left in the
+        //   pattern is an escaped, literal one.
+        // `\` is escaped by step 3
+        /\\\[([^\]/]*?)(\\*)($|\])/g,
+        // '\\[bar]' -> '\\\\[bar\\]'
+        (match2, range, endEscape, close) => `\\[${range}${cleanRangeBackSlash(endEscape)}${close}`,
+        "["
+      ],
+      // ending
+      [
+        // 'js' will not match 'js.'
+        // 'ab' will not match 'abc'
+        DIRECT,
+        // WTF!
+        // https://git-scm.com/docs/gitignore
+        // changes in [2.22.1](https://git-scm.com/docs/gitignore/2.22.1)
+        // which re-fixes #24, #38
+        // > If there is a separator at the end of the pattern then the pattern
+        // > will only match directories, otherwise the pattern can match both
+        // > files and directories.
+        // 'js*' will not match 'a.js'
+        // 'js/' will not match 'a.js'
+        // 'js' will match 'a.js' and 'a.js/'
+        (source) => {
+          const last = source[source.length - 1];
+          if (!last || last === TRAILING_WILDCARD) {
+            return source;
+          }
+          return last === SLASH ? `${source}$` : `${source}(?=$|\\/$)`;
+        }
+      ]
+    ];
+    var REGEX_REPLACE_TRAILING_WILDCARD = /(^|\\\/)?\uE000$/;
+    var MODE_IGNORE = "regex";
+    var MODE_CHECK_IGNORE = "checkRegex";
+    var UNDERSCORE = "_";
+    var TRAILING_WILD_CARD_REPLACERS = {
+      [MODE_IGNORE](_, p1) {
+        const prefix = p1 ? `${p1}[^/]+` : "[^/]*";
+        return `${prefix}(?=$|\\/$)`;
+      },
+      [MODE_CHECK_IGNORE](_, p1) {
+        const prefix = p1 ? `${p1}[^/]*` : "[^/]*";
+        return `${prefix}(?=$|\\/$)`;
+      }
+    };
+    var WILDCARD = "[^\\/]*";
+    var pinWildcards = (source) => {
+      if (source.indexOf(WILDCARD) < 0) {
+        return source;
+      }
+      const tokens = [];
+      const { length } = source;
+      let index3 = 0;
+      while (index3 < length) {
+        const char = source[index3];
+        if (source.startsWith(WILDCARD, index3)) {
+          tokens.push({ wildcard: true });
+          index3 += WILDCARD.length;
+        } else if (char === "[") {
+          let end = index3 + 1;
+          if (source[end] === "^") {
+            end++;
+          }
+          if (source[end] === "]") {
+            end++;
+          }
+          while (end < length && source[end] !== "]") {
+            end += source[end] === ESCAPE ? 2 : 1;
+          }
+          end++;
+          tokens.push({ single: source.slice(index3, end) });
+          index3 = end;
+        } else if (char === ESCAPE) {
+          tokens.push({ single: source.slice(index3, index3 + 2) });
+          index3 += 2;
+        } else if (char === "(") {
+          let depth = 0;
+          let end = index3;
+          do {
+            if (source[end] === ESCAPE) {
+              end++;
+            } else if (source[end] === "(") {
+              depth++;
+            } else if (source[end] === ")") {
+              depth--;
+            }
+            end++;
+          } while (end < length && depth > 0);
+          if ("*+?".indexOf(source[end]) >= 0) {
+            end++;
+          }
+          tokens.push({ boundary: source.slice(index3, end) });
+          index3 = end;
+        } else if (char === "^" || char === "$") {
+          tokens.push({ boundary: char });
+          index3++;
+        } else {
+          tokens.push({ single: char });
+          index3++;
+        }
+      }
+      let out = EMPTY3;
+      let run = [];
+      const flush = () => {
+        let lastWildcard;
+        run.forEach((token, at) => {
+          if (token.wildcard) {
+            lastWildcard = at;
+          }
+        });
+        run.forEach((token, at) => {
+          if (!token.wildcard) {
+            out += token.single;
+            return;
+          }
+          out += at === lastWildcard ? WILDCARD : `(?:(?!${run[at + 1].single})[^\\/])*`;
+        });
+        run = [];
+      };
+      tokens.forEach((token) => {
+        if (token.boundary === void 0) {
+          run.push(token);
+          return;
+        }
+        flush();
+        out += token.boundary;
+      });
+      flush();
+      return out;
+    };
+    var makeRegexPrefix = (pattern) => {
+      const { source, sources } = extractBrackets(pattern);
+      const replaced = REPLACERS.reduce(
+        // A pass whose matcher finds nothing hands back the very string it was
+        //   given, so asking first costs a search and saves a rewrite. Ten of the
+        //   fifteen passes never fire for a typical .gitignore line, and between
+        //   them they were 45% of this chain.
+        (prev, [matcher, replacer, required]) => {
+          if (matcher === DIRECT) {
+            return replacer(prev, pattern);
+          }
+          if (required !== UNDEFINED && prev.indexOf(required) < 0) {
+            return prev;
+          }
+          return matcher.test(prev) ? prev.replace(matcher, replacer.bind(pattern)) : prev;
+        },
+        source
+      );
+      return sources.length ? replaced.replace(
+        REGEX_RESTORE_PLACEHOLDER,
+        (match2, index3) => sources[index3]
+      ) : replaced;
+    };
+    var matchesBasename = (body) => {
+      const index3 = body.indexOf(SLASH);
+      return index3 < 0 || index3 === body.length - 1;
+    };
+    var basenameOf = (path12) => {
+      const end = path12.length - 1;
+      const index3 = path12.lastIndexOf(
+        SLASH,
+        path12[end] === SLASH ? end - 1 : end
+      );
+      return index3 < 0 ? path12 : path12.slice(index3 + 1);
+    };
+    var parentOf = (path12) => {
+      if (path12.charCodeAt(0) === SLASH_CODE || path12.indexOf(DOUBLE_SLASH) >= 0) {
+        const slices = path12.split(SLASH).filter(Boolean);
+        slices.pop();
+        return slices.length ? slices.join(SLASH) + SLASH : EMPTY3;
+      }
+      const end = path12.length - 1;
+      const cut = path12.lastIndexOf(
+        SLASH,
+        path12.charCodeAt(end) === SLASH_CODE ? end - 1 : end
+      );
+      return cut < 0 ? EMPTY3 : path12.slice(0, cut + 1);
+    };
+    var isString = (subject) => typeof subject === "string";
+    var checkPattern = (pattern) => pattern && isString(pattern) && !REGEX_TEST_BLANK_LINE.test(pattern) && !REGEX_INVALID_TRAILING_BACKSLASH.test(pattern) && pattern.indexOf("#") !== 0;
+    var splitPattern = (pattern) => pattern.split(REGEX_SPLITALL_CRLF).filter(Boolean);
+    var IgnoreRule = class {
+      constructor(pattern, mark, body, ignoreCase, negative, prefix) {
+        this.pattern = pattern;
+        this.mark = mark;
+        this.negative = negative;
+        define2(this, "body", body);
+        define2(this, "ignoreCase", ignoreCase);
+        define2(this, "regexPrefix", prefix);
+      }
+      // Worked out on first use and kept behind an own property, the way `regex`
+      //   caches itself in `_regex`. Deciding it in the constructor instead would
+      //   add a fourth `defineProperty` to every rule ever built, which cost 4% of
+      //   every compile -- including the compiles of rules that are never matched
+      //   against anything.
+      get _basenameOnly() {
+        return define2(this, "_basenameOnly", matchesBasename(this.body));
+      }
+      get regex() {
+        const key = UNDERSCORE + MODE_IGNORE;
+        if (this[key]) {
+          return this[key];
+        }
+        return this._make(MODE_IGNORE, key);
+      }
+      get checkRegex() {
+        const key = UNDERSCORE + MODE_CHECK_IGNORE;
+        if (this[key]) {
+          return this[key];
+        }
+        return this._make(MODE_CHECK_IGNORE, key);
+      }
+      _make(mode, key) {
+        const str2 = pinWildcards(this.regexPrefix.replace(
+          REGEX_REPLACE_TRAILING_WILDCARD,
+          // It does not need to bind pattern
+          TRAILING_WILD_CARD_REPLACERS[mode]
+        ));
+        const regex = this.ignoreCase ? new RegExp(str2, "i") : new RegExp(str2);
+        return define2(this, key, regex);
+      }
+    };
+    var createRule = ({
+      pattern,
+      mark
+    }, ignoreCase) => {
+      let negative = false;
+      let body = pattern;
+      if (body.indexOf("!") === 0) {
+        negative = true;
+        body = body.substr(1);
+      }
+      body = body.replace(REGEX_REPLACE_LEADING_EXCAPED_EXCLAMATION, "!").replace(REGEX_REPLACE_LEADING_EXCAPED_HASH, "#");
+      const regexPrefix = makeRegexPrefix(body);
+      return new IgnoreRule(
+        pattern,
+        mark,
+        body,
+        ignoreCase,
+        negative,
+        regexPrefix
+      );
+    };
+    var RuleManager = class {
+      constructor(ignoreCase) {
+        this._ignoreCase = ignoreCase;
+        this._rules = [];
+        this._basenameCount = 0;
+      }
+      _add(pattern) {
+        if (pattern && pattern[KEY_IGNORE]) {
+          this._rules = this._rules.concat(pattern._rules._rules);
+          this._basenameCount += pattern._rules._basenameCount;
+          this._added = true;
+          return;
+        }
+        if (isString(pattern)) {
+          pattern = {
+            pattern
+          };
+        }
+        if (checkPattern(pattern.pattern)) {
+          const rule = createRule(pattern, this._ignoreCase);
+          this._added = true;
+          this._rules.push(rule);
+          if (matchesBasename(rule.body)) {
+            this._basenameCount++;
+          }
+        }
+      }
+      // @param {Array<string> | string | Ignore} pattern
+      add(pattern) {
+        this._added = false;
+        makeArray(
+          isString(pattern) ? splitPattern(pattern) : pattern
+        ).forEach(this._add, this);
+        return this._added;
+      }
+      // Test one single path without recursively checking parent directories
+      //
+      // - checkUnignored `boolean` whether should check if the path is unignored,
+      //   setting `checkUnignored` to `false` could reduce additional
+      //   path matching.
+      // - check `string` either `MODE_IGNORE` or `MODE_CHECK_IGNORE`
+      // @returns {TestResult} true if a file is ignored
+      test(path12, checkUnignored, mode) {
+        let ignored = false;
+        let unignored = false;
+        let matchedRule;
+        const rules = this._rules;
+        const { length } = rules;
+        const shortcut = this._basenameCount * 2 >= length;
+        const basename3 = shortcut ? basenameOf(path12) : path12;
+        for (let index3 = 0; index3 < length; index3++) {
+          const rule = rules[index3];
+          const { negative } = rule;
+          const skip = unignored === negative && ignored !== unignored || negative && !ignored && !unignored && !checkUnignored;
+          if (!skip && rule[mode].test(
+            shortcut && rule._basenameOnly ? basename3 : path12
+          )) {
+            ignored = !negative;
+            unignored = negative;
+            matchedRule = negative ? UNDEFINED : rule;
+          }
+        }
+        const ret = {
+          ignored,
+          unignored
+        };
+        if (matchedRule) {
+          ret.rule = matchedRule;
+        }
+        return ret;
+      }
+    };
+    var throwError = (message, Ctor) => {
+      throw new Ctor(message);
+    };
+    var checkPath = (path12, originalPath, doThrow) => {
+      if (!isString(path12)) {
+        return doThrow(
+          `path must be a string, but got \`${originalPath}\``,
+          TypeError
+        );
+      }
+      if (!path12) {
+        return doThrow(`path must not be empty`, TypeError);
+      }
+      if (checkPath.isNotRelative(path12)) {
+        const r2 = "`path.relative()`d";
+        return doThrow(
+          `path should be a ${r2} string, but got "${originalPath}"`,
+          RangeError
+        );
+      }
+      return true;
+    };
+    var isNotRelative = (path12) => {
+      const first = path12.charCodeAt(0);
+      if (first === SLASH_CODE) {
+        return true;
+      }
+      if (first !== DOT_CODE) {
+        return false;
+      }
+      if (path12.length === 1) {
+        return true;
+      }
+      const second = path12.charCodeAt(1);
+      if (second === SLASH_CODE) {
+        return true;
+      }
+      if (second !== DOT_CODE) {
+        return false;
+      }
+      return path12.length === 2 || path12.charCodeAt(2) === SLASH_CODE;
+    };
+    checkPath.isNotRelative = isNotRelative;
+    checkPath.convert = (p) => p;
+    var Ignore = class {
+      constructor({
+        ignorecase = true,
+        ignoreCase = ignorecase,
+        allowRelativePaths = false
+      } = {}) {
+        define2(this, KEY_IGNORE, true);
+        this._rules = new RuleManager(ignoreCase);
+        this._strictPathCheck = !allowRelativePaths;
+        this._initCache();
+      }
+      _initCache() {
+        this._ignoreCache = /* @__PURE__ */ Object.create(null);
+        this._testCache = /* @__PURE__ */ Object.create(null);
+      }
+      add(pattern) {
+        if (this._rules.add(pattern)) {
+          this._initCache();
+        }
+        return this;
+      }
+      // legacy
+      addPattern(pattern) {
+        return this.add(pattern);
+      }
+      // @returns {TestResult}
+      _test(originalPath, cache, checkUnignored) {
+        const path12 = originalPath && checkPath.convert(originalPath);
+        checkPath(
+          path12,
+          originalPath,
+          this._strictPathCheck ? throwError : RETURN_FALSE
+        );
+        return this._t(path12, cache, checkUnignored);
+      }
+      checkIgnore(path12) {
+        if (path12.charCodeAt(path12.length - 1) !== SLASH_CODE) {
+          return this.test(path12);
+        }
+        const parentPath = parentOf(path12);
+        if (parentPath) {
+          const parent = this._t(parentPath, this._testCache, true);
+          if (parent.ignored) {
+            return parent;
+          }
+        }
+        return this._rules.test(path12, false, MODE_CHECK_IGNORE);
+      }
+      _t(path12, cache, checkUnignored) {
+        if (path12 in cache) {
+          return cache[path12];
+        }
+        const parentPath = parentOf(path12);
+        const parent = parentPath ? this._t(parentPath, cache, checkUnignored) : UNDEFINED;
+        return cache[path12] = parent && parent.ignored ? parent : this._rules.test(path12, checkUnignored, MODE_IGNORE);
+      }
+      ignores(path12) {
+        return this._test(path12, this._ignoreCache, false).ignored;
+      }
+      createFilter() {
+        return (path12) => !this.ignores(path12);
+      }
+      filter(paths) {
+        return makeArray(paths).filter(this.createFilter());
+      }
+      // @returns {TestResult}
+      test(path12) {
+        return this._test(path12, this._testCache, true);
+      }
+    };
+    var factory = (options) => new Ignore(options);
+    var isPathValid = (path12) => checkPath(path12 && checkPath.convert(path12), path12, RETURN_FALSE);
+    var setupWindows = () => {
+      const makePosix = (str2) => /^\\\\\?\\/.test(str2) || /["<>|\u0000-\u001F]+/u.test(str2) ? str2 : str2.replace(/\\/g, "/");
+      checkPath.convert = makePosix;
+      const REGEX_TEST_WINDOWS_PATH_ABSOLUTE = /^[a-z]:\//i;
+      checkPath.isNotRelative = (path12) => REGEX_TEST_WINDOWS_PATH_ABSOLUTE.test(path12) || isNotRelative(path12);
+    };
+    if (
+      // Detect `process` so that it can run in browsers.
+      typeof process !== "undefined" && process.platform === "win32"
+    ) {
+      setupWindows();
+    }
+    module.exports = factory;
+    factory.default = factory;
+    module.exports.isPathValid = isPathValid;
+    define2(module.exports, /* @__PURE__ */ Symbol.for("setupWindows"), setupWindows);
+  }
+});
+
 // node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js
 var FifoQueue, EventStream, AssistantMessageEventStream;
 var init_event_stream = __esm({
@@ -79749,807 +80549,8 @@ var init_openai_codex_responses = __esm({
   }
 });
 
-// node_modules/ignore/index.js
-var require_ignore = __commonJS({
-  "node_modules/ignore/index.js"(exports, module) {
-    function makeArray(subject) {
-      return Array.isArray(subject) ? subject : [subject];
-    }
-    var UNDEFINED = void 0;
-    var EMPTY3 = "";
-    var SPACE2 = " ";
-    var ESCAPE = "\\";
-    var REGEX_LITERAL_SPECIAL = /[.*+?()[\]{}^$|\\/]/;
-    var REGEX_TEST_BLANK_LINE = /^ +$/;
-    var REGEX_INVALID_TRAILING_BACKSLASH = /(?:[^\\]|^)\\$/;
-    var REGEX_REPLACE_LEADING_EXCAPED_EXCLAMATION = /^\\!/;
-    var REGEX_REPLACE_LEADING_EXCAPED_HASH = /^\\#/;
-    var REGEX_SPLITALL_CRLF = /\r?\n/g;
-    var DOUBLE_SLASH = "//";
-    var SLASH_CODE = 47;
-    var DOT_CODE = 46;
-    var SLASH = "/";
-    var TMP_KEY_IGNORE = "node-ignore";
-    if (typeof Symbol !== "undefined") {
-      TMP_KEY_IGNORE = /* @__PURE__ */ Symbol.for("node-ignore");
-    }
-    var KEY_IGNORE = TMP_KEY_IGNORE;
-    var define2 = (object, key, value) => {
-      Object.defineProperty(object, key, { value });
-      return value;
-    };
-    var RETURN_FALSE = () => false;
-    var cleanRangeBackSlash = (slashes) => {
-      const { length } = slashes;
-      return slashes.slice(0, length - length % 2);
-    };
-    var POSIX_CLASSES = {
-      alnum: "0-9A-Za-z",
-      alpha: "A-Za-z",
-      blank: " \\t",
-      cntrl: "\\x00-\\x1f\\x7f",
-      digit: "0-9",
-      graph: "!-.0-~",
-      lower: "a-z",
-      print: " -.0-~",
-      punct: "!-.:-@\\[-`{-~",
-      // git's `sane-ctype.h` classifies \v and \f as control, not space,
-      //   unlike C's `isspace`
-      space: " \\t\\n\\r",
-      upper: "A-Z",
-      xdigit: "0-9A-Fa-f"
-    };
-    var CLASS_MEMBERS_TO_ESCAPE = "\\]^-[";
-    var escapeMember = (char) => CLASS_MEMBERS_TO_ESCAPE.indexOf(char) < 0 ? char : ESCAPE + char;
-    var NON_SLASH = "(?!\\/)";
-    var classSource = (negated, body) => {
-      if (negated) {
-        return `[^\\/${body}]`;
-      }
-      const source = `[${body}]`;
-      return new RegExp(source).test("/") ? NON_SLASH + source : source;
-    };
-    var scanBracket = (pattern, start) => {
-      const { length } = pattern;
-      let index3 = start + 1;
-      let negated = EMPTY3;
-      const lead = pattern[index3];
-      if (lead === "!" || lead === "^") {
-        negated = "^";
-        index3++;
-      }
-      let body = EMPTY3;
-      let prev = EMPTY3;
-      for (; ; ) {
-        const char = pattern[index3];
-        if (char === UNDEFINED) {
-          return null;
-        }
-        if (char === ESCAPE) {
-          const escaped = pattern[index3 + 1];
-          if (escaped === UNDEFINED) {
-            return null;
-          }
-          body += escapeMember(escaped);
-          prev = escaped;
-          index3++;
-        } else if (char === "-" && prev && index3 + 1 < length && pattern[index3 + 1] !== "]") {
-          index3++;
-          let to = pattern[index3];
-          if (to === ESCAPE) {
-            to = pattern[index3 += 1];
-          }
-          if (prev <= to) {
-            body += `-${escapeMember(to)}`;
-          }
-          prev = EMPTY3;
-        } else if (char === "[" && pattern[index3 + 1] === ":") {
-          const nameStart = index3 + 2;
-          let end = nameStart;
-          while (end < length && pattern[end] !== "]") {
-            end++;
-          }
-          if (end === length) {
-            return null;
-          }
-          if (end > nameStart && pattern[end - 1] === ":") {
-            const expanded = POSIX_CLASSES[pattern.slice(nameStart, end - 1)];
-            if (expanded === UNDEFINED) {
-              return null;
-            }
-            body += expanded;
-            prev = EMPTY3;
-            index3 = end;
-          } else {
-            body += escapeMember("[");
-            prev = "[";
-            index3 = nameStart - 2;
-          }
-        } else {
-          body += escapeMember(char);
-          prev = char;
-        }
-        index3++;
-        if (pattern[index3] === "]") {
-          return {
-            end: index3,
-            source: classSource(negated, body)
-          };
-        }
-      }
-    };
-    var NEVER_MATCH = "[]";
-    var PLACEHOLDER = "\0";
-    var REGEX_RESTORE_PLACEHOLDER = new RegExp(
-      `${PLACEHOLDER}(\\d+)${PLACEHOLDER}`,
-      "g"
-    );
-    var TRAILING_WILDCARD = "";
-    var extractBrackets = (pattern) => {
-      const sources = [];
-      const hold = (source) => `${PLACEHOLDER}${sources.push(source) - 1}${PLACEHOLDER}`;
-      const { length } = pattern;
-      let out = EMPTY3;
-      let index3 = 0;
-      while (index3 < length) {
-        const char = pattern[index3];
-        if (char === ESCAPE) {
-          const escaped = pattern[index3 + 1];
-          if (escaped === "*" || escaped === "[" || escaped === SPACE2 || escaped === ESCAPE) {
-            out += pattern.slice(index3, index3 + 2);
-          } else {
-            out += hold(
-              REGEX_LITERAL_SPECIAL.test(escaped) ? ESCAPE + escaped : escaped
-            );
-          }
-          index3 += 2;
-        } else if (char === PLACEHOLDER) {
-          out += hold(`[${PLACEHOLDER}]`);
-          index3++;
-        } else if (char === "[") {
-          const scanned = scanBracket(pattern, index3);
-          if (scanned === null) {
-            out += hold(NEVER_MATCH);
-            index3 = length;
-          } else {
-            out += hold(scanned.source);
-            index3 = scanned.end + 1;
-          }
-        } else {
-          out += char;
-          index3++;
-        }
-      }
-      return {
-        source: out,
-        sources
-      };
-    };
-    var DIRECT = null;
-    var REGEX_INNER_SLASH = /\/(?!$)/;
-    var REPLACERS = [
-      [
-        // Remove BOM
-        // TODO:
-        // Other similar zero-width characters?
-        /^\uFEFF/,
-        () => EMPTY3,
-        "\uFEFF"
-      ],
-      [
-        // A trailing line terminator, left on when a whole file's contents are
-        //   added as one pattern rather than split into lines. git never sees one
-        //   -- it reads a `.gitignore` line by line -- so it is not part of the
-        //   pattern and is dropped here, apart from the trailing-space trimming,
-        //   which follows git in touching spaces and nothing else.
-        /[\r\n]+$/,
-        () => EMPTY3
-      ],
-      // > Trailing spaces are ignored unless they are quoted with backslash ("\")
-      [
-        // Only spaces, never tabs or other whitespace: git trims a trailing run
-        //   of `' '` and nothing else (dir.c, `trim_trailing_spaces`, a single
-        //   `case ' '`), so a pattern ending in a tab keeps it as a literal.
-        // (a\ ) -> (a )
-        // (a  ) -> (a)
-        // (a ) -> (a)
-        // (a \ ) -> (a  )
-        /((?:\\\\)*?)(\\? +)$/,
-        (_, m1, m2) => m1 + (m2.indexOf("\\") === 0 ? SPACE2 : EMPTY3)
-      ],
-      // Replace (\ ) with ' '
-      // Only a space: an escaped tab or other whitespace is already a literal by
-      //   the time it reaches here, and a bare tab must be left as one, not turned
-      //   into a space.
-      // (\ ) -> ' '
-      // (\\ ) -> '\\ '
-      // (\\\ ) -> '\\ '
-      [
-        /(\\+?) /g,
-        (_, m1) => {
-          const { length } = m1;
-          return m1.slice(0, length - length % 2) + SPACE2;
-        }
-      ],
-      // Escape metacharacters
-      // which is written down by users but means special for regular expressions.
-      // > There are 12 characters with special meanings:
-      // > - the backslash \,
-      // > - the caret ^,
-      // > - the dollar sign $,
-      // > - the period or dot .,
-      // > - the vertical bar or pipe symbol |,
-      // > - the question mark ?,
-      // > - the asterisk or star *,
-      // > - the plus sign +,
-      // > - the opening parenthesis (,
-      // > - the closing parenthesis ),
-      // > - and the opening square bracket [,
-      // > - the opening curly brace {,
-      // > These special characters are often called "metacharacters".
-      [
-        /[\\$.|*+(){^]/g,
-        (match2) => `\\${match2}`
-      ],
-      [
-        // > a question mark (?) matches a single character
-        /(?!\\)\?/g,
-        () => "[^/]",
-        "?"
-      ],
-      // leading slash
-      [
-        // > A leading slash matches the beginning of the pathname.
-        // > For example, "/*.c" matches "cat-file.c" but not "mozilla-sha1/sha1.c".
-        // A leading slash matches the beginning of the pathname
-        /^\//,
-        () => "^",
-        SLASH
-      ],
-      // replace special metacharacter slash after the leading slash
-      [
-        /\//g,
-        () => "\\/",
-        SLASH
-      ],
-      [
-        // > A leading "**" followed by a slash means match in all directories.
-        // > For example, "**/foo" matches file or directory "foo" anywhere,
-        // > the same as pattern "foo".
-        // > "**/foo/bar" matches file or directory "bar" anywhere that is directly
-        // >   under directory "foo".
-        // Notice that the '*'s have been replaced as '\\*'
-        /^\^*(?:\\\*\\\*\\\/)+/,
-        // '**/foo' <-> 'foo'
-        () => "^(?:.*\\/)?",
-        "*"
-      ],
-      // starting
-      [
-        // there will be no leading '/'
-        //   (which has been replaced by section "leading slash")
-        // If starts with '**', adding a '^' to the regular expression also works
-        DIRECT,
-        (source, pattern) => {
-          if (!source || source[0] === "^") {
-            return source;
-          }
-          const anchor = !REGEX_INNER_SLASH.test(pattern) ? "(?:^|\\/)" : "^";
-          return anchor + source;
-        }
-      ],
-      // two globstars
-      [
-        // Use lookahead assertions so that we could match more than one `'/**'`
-        /\\\/\\\*\\\*(?=\\\/|$)/g,
-        // Zero, one or several directories
-        // should not use '*', or it will be replaced by the next replacer
-        // Check if it is not the last `'/**'`
-        (_, index3, str2) => index3 + 6 < str2.length ? str2.slice(index3 + 6) === "\\/" ? "(?:\\/[^\\/]+)+" : "(?:\\/[^\\/]+)*" : "\\/.+",
-        "*"
-      ],
-      // normal intermediate wildcards
-      [
-        // Never replace escaped '*'
-        // ignore rule '\*' will match the path '*'
-        // 'abc.*/' -> go
-        // 'abc.*'  -> skip this rule,
-        //    coz trailing single wildcard will be handed by [trailing wildcard]
-        /(^|[^\\]+)(\\\*)+(?=.+)/g,
-        // '*.js' matches '.js'
-        // '*.js' doesn't match 'abc'
-        (_, p1, p2) => {
-          const unescaped = p2.replace(/\\\*/g, "[^\\/]*");
-          return p1 + unescaped;
-        },
-        "*"
-      ],
-      // trailing wildcard, held apart from a literal star
-      [
-        // The step above leaves a trailing `*` alone, so a single `\*` is all that
-        //   can be left at the end here. Whether it is a wildcard or a literal
-        //   turns on the backslashes the user put in front of it: the escaper has
-        //   since doubled every one, so what stands here is those `2N` doubled
-        //   backslashes and then the star's own escape. An even number of the
-        //   original `N` leaves the star unescaped -- a wildcard -- and an odd
-        //   number escapes it -- a literal. This runs while the two are still
-        //   distinct, before the unescape steps below collapse the literal onto
-        //   the very `\*` a wildcard leaves behind.
-        /(^|[^\\])((?:\\\\)*)\\\*$/,
-        (match2, p1, p2) => (
-          // `p2` holds the doubled user backslashes; half of them is `N`.
-          p2.length / 2 % 2 === 0 ? p1 + p2 + TRAILING_WILDCARD : match2
-        ),
-        "*"
-      ],
-      [
-        // unescape, revert step 3 except for back slash
-        // For example, if a user escape a '\\*',
-        // after step 3, the result will be '\\\\\\*'
-        /\\\\\\(?=[$.|*+(){^])/g,
-        () => ESCAPE,
-        ESCAPE + ESCAPE
-      ],
-      [
-        // '\\\\' -> '\\'
-        /\\\\/g,
-        () => ESCAPE,
-        ESCAPE + ESCAPE
-      ],
-      [
-        // Every real bracket expression -- POSIX classes included -- has already
-        //   been held aside by `extractBrackets`, so the only `[` left in the
-        //   pattern is an escaped, literal one.
-        // `\` is escaped by step 3
-        /\\\[([^\]/]*?)(\\*)($|\])/g,
-        // '\\[bar]' -> '\\\\[bar\\]'
-        (match2, range, endEscape, close) => `\\[${range}${cleanRangeBackSlash(endEscape)}${close}`,
-        "["
-      ],
-      // ending
-      [
-        // 'js' will not match 'js.'
-        // 'ab' will not match 'abc'
-        DIRECT,
-        // WTF!
-        // https://git-scm.com/docs/gitignore
-        // changes in [2.22.1](https://git-scm.com/docs/gitignore/2.22.1)
-        // which re-fixes #24, #38
-        // > If there is a separator at the end of the pattern then the pattern
-        // > will only match directories, otherwise the pattern can match both
-        // > files and directories.
-        // 'js*' will not match 'a.js'
-        // 'js/' will not match 'a.js'
-        // 'js' will match 'a.js' and 'a.js/'
-        (source) => {
-          const last = source[source.length - 1];
-          if (!last || last === TRAILING_WILDCARD) {
-            return source;
-          }
-          return last === SLASH ? `${source}$` : `${source}(?=$|\\/$)`;
-        }
-      ]
-    ];
-    var REGEX_REPLACE_TRAILING_WILDCARD = /(^|\\\/)?\uE000$/;
-    var MODE_IGNORE = "regex";
-    var MODE_CHECK_IGNORE = "checkRegex";
-    var UNDERSCORE = "_";
-    var TRAILING_WILD_CARD_REPLACERS = {
-      [MODE_IGNORE](_, p1) {
-        const prefix = p1 ? `${p1}[^/]+` : "[^/]*";
-        return `${prefix}(?=$|\\/$)`;
-      },
-      [MODE_CHECK_IGNORE](_, p1) {
-        const prefix = p1 ? `${p1}[^/]*` : "[^/]*";
-        return `${prefix}(?=$|\\/$)`;
-      }
-    };
-    var WILDCARD = "[^\\/]*";
-    var pinWildcards = (source) => {
-      if (source.indexOf(WILDCARD) < 0) {
-        return source;
-      }
-      const tokens = [];
-      const { length } = source;
-      let index3 = 0;
-      while (index3 < length) {
-        const char = source[index3];
-        if (source.startsWith(WILDCARD, index3)) {
-          tokens.push({ wildcard: true });
-          index3 += WILDCARD.length;
-        } else if (char === "[") {
-          let end = index3 + 1;
-          if (source[end] === "^") {
-            end++;
-          }
-          if (source[end] === "]") {
-            end++;
-          }
-          while (end < length && source[end] !== "]") {
-            end += source[end] === ESCAPE ? 2 : 1;
-          }
-          end++;
-          tokens.push({ single: source.slice(index3, end) });
-          index3 = end;
-        } else if (char === ESCAPE) {
-          tokens.push({ single: source.slice(index3, index3 + 2) });
-          index3 += 2;
-        } else if (char === "(") {
-          let depth = 0;
-          let end = index3;
-          do {
-            if (source[end] === ESCAPE) {
-              end++;
-            } else if (source[end] === "(") {
-              depth++;
-            } else if (source[end] === ")") {
-              depth--;
-            }
-            end++;
-          } while (end < length && depth > 0);
-          if ("*+?".indexOf(source[end]) >= 0) {
-            end++;
-          }
-          tokens.push({ boundary: source.slice(index3, end) });
-          index3 = end;
-        } else if (char === "^" || char === "$") {
-          tokens.push({ boundary: char });
-          index3++;
-        } else {
-          tokens.push({ single: char });
-          index3++;
-        }
-      }
-      let out = EMPTY3;
-      let run = [];
-      const flush = () => {
-        let lastWildcard;
-        run.forEach((token, at) => {
-          if (token.wildcard) {
-            lastWildcard = at;
-          }
-        });
-        run.forEach((token, at) => {
-          if (!token.wildcard) {
-            out += token.single;
-            return;
-          }
-          out += at === lastWildcard ? WILDCARD : `(?:(?!${run[at + 1].single})[^\\/])*`;
-        });
-        run = [];
-      };
-      tokens.forEach((token) => {
-        if (token.boundary === void 0) {
-          run.push(token);
-          return;
-        }
-        flush();
-        out += token.boundary;
-      });
-      flush();
-      return out;
-    };
-    var makeRegexPrefix = (pattern) => {
-      const { source, sources } = extractBrackets(pattern);
-      const replaced = REPLACERS.reduce(
-        // A pass whose matcher finds nothing hands back the very string it was
-        //   given, so asking first costs a search and saves a rewrite. Ten of the
-        //   fifteen passes never fire for a typical .gitignore line, and between
-        //   them they were 45% of this chain.
-        (prev, [matcher, replacer, required]) => {
-          if (matcher === DIRECT) {
-            return replacer(prev, pattern);
-          }
-          if (required !== UNDEFINED && prev.indexOf(required) < 0) {
-            return prev;
-          }
-          return matcher.test(prev) ? prev.replace(matcher, replacer.bind(pattern)) : prev;
-        },
-        source
-      );
-      return sources.length ? replaced.replace(
-        REGEX_RESTORE_PLACEHOLDER,
-        (match2, index3) => sources[index3]
-      ) : replaced;
-    };
-    var matchesBasename = (body) => {
-      const index3 = body.indexOf(SLASH);
-      return index3 < 0 || index3 === body.length - 1;
-    };
-    var basenameOf = (path12) => {
-      const end = path12.length - 1;
-      const index3 = path12.lastIndexOf(
-        SLASH,
-        path12[end] === SLASH ? end - 1 : end
-      );
-      return index3 < 0 ? path12 : path12.slice(index3 + 1);
-    };
-    var parentOf = (path12) => {
-      if (path12.charCodeAt(0) === SLASH_CODE || path12.indexOf(DOUBLE_SLASH) >= 0) {
-        const slices = path12.split(SLASH).filter(Boolean);
-        slices.pop();
-        return slices.length ? slices.join(SLASH) + SLASH : EMPTY3;
-      }
-      const end = path12.length - 1;
-      const cut = path12.lastIndexOf(
-        SLASH,
-        path12.charCodeAt(end) === SLASH_CODE ? end - 1 : end
-      );
-      return cut < 0 ? EMPTY3 : path12.slice(0, cut + 1);
-    };
-    var isString = (subject) => typeof subject === "string";
-    var checkPattern = (pattern) => pattern && isString(pattern) && !REGEX_TEST_BLANK_LINE.test(pattern) && !REGEX_INVALID_TRAILING_BACKSLASH.test(pattern) && pattern.indexOf("#") !== 0;
-    var splitPattern = (pattern) => pattern.split(REGEX_SPLITALL_CRLF).filter(Boolean);
-    var IgnoreRule = class {
-      constructor(pattern, mark, body, ignoreCase, negative, prefix) {
-        this.pattern = pattern;
-        this.mark = mark;
-        this.negative = negative;
-        define2(this, "body", body);
-        define2(this, "ignoreCase", ignoreCase);
-        define2(this, "regexPrefix", prefix);
-      }
-      // Worked out on first use and kept behind an own property, the way `regex`
-      //   caches itself in `_regex`. Deciding it in the constructor instead would
-      //   add a fourth `defineProperty` to every rule ever built, which cost 4% of
-      //   every compile -- including the compiles of rules that are never matched
-      //   against anything.
-      get _basenameOnly() {
-        return define2(this, "_basenameOnly", matchesBasename(this.body));
-      }
-      get regex() {
-        const key = UNDERSCORE + MODE_IGNORE;
-        if (this[key]) {
-          return this[key];
-        }
-        return this._make(MODE_IGNORE, key);
-      }
-      get checkRegex() {
-        const key = UNDERSCORE + MODE_CHECK_IGNORE;
-        if (this[key]) {
-          return this[key];
-        }
-        return this._make(MODE_CHECK_IGNORE, key);
-      }
-      _make(mode, key) {
-        const str2 = pinWildcards(this.regexPrefix.replace(
-          REGEX_REPLACE_TRAILING_WILDCARD,
-          // It does not need to bind pattern
-          TRAILING_WILD_CARD_REPLACERS[mode]
-        ));
-        const regex = this.ignoreCase ? new RegExp(str2, "i") : new RegExp(str2);
-        return define2(this, key, regex);
-      }
-    };
-    var createRule = ({
-      pattern,
-      mark
-    }, ignoreCase) => {
-      let negative = false;
-      let body = pattern;
-      if (body.indexOf("!") === 0) {
-        negative = true;
-        body = body.substr(1);
-      }
-      body = body.replace(REGEX_REPLACE_LEADING_EXCAPED_EXCLAMATION, "!").replace(REGEX_REPLACE_LEADING_EXCAPED_HASH, "#");
-      const regexPrefix = makeRegexPrefix(body);
-      return new IgnoreRule(
-        pattern,
-        mark,
-        body,
-        ignoreCase,
-        negative,
-        regexPrefix
-      );
-    };
-    var RuleManager = class {
-      constructor(ignoreCase) {
-        this._ignoreCase = ignoreCase;
-        this._rules = [];
-        this._basenameCount = 0;
-      }
-      _add(pattern) {
-        if (pattern && pattern[KEY_IGNORE]) {
-          this._rules = this._rules.concat(pattern._rules._rules);
-          this._basenameCount += pattern._rules._basenameCount;
-          this._added = true;
-          return;
-        }
-        if (isString(pattern)) {
-          pattern = {
-            pattern
-          };
-        }
-        if (checkPattern(pattern.pattern)) {
-          const rule = createRule(pattern, this._ignoreCase);
-          this._added = true;
-          this._rules.push(rule);
-          if (matchesBasename(rule.body)) {
-            this._basenameCount++;
-          }
-        }
-      }
-      // @param {Array<string> | string | Ignore} pattern
-      add(pattern) {
-        this._added = false;
-        makeArray(
-          isString(pattern) ? splitPattern(pattern) : pattern
-        ).forEach(this._add, this);
-        return this._added;
-      }
-      // Test one single path without recursively checking parent directories
-      //
-      // - checkUnignored `boolean` whether should check if the path is unignored,
-      //   setting `checkUnignored` to `false` could reduce additional
-      //   path matching.
-      // - check `string` either `MODE_IGNORE` or `MODE_CHECK_IGNORE`
-      // @returns {TestResult} true if a file is ignored
-      test(path12, checkUnignored, mode) {
-        let ignored = false;
-        let unignored = false;
-        let matchedRule;
-        const rules = this._rules;
-        const { length } = rules;
-        const shortcut = this._basenameCount * 2 >= length;
-        const basename3 = shortcut ? basenameOf(path12) : path12;
-        for (let index3 = 0; index3 < length; index3++) {
-          const rule = rules[index3];
-          const { negative } = rule;
-          const skip = unignored === negative && ignored !== unignored || negative && !ignored && !unignored && !checkUnignored;
-          if (!skip && rule[mode].test(
-            shortcut && rule._basenameOnly ? basename3 : path12
-          )) {
-            ignored = !negative;
-            unignored = negative;
-            matchedRule = negative ? UNDEFINED : rule;
-          }
-        }
-        const ret = {
-          ignored,
-          unignored
-        };
-        if (matchedRule) {
-          ret.rule = matchedRule;
-        }
-        return ret;
-      }
-    };
-    var throwError = (message, Ctor) => {
-      throw new Ctor(message);
-    };
-    var checkPath = (path12, originalPath, doThrow) => {
-      if (!isString(path12)) {
-        return doThrow(
-          `path must be a string, but got \`${originalPath}\``,
-          TypeError
-        );
-      }
-      if (!path12) {
-        return doThrow(`path must not be empty`, TypeError);
-      }
-      if (checkPath.isNotRelative(path12)) {
-        const r2 = "`path.relative()`d";
-        return doThrow(
-          `path should be a ${r2} string, but got "${originalPath}"`,
-          RangeError
-        );
-      }
-      return true;
-    };
-    var isNotRelative = (path12) => {
-      const first = path12.charCodeAt(0);
-      if (first === SLASH_CODE) {
-        return true;
-      }
-      if (first !== DOT_CODE) {
-        return false;
-      }
-      if (path12.length === 1) {
-        return true;
-      }
-      const second = path12.charCodeAt(1);
-      if (second === SLASH_CODE) {
-        return true;
-      }
-      if (second !== DOT_CODE) {
-        return false;
-      }
-      return path12.length === 2 || path12.charCodeAt(2) === SLASH_CODE;
-    };
-    checkPath.isNotRelative = isNotRelative;
-    checkPath.convert = (p) => p;
-    var Ignore = class {
-      constructor({
-        ignorecase = true,
-        ignoreCase = ignorecase,
-        allowRelativePaths = false
-      } = {}) {
-        define2(this, KEY_IGNORE, true);
-        this._rules = new RuleManager(ignoreCase);
-        this._strictPathCheck = !allowRelativePaths;
-        this._initCache();
-      }
-      _initCache() {
-        this._ignoreCache = /* @__PURE__ */ Object.create(null);
-        this._testCache = /* @__PURE__ */ Object.create(null);
-      }
-      add(pattern) {
-        if (this._rules.add(pattern)) {
-          this._initCache();
-        }
-        return this;
-      }
-      // legacy
-      addPattern(pattern) {
-        return this.add(pattern);
-      }
-      // @returns {TestResult}
-      _test(originalPath, cache, checkUnignored) {
-        const path12 = originalPath && checkPath.convert(originalPath);
-        checkPath(
-          path12,
-          originalPath,
-          this._strictPathCheck ? throwError : RETURN_FALSE
-        );
-        return this._t(path12, cache, checkUnignored);
-      }
-      checkIgnore(path12) {
-        if (path12.charCodeAt(path12.length - 1) !== SLASH_CODE) {
-          return this.test(path12);
-        }
-        const parentPath = parentOf(path12);
-        if (parentPath) {
-          const parent = this._t(parentPath, this._testCache, true);
-          if (parent.ignored) {
-            return parent;
-          }
-        }
-        return this._rules.test(path12, false, MODE_CHECK_IGNORE);
-      }
-      _t(path12, cache, checkUnignored) {
-        if (path12 in cache) {
-          return cache[path12];
-        }
-        const parentPath = parentOf(path12);
-        const parent = parentPath ? this._t(parentPath, cache, checkUnignored) : UNDEFINED;
-        return cache[path12] = parent && parent.ignored ? parent : this._rules.test(path12, checkUnignored, MODE_IGNORE);
-      }
-      ignores(path12) {
-        return this._test(path12, this._ignoreCache, false).ignored;
-      }
-      createFilter() {
-        return (path12) => !this.ignores(path12);
-      }
-      filter(paths) {
-        return makeArray(paths).filter(this.createFilter());
-      }
-      // @returns {TestResult}
-      test(path12) {
-        return this._test(path12, this._testCache, true);
-      }
-    };
-    var factory = (options) => new Ignore(options);
-    var isPathValid = (path12) => checkPath(path12 && checkPath.convert(path12), path12, RETURN_FALSE);
-    var setupWindows = () => {
-      const makePosix = (str2) => /^\\\\\?\\/.test(str2) || /["<>|\u0000-\u001F]+/u.test(str2) ? str2 : str2.replace(/\\/g, "/");
-      checkPath.convert = makePosix;
-      const REGEX_TEST_WINDOWS_PATH_ABSOLUTE = /^[a-z]:\//i;
-      checkPath.isNotRelative = (path12) => REGEX_TEST_WINDOWS_PATH_ABSOLUTE.test(path12) || isNotRelative(path12);
-    };
-    if (
-      // Detect `process` so that it can run in browsers.
-      typeof process !== "undefined" && process.platform === "win32"
-    ) {
-      setupWindows();
-    }
-    module.exports = factory;
-    factory.default = factory;
-    module.exports.isPathValid = isPathValid;
-    define2(module.exports, /* @__PURE__ */ Symbol.for("setupWindows"), setupWindows);
-  }
-});
-
 // ../../plugins/cross-model-advisor/src/gate.mjs
+var import_ignore2 = __toESM(require_ignore(), 1);
 import fs14 from "node:fs";
 import fsPromises from "node:fs/promises";
 import path11 from "node:path";
@@ -90539,7 +90540,8 @@ var DEFAULT_LIMITS = Object.freeze({
 });
 var GATE_MODES = Object.freeze(["block", "report"]);
 var DEFAULT_GATE = Object.freeze({ mode: "block", maxRounds: 2 });
-var GATE_KEYS = Object.freeze(["mode", "maxRounds"]);
+var GATE_KEYS = Object.freeze(["mode", "maxRounds", "autoOn", "skipWhenOnly"]);
+var MAX_GATE_LIST = 64;
 var IDENTIFIER_RE = /^[a-z][a-z0-9-]{0,63}$/;
 var ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 var MIN_NODE = Object.freeze([22, 19, 0]);
@@ -90848,7 +90850,27 @@ function assertGate(value) {
     assertInteger(value.maxRounds, "gate.maxRounds", 1, 5);
     gate.maxRounds = value.maxRounds;
   }
+  if ("autoOn" in value) {
+    gate.autoOn = assertStringList(value.autoOn, "gate.autoOn", (item) => {
+      if (!path2.isAbsolute(item)) fail("gate.autoOn entries must be absolute project paths");
+    });
+  }
+  if ("skipWhenOnly" in value) {
+    gate.skipWhenOnly = assertStringList(value.skipWhenOnly, "gate.skipWhenOnly", (item) => {
+      if (item.trim().startsWith("!")) fail("gate.skipWhenOnly patterns cannot be negated");
+    });
+  }
   return gate;
+}
+function assertStringList(value, label, check) {
+  if (!Array.isArray(value) || value.length > MAX_GATE_LIST) fail(`${label} must be a list of at most ${MAX_GATE_LIST} strings`);
+  return value.map((item) => {
+    if (typeof item !== "string" || !item.trim() || item.length > 1024 || item.includes("\0")) {
+      fail(`${label} entries must be non-empty strings`);
+    }
+    check(item);
+    return item;
+  });
 }
 function validateConfig(value) {
   assertPlainObject(value, "config");
@@ -96128,6 +96150,15 @@ async function runStop(payload, { env: env2 = process.env, deps: overrides = {} 
     await record("failed", "could not compute the diff");
     return "";
   }
+  const changed = [...diff.files.map((file) => file.path), ...diff.omitted, ...diff.unshown];
+  if (gate.skipWhenOnly?.length && changed.length) {
+    const skip = (typeof import_ignore2.default === "function" ? import_ignore2.default : import_ignore2.default.default)().add(gate.skipWhenOnly);
+    if (changed.every((file) => skip.ignores(file))) {
+      state2.reviewed.push(key);
+      await record("skipped", "only files matching gate.skipWhenOnly changed");
+      return "";
+    }
+  }
   if (diff.files.length === 0) {
     state2.reviewed.push(key);
     await record("skipped", "only excluded files changed");
@@ -96258,6 +96289,7 @@ async function runOn(env2, overrides = {}) {
   await ensurePrivateDir(session.dir);
   const state2 = await loadState(session.dir);
   state2.enabled = enabled;
+  state2.optedOut = false;
   state2.projectRoot = projectRoot;
   state2.turn = null;
   state2.rounds = { promptId: null, count: 0 };

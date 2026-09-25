@@ -297,6 +297,17 @@ describe("validateConfig", () => {
     assert.equal(parsed.advisors[0].model, "gpt-4.1");
   });
 
+  it("accepts gate.autoOn and gate.skipWhenOnly only in safe shapes", () => {
+    const withGate = (gate) => ({ ...baseConfig(), gate: { mode: "block", maxRounds: 2, ...gate } });
+    const ok = validateConfig(withGate({ autoOn: ["/abs/project"], skipWhenOnly: ["*.md", "docs/**"] }));
+    assert.deepEqual(ok.gate.autoOn, ["/abs/project"]);
+    assert.deepEqual(ok.gate.skipWhenOnly, ["*.md", "docs/**"]);
+    assert.equal("autoOn" in validateConfig(baseConfig()).gate, false);
+    assert.throws(() => validateConfig(withGate({ autoOn: ["relative/project"] })), /absolute/);
+    assert.throws(() => validateConfig(withGate({ autoOn: "/abs/project" })), /list/);
+    assert.throws(() => validateConfig(withGate({ skipWhenOnly: ["!src/**"] })), /negated/);
+  });
+
   it("rejects unknown provider references and unknown future versions", () => {
     assert.throws(() =>
       validateConfig({

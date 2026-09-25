@@ -17,6 +17,7 @@ import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import ignoreFactory from "ignore";
 import { reviewApi, validateApi } from "./backends/api.mjs";
 import { configFilePath, loadConfig, runtimeErrors, validateRoot } from "./config.mjs";
 import { advisorSystemPrompt } from "./prompt.mjs";
@@ -436,6 +437,16 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
     await record("failed", "could not compute the diff");
     return "";
   }
+  // Every changed path, shown or not, must match for a turn to be skipped.
+  const changed = [...diff.files.map((file) => file.path), ...diff.omitted, ...diff.unshown];
+  if (gate.skipWhenOnly?.length && changed.length) {
+    const skip = (typeof ignoreFactory === "function" ? ignoreFactory : ignoreFactory.default)().add(gate.skipWhenOnly);
+    if (changed.every((file) => skip.ignores(file))) {
+      state.reviewed.push(key);
+      await record("skipped", "only files matching gate.skipWhenOnly changed");
+      return "";
+    }
+  }
   if (diff.files.length === 0) {
     state.reviewed.push(key);
     await record("skipped", "only excluded files changed");
@@ -576,6 +587,7 @@ export async function runOn(env, overrides = {}) {
   await ensurePrivateDir(session.dir);
   const state = await loadState(session.dir);
   state.enabled = enabled;
+  state.optedOut = false;
   state.projectRoot = projectRoot;
   state.turn = null;
   state.rounds = { promptId: null, count: 0 };

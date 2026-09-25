@@ -98621,7 +98621,8 @@ var DEFAULT_LIMITS = Object.freeze({
 });
 var GATE_MODES = Object.freeze(["block", "report"]);
 var DEFAULT_GATE = Object.freeze({ mode: "block", maxRounds: 2 });
-var GATE_KEYS = Object.freeze(["mode", "maxRounds"]);
+var GATE_KEYS = Object.freeze(["mode", "maxRounds", "autoOn", "skipWhenOnly"]);
+var MAX_GATE_LIST = 64;
 var IDENTIFIER_RE = /^[a-z][a-z0-9-]{0,63}$/;
 var ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 var MIN_NODE = Object.freeze([22, 19, 0]);
@@ -98930,7 +98931,27 @@ function assertGate(value) {
     assertInteger(value.maxRounds, "gate.maxRounds", 1, 5);
     gate.maxRounds = value.maxRounds;
   }
+  if ("autoOn" in value) {
+    gate.autoOn = assertStringList(value.autoOn, "gate.autoOn", (item) => {
+      if (!path.isAbsolute(item)) fail("gate.autoOn entries must be absolute project paths");
+    });
+  }
+  if ("skipWhenOnly" in value) {
+    gate.skipWhenOnly = assertStringList(value.skipWhenOnly, "gate.skipWhenOnly", (item) => {
+      if (item.trim().startsWith("!")) fail("gate.skipWhenOnly patterns cannot be negated");
+    });
+  }
   return gate;
+}
+function assertStringList(value, label, check) {
+  if (!Array.isArray(value) || value.length > MAX_GATE_LIST) fail(`${label} must be a list of at most ${MAX_GATE_LIST} strings`);
+  return value.map((item) => {
+    if (typeof item !== "string" || !item.trim() || item.length > 1024 || item.includes("\0")) {
+      fail(`${label} entries must be non-empty strings`);
+    }
+    check(item);
+    return item;
+  });
 }
 function validateConfig(value) {
   assertPlainObject(value, "config");

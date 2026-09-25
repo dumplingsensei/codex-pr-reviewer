@@ -16,7 +16,7 @@ It does not copy OMP's prompts or vendor its agent framework.
 | Command | What it does |
 |---|---|
 | `/cross-model-advisor:on` | Validate configuration and turn the gate on for this session. Reports the git project root, gate mode, each advisor's availability, and what is sent to external providers. Makes no model request. |
-| `/cross-model-advisor:off` | Turn the gate off for this session. The last review stays visible in `status`. |
+| `/cross-model-advisor:off` | Turn the gate off for this session, even where `gate.autoOn` would turn it on. The last review stays visible in `status`. |
 | `/cross-model-advisor:status` | Show whether the gate is on, the last review (outcome, round, every finding with evidence, each advisor's result), the last turn that was skipped and why, and per-advisor usage and errors. |
 | `/cross-model-advisor:doctor` | Check the runtime, configuration, git, key-variable presence, advisor availability, and bundle. No model request, token refresh, or login. |
 | `/cross-model-advisor:setup` | Print the terminal command for the settings menu. Does not open a TTY inside Claude or edit configuration. |
@@ -230,6 +230,9 @@ default. Choose real model IDs. An example and schema also ship under
 `gate.mode` is `block` or `report`; `gate.maxRounds` (1 to 5) bounds how many
 times one prompt can be sent back. `limits.reviewTimeoutSeconds` (at most 240)
 is each advisor's deadline; all advisors share 270 of the hook's 300 seconds.
+`gate.autoOn` lists absolute project roots where the gate turns on at session
+start (`off` still wins); `gate.skipWhenOnly` (gitignore patterns, e.g. `*.md`)
+skips turns whose changed files all match. Only this file can set either.
 
 ### Reasoning effort
 

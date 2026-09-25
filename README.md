@@ -47,7 +47,7 @@ claude --plugin-dir ./plugins/cross-model-advisor
 | Command | What it does |
 |---|---|
 | `/cross-model-advisor:on` | Validate configuration and turn the gate on for this session. Reports the git project root, gate mode, each advisor's availability, and what is sent to external providers. Makes no model request. |
-| `/cross-model-advisor:off` | Turn the gate off for this session. The last review stays visible in `status`. |
+| `/cross-model-advisor:off` | Turn the gate off for this session, even where `gate.autoOn` would turn it on. The last review stays visible in `status`. |
 | `/cross-model-advisor:status` | Show the last review (outcome, round, findings with evidence, each advisor's result), the last skipped turn and why, and per-advisor usage and errors. |
 | `/cross-model-advisor:doctor` | Check the runtime, configuration, git, key-variable presence, advisor availability, and bundle. No model request, token refresh, or login. |
 | `/cross-model-advisor:setup` | Print the exact terminal command for the settings menu. Does not open the menu inside Claude or edit configuration. |
