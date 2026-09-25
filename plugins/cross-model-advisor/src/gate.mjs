@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { reviewApi, validateApi } from "./backends/api.mjs";
 import { configFilePath, loadConfig, runtimeErrors, validateRoot } from "./config.mjs";
 import { advisorSystemPrompt } from "./prompt.mjs";
-import { gitTopLevel, snapshotTree, turnDiff } from "./snapshot.mjs";
+import { gitIgnoredPaths, gitTopLevel, snapshotTree, turnDiff } from "./snapshot.mjs";
 import { createReviewTools, normalizeFinding } from "./tools.mjs";
 import {
   MAX_FINDINGS_PER_REVIEW,
@@ -319,6 +319,7 @@ const defaultDeps = {
   createReviewTools,
   snapshotTree,
   turnDiff,
+  gitIgnoredPaths,
   now: () => Date.now()
 };
 
@@ -411,6 +412,14 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
     return "";
   }
 
+  let ignoredPaths;
+  try {
+    ignoredPaths = await deps.gitIgnoredPaths(state.projectRoot, { env });
+  } catch {
+    await record("failed", "could not list the paths git ignores");
+    return "";
+  }
+
   let diff;
   try {
     const probe = await deps.createReviewTools({
@@ -419,7 +428,8 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
       observations: [],
       pluginData: session.pluginData,
       credentialDir: credDir,
-      secrets
+      secrets,
+      ignoredPaths
     });
     diff = await deps.turnDiff(state.projectRoot, turn.baseTree, head, { env, isExcluded: probe.excluded });
   } catch {
@@ -475,7 +485,8 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
           pluginData: session.pluginData,
           credentialDir: credDir,
           secrets,
-          maxFindings: MAX_FINDINGS_PER_REVIEW
+          maxFindings: MAX_FINDINGS_PER_REVIEW,
+          ignoredPaths
         });
         const result = await deps.reviewApi({
           provider,

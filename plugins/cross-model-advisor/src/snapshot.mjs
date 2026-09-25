@@ -90,6 +90,20 @@ export async function gitTopLevel(dir, { env = process.env } = {}) {
 }
 
 /**
+ * Untracked paths git ignores under `root`, by every rule `git add` honours:
+ * .gitignore, .git/info/exclude, and core.excludesFile. Ignored directories
+ * are listed once, ending in `/`.
+ *
+ * @param {string} root repository top level
+ * @param {{ env?: NodeJS.ProcessEnv }} [options]
+ * @returns {Promise<string[]>}
+ */
+export async function gitIgnoredPaths(root, { env = process.env } = {}) {
+  const out = await git(root, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"], { env });
+  return out.split("\0").filter(Boolean);
+}
+
+/**
  * Write a tree object for the current working tree of `root`.
  *
  * The real index is copied first only so git can reuse its stat cache instead

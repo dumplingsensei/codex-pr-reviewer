@@ -6,6 +6,18 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.4
+
+- **Git-ignored files.** Advisor tools now exclude every path git ignores,
+  including `.git/info/exclude` and the global excludes file, not only
+  `.gitignore` matches. The diff already did.
+- **Credential files.** `.npmrc`, `.netrc`, `.envrc`, `.pypirc`, `.pgpass`,
+  `.git-credentials`, SSH keys, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `.ssh`,
+  `.aws`, and `.gnupg` are excluded. Redaction also catches names like
+  `GITHUB_TOKEN=` and well-known token formats (`ghp_`, `npm_`, `sk-`, `AKIA`).
+- **WATCHDOG.md** moves out of the system prompt into the review data, fenced
+  and labelled as untrusted.
+
 ## 2.1.3
 
 - **Duplicates.** Findings that differ only in markdown or sentence punctuation

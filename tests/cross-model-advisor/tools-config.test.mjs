@@ -866,6 +866,54 @@ describe("createReviewTools confinement", () => {
     assert.equal(drop.includes("NESTED_DROP"), false);
   });
 
+  it("excludes every path git ignores, not only .gitignore matches", async () => {
+    const root = await scratch("cma-gitignored-");
+    await fs.writeFile(path.join(root, "app.js"), "ok\n");
+    await fs.writeFile(path.join(root, "local-secrets.yml"), "INFO_EXCLUDE_SENTINEL\n");
+    await fs.mkdir(path.join(root, "cache"));
+    await fs.writeFile(path.join(root, "cache", "dump.txt"), "IGNORED_DIR_SENTINEL\n");
+    const tools = await createReviewTools({ root, ignoredPaths: ["local-secrets.yml", "cache/"] });
+    assert.match(await tools.call("read", { path: "local-secrets.yml" }), /^Error:/);
+    assert.match(await tools.call("read", { path: "cache/dump.txt" }), /^Error:/);
+    assert.equal(await tools.call("list", {}), "app.js");
+    assert.doesNotMatch(await tools.call("search", { query: "SENTINEL" }), /SENTINEL/);
+    assert.equal(await tools.excluded("cache/dump.txt"), true);
+  });
+
+  it("excludes common credential files by name", async () => {
+    const root = await scratch("cma-credfiles-");
+    const names = [".npmrc", ".netrc", ".envrc", ".pypirc", ".git-credentials", "id_ed25519", "id_rsa", "cert.p12", "store.jks"];
+    for (const name of names) await fs.writeFile(path.join(root, name), "CREDENTIAL_SENTINEL\n");
+    await fs.mkdir(path.join(root, ".ssh"));
+    await fs.writeFile(path.join(root, ".ssh", "config"), "CREDENTIAL_SENTINEL\n");
+    await fs.writeFile(path.join(root, "id_rsa.pub"), "public key is fine\n");
+    const tools = await createReviewTools({ root });
+    for (const name of [...names, ".ssh/config"]) {
+      assert.match(await tools.call("read", { path: name }), /^Error:/, name);
+    }
+    assert.match(await tools.call("read", { path: "id_rsa.pub" }), /public key is fine/);
+  });
+
+  it("redacts environment-style and well-known tokens but leaves ordinary code readable", async () => {
+    const root = await scratch("cma-redact-");
+    await fs.writeFile(
+      path.join(root, "setup.sh"),
+      [
+        "export GITHUB_TOKEN=ghp_short456",
+        "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENG",
+        "echo ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        "const MAX_TOKENS = 1500;",
+        "const secretList = secrets.filter(Boolean);",
+        ""
+      ].join("\n")
+    );
+    const body = await (await createReviewTools({ root })).call("read", { path: "setup.sh" });
+    assert.doesNotMatch(body, /ghp_short456|wJalrXUtnFEMIK7MDENG|ghp_abcdefghij/);
+    assert.match(body, /GITHUB_TOKEN=\[redacted\]/);
+    assert.match(body, /MAX_TOKENS = 1500;/);
+    assert.match(body, /const secretList = secrets\.filter\(Boolean\);/);
+  });
+
   it("rejects a replaced project root when activation identity is pinned", async () => {
     const root = await scratch("cma-ident-");
     await fs.writeFile(path.join(root, "ok.js"), "ORIGINAL_ROOT\n");

@@ -367,9 +367,10 @@ every turn regardless of where Claude later `cd`s.
 For every reviewed turn, your request, Claude's final message, the diff, and
 source the advisor tools read are sent to the **external providers you
 configured**. That is intentional. Exclusions prevent
-tool access to designated files (`.git`, `.env` / `.env.*`, `*.pem`, `*.key`,
-`.claude`, `.codex`, `.gemini`, `node_modules`, and plugin state), plus paths
-matched by `.gitignore`, `.cross-model-advisorignore`, or user exclusions.
+tool access to credential files (`.env*`, `*.pem`, `*.key`, `*.p12`, `.npmrc`,
+`.netrc`, `.envrc`, SSH keys, `.ssh`, `.aws`), `.git`, `.claude`, `.codex`,
+`.gemini`, `node_modules`, plugin state, anything git ignores (including
+`.git/info/exclude`), `.cross-model-advisorignore`, and user exclusions.
 The same exclusions filter the diff: an excluded file that changed is named,
 but its content is never sent. They do not promise to strip secrets from prose
 you put in a prompt or from an allowed source file.

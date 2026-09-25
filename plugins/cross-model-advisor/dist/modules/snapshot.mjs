@@ -59,6 +59,10 @@ async function gitTopLevel(dir, { env = process.env } = {}) {
     return null;
   }
 }
+async function gitIgnoredPaths(root, { env = process.env } = {}) {
+  const out = await git(root, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"], { env });
+  return out.split("\0").filter(Boolean);
+}
 async function snapshotTree(root, scratchDir, { env = process.env, signal } = {}) {
   const tmpIndex = path.join(scratchDir, `index.${process.pid}.${Date.now()}`);
   try {
@@ -134,6 +138,7 @@ export {
   MAX_TOTAL_DIFF_CHARS,
   SnapshotError,
   changedFiles,
+  gitIgnoredPaths,
   gitTopLevel,
   snapshotTree,
   turnDiff

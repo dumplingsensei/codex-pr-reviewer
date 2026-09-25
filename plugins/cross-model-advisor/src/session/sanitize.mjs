@@ -5,8 +5,31 @@
 
 const CREDENTIAL_ASSIGNMENT =
   /\b(?:api[_-]?key|token|password|secret|authorization|bearer)\b\s*[:=]\s*([^\s,;]+)/gi;
+// Environment-style names such as GITHUB_TOKEN, where `_` hides the word from
+// \b. Upper case only, and the value needs a letter and 8 characters, so code
+// like `secretList = …` and `MAX_TOKENS = 1500` stays readable.
+const ENV_CREDENTIAL_ASSIGNMENT =
+  /\b([A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)(\s*[:=]\s*["']?)([^\s"'`,;]{8,})/g;
+// Well-known token formats, wherever they appear.
+const KNOWN_TOKEN =
+  /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|npm_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})\b/g;
 
 const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+
+/**
+ * Best-effort redaction of credential-shaped text; not a promise to find every
+ * secret.
+ *
+ * @param {string} text
+ */
+export function redactCredentials(text) {
+  return text
+    .replace(KNOWN_TOKEN, "[redacted]")
+    .replace(CREDENTIAL_ASSIGNMENT, (match, value) => match.replace(value, "[redacted]"))
+    .replace(ENV_CREDENTIAL_ASSIGNMENT, (match, name, sep, value) =>
+      /[A-Za-z]/.test(value) ? `${name}${sep}[redacted]` : match
+    );
+}
 
 /**
  * @param {string} text
@@ -19,8 +42,7 @@ export function sanitizeText(text, secrets = []) {
     if (typeof secret !== "string" || secret.length < 4) continue;
     out = out.split(secret).join("[redacted]");
   }
-  out = out.replace(CREDENTIAL_ASSIGNMENT, (match, value) => match.replace(value, "[redacted]"));
-  return out;
+  return redactCredentials(out);
 }
 
 /**

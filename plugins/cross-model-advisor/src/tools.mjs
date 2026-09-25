@@ -11,6 +11,7 @@ import { constants } from "node:fs";
 import path from "node:path";
 import ignoreFactory from "ignore";
 import { validateRoot } from "./config.mjs";
+import { redactCredentials } from "./session/sanitize.mjs";
 
 const ignore = typeof ignoreFactory === "function" ? ignoreFactory : ignoreFactory.default;
 
@@ -30,12 +31,13 @@ const MAX_EVIDENCE = 5;
 const MAX_WATCHDOG_BYTES = 8 * 1024;
 const MAX_IGNORE_BYTES = 256 * 1024;
 const OPEN_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_CLOEXEC ?? 0);
-const HARD_DIR_NAMES = new Set([".git", ".claude", ".codex", ".gemini", "node_modules"]);
+const HARD_DIR_NAMES = new Set([".git", ".claude", ".codex", ".gemini", "node_modules", ".ssh", ".aws", ".gnupg"]);
+const HARD_FILE_NAMES = new Set([".npmrc", ".netrc", "_netrc", ".pypirc", ".envrc", ".pgpass", ".git-credentials"]);
+const HARD_EXTENSIONS = [".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"];
+const SSH_KEY_RE = /^id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?$/;
 const SEVERITIES = new Set(["nit", "concern", "blocker"]);
 const PRAISE_RE =
   /^(?:thanks|thank you|thx|ty|tysm|looks good(?: to me)?|lgtm|sgtm|ack(?:nowledged)?|ok(?:ay)?|got it|sounds good|great(?: work)?|nice(?: work)?|well done|cheers)(?:[.!])*$/i;
-const CREDENTIAL_ASSIGNMENT =
-  /\b(?:api[_-]?key|token|password|secret|authorization|bearer)\b\s*[:=]\s*([^\s,;]+)/gi;
 const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const PROJECT_IGNORE = ".cross-model-advisorignore";
 const WATCHDOG_NAME = "WATCHDOG.md";
@@ -65,8 +67,7 @@ function sanitizeText(text, secrets = []) {
     .filter((secret) => typeof secret === "string" && secret.length >= 4)
     .sort((a, b) => b.length - a.length);
   for (const secret of ordered) out = out.split(secret).join("[redacted]");
-  out = out.replace(CREDENTIAL_ASSIGNMENT, (match, value) => match.replace(value, "[redacted]"));
-  return out;
+  return redactCredentials(out);
 }
 
 function denied(message = "access denied") {
@@ -95,9 +96,9 @@ function hardExcluded(relPosix) {
   for (const part of relPosix.split("/")) {
     if (!part) continue;
     const lower = part.toLowerCase();
-    if (HARD_DIR_NAMES.has(lower)) return true;
+    if (HARD_DIR_NAMES.has(lower) || HARD_FILE_NAMES.has(lower) || SSH_KEY_RE.test(lower)) return true;
     if (lower === ".env" || lower.startsWith(".env.")) return true;
-    if (lower.endsWith(".pem") || lower.endsWith(".key")) return true;
+    if (HARD_EXTENSIONS.some((ext) => lower.endsWith(ext))) return true;
   }
   return false;
 }
@@ -295,7 +296,7 @@ export const toolSchemas = Object.freeze([
   Object.freeze({
     name: "advise",
     description:
-      "Record one evidence-backed finding; call once per distinct problem. severity is nit, concern, or blocker. note at most 2000 characters. evidence is 1-5 references: a file line you read with the read tool, or an observation eventId from the review context (request, final, or diff:<path>). The host reports findings only after the review completes successfully.",
+      "Record one evidence-backed finding; call once per distinct problem. severity is nit, concern, or blocker. note at most 2000 characters. evidence is 1-5 references: a file line you read with the read tool, or an observation eventId from the review context (request, final, or diff:<path>). Findings are reported when the review ends, including any filed before a timeout or tool-limit cutoff.",
     inputSchema: Object.freeze({
       type: "object",
       additionalProperties: false,
@@ -336,7 +337,8 @@ export const toolSchemas = Object.freeze([
  *   pluginData?: string,
  *   credentialDir?: string,
  *   secrets?: string[],
- *   maxFindings?: number
+ *   maxFindings?: number,
+ *   ignoredPaths?: string[]
  * }} options
  */
 export async function createReviewTools({
@@ -349,7 +351,8 @@ export async function createReviewTools({
   pluginData,
   credentialDir,
   secrets = [],
-  maxFindings = 1
+  maxFindings = 1,
+  ignoredPaths = []
 } = {}) {
   const frozenRoot = await validateRoot(root, { follow: false });
   const liveRoot = await fs.lstat(frozenRoot);
@@ -419,6 +422,11 @@ export async function createReviewTools({
     if (extra.length) userIgnore.add(extra);
   }
 
+  // Paths git itself ignores (from `git ls-files --others --ignored
+  // --exclude-standard --directory`), so .git/info/exclude and the global
+  // excludes file count as well as .gitignore. Directories end in `/`.
+  const gitIgnored = new Set(Array.isArray(ignoredPaths) ? ignoredPaths.filter((item) => typeof item === "string") : []);
+  const ignoredByGit = (relPosix) => gitIgnored.has(relPosix) || gitIgnored.has(`${relPosix}/`);
   const gitignoreCache = new Map();
   /** @type {Map<string, { hash: string, lines: Set<number> }>} */
   const reads = new Map();
@@ -481,12 +489,12 @@ export async function createReviewTools({
   async function isExcluded(relPosix, isDir) {
     if (privatePathExcluded(relPosix)) return true;
     if (!relPosix) return false;
-    if (hardExcluded(relPosix)) return true;
+    if (hardExcluded(relPosix) || ignoredByGit(relPosix)) return true;
     if (ignoredBy(userIgnore, relPosix, isDir)) return true;
     const parts = relPosix.split("/").filter(Boolean);
     for (let i = 0; i < parts.length - 1; i += 1) {
       const ancestor = parts.slice(0, i + 1).join("/");
-      if (hardExcluded(ancestor) || privatePathExcluded(ancestor)) return true;
+      if (hardExcluded(ancestor) || privatePathExcluded(ancestor) || ignoredByGit(ancestor)) return true;
       if (ignoredBy(userIgnore, ancestor, true)) return true;
       if (await gitPathIgnored(ancestor, true)) return true;
     }

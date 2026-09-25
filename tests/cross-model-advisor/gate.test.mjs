@@ -343,6 +343,25 @@ test("excluded files are never sent, and an excluded-only change is not reviewed
   assert.doesNotMatch(JSON.stringify(turn), /another-secret-value/);
 });
 
+test("advisors cannot read files git ignores through .git/info/exclude", async () => {
+  const w = await world();
+  await fs.appendFile(path.join(w.root, ".git", "info", "exclude"), "local-secrets.yml\n");
+  await fs.writeFile(path.join(w.root, "local-secrets.yml"), "INFO_EXCLUDE_SENTINEL\n");
+  await w.prompt("change");
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+  const seen = [];
+  w.setScript(async ({ tools }) => {
+    seen.push(await tools.call("read", { path: "local-secrets.yml" }));
+    seen.push(await tools.call("list", {}));
+    seen.push(await tools.call("search", { query: "INFO_EXCLUDE_SENTINEL" }));
+  });
+  await w.stop();
+  assert.equal(w.reviews.length, 1);
+  assert.match(seen[0], /^Error:/);
+  assert.doesNotMatch(seen[1], /local-secrets/);
+  assert.doesNotMatch(seen[2], /local-secrets/);
+});
+
 test("control commands, subagents, other prompts, and off are never reviewed", async () => {
   const w = await world();
   await w.prompt("/cross-model-advisor:status");

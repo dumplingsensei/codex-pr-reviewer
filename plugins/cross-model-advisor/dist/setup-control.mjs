@@ -95675,7 +95675,15 @@ var FILE_MODE = 384;
 
 // ../../plugins/cross-model-advisor/src/session/sanitize.mjs
 var CREDENTIAL_ASSIGNMENT = /\b(?:api[_-]?key|token|password|secret|authorization|bearer)\b\s*[:=]\s*([^\s,;]+)/gi;
+var ENV_CREDENTIAL_ASSIGNMENT = /\b([A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)(\s*[:=]\s*["']?)([^\s"'`,;]{8,})/g;
+var KNOWN_TOKEN = /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|npm_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})\b/g;
 var CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+function redactCredentials(text) {
+  return text.replace(KNOWN_TOKEN, "[redacted]").replace(CREDENTIAL_ASSIGNMENT, (match2, value) => match2.replace(value, "[redacted]")).replace(
+    ENV_CREDENTIAL_ASSIGNMENT,
+    (match2, name, sep, value) => /[A-Za-z]/.test(value) ? `${name}${sep}[redacted]` : match2
+  );
+}
 function sanitizeText(text, secrets = []) {
   if (typeof text !== "string" || text.length === 0) return "";
   let out = text.replace(CONTROL_CHARS, "");
@@ -95683,8 +95691,7 @@ function sanitizeText(text, secrets = []) {
     if (typeof secret !== "string" || secret.length < 4) continue;
     out = out.split(secret).join("[redacted]");
   }
-  out = out.replace(CREDENTIAL_ASSIGNMENT, (match2, value) => match2.replace(value, "[redacted]"));
-  return out;
+  return redactCredentials(out);
 }
 
 // ../../plugins/cross-model-advisor/src/setup-store.mjs
