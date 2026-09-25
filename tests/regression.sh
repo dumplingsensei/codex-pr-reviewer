@@ -1209,6 +1209,48 @@ check "a filter driver in the repository's own config is not run either" \
 git --git-dir="$SYMGITDIR" config --remove-section filter.cprfilter
 
 
+# Regression: `gh repo clone` checked out the default branch inside its own
+# git, before this script could see config that applies only to the new
+# clone — here an includeIf on the review cache — so a filter driver defined
+# there ran on the repository's files. Clones are now made without checkout.
+note "a fresh cache clone does not check out through config scoped to it"
+CLONEUP="$SANDBOX/clone-upstream"
+mkdir -p "$CLONEUP" && git -C "$CLONEUP" init --quiet -b main
+git -C "$CLONEUP" config user.email t@t && git -C "$CLONEUP" config user.name t
+printf '* filter=cprscoped\n' >"$CLONEUP/.gitattributes"
+echo base >"$CLONEUP/f.txt"
+git -C "$CLONEUP" add -A && git -C "$CLONEUP" commit --quiet -m base
+git -C "$CLONEUP" checkout --quiet -b feature
+echo change >>"$CLONEUP/f.txt"
+git -C "$CLONEUP" commit --quiet -am change
+git -C "$CLONEUP" update-ref refs/pull/7/head refs/heads/feature
+git -C "$CLONEUP" checkout --quiet main
+cat >"$SANDBOX/clone-pr.json" <<JSON
+{"number":7,"title":"scoped","url":"https://github.com/o/r/pull/7",
+ "state":"OPEN","isDraft":false,"isCrossRepository":false,"baseRefName":"main",
+ "baseRefOid":"$(git -C "$CLONEUP" rev-parse main)","headRefOid":"$(git -C "$CLONEUP" rev-parse refs/pull/7/head)",
+ "author":{"login":"someone"},"additions":1,"deletions":0,"changedFiles":1}
+JSON
+CLONEXDG="$SANDBOX/clone-xdg"
+mkdir -p "$CLONEXDG"
+printf '[filter "cprscoped"]\n\tsmudge = %s\n\tclean = %s\n' "$SANDBOX/probe-scoped" "$SANDBOX/probe-scoped" >"$SANDBOX/scoped.gitconfig"
+printf '[includeIf "gitdir:%s/"]\n\tpath = %s\n' "$(cd "$CLONEXDG" && pwd -P)" "$SANDBOX/scoped.gitconfig" >"$SANDBOX/clone-global.gitconfig"
+cat >"$SANDBOX/probe-scoped" <<PROBE
+#!/bin/sh
+touch "$SANDBOX/scoped-ran"
+cat
+PROBE
+chmod +x "$SANDBOX/probe-scoped"
+rm -f "$SANDBOX/scoped-ran"
+out="$( cd "$SYMCWD" && env PATH="$SANDBOX/ghstub:$STUBS:$PATH" XDG_CACHE_HOME="$CLONEXDG" \
+    GIT_CONFIG_GLOBAL="$SANDBOX/clone-global.gitconfig" \
+    CPR_PR_JSON="$SANDBOX/clone-pr.json" CPR_UPSTREAM="$CLONEUP" \
+    node "$SCRIPT" prepare o/r#7 2>&1 )"
+check "prepare built the worktree from a fresh clone" \
+  "$([[ -f "$CLONEXDG/codex-pr-reviewer/worktrees/o__r/pr-7/f.txt" ]] && echo yes || echo no)" "yes"
+check "no filter driver scoped to the clone ran" \
+  "$([[ -e "$SANDBOX/scoped-ran" ]] && echo ran || echo "not run")" "not run"
+
 note "an open context uses the contributor head"
 git -C "$SYMUP" checkout --quiet -b open-feature main
 printf 'open context head\n' >"$SYMUP/open.txt"

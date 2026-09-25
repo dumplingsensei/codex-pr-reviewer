@@ -5,6 +5,16 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.19
+
+0.9.18 left one checkout unprotected: `gh repo clone` checked out the default
+branch inside its own git, before the script could see config that applies
+only to the new clone (a clone template's, or an `includeIf` on the review
+cache), so a filter driver from there still ran. Cache clones are now made
+with `--no-checkout` and scanned before any file is written; nothing used the
+clone's own working tree. Found by the cross-model advisor reviewing 0.9.18; a
+regression case with an `includeIf`-scoped driver ran on the old script.
+
 ## 0.9.18
 
 Closes the gap `SECURITY.md` listed as accepted: a pull request's

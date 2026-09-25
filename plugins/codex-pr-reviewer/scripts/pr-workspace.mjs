@@ -1245,13 +1245,19 @@ function resolveHostRepo(slug, cwd, options = {}) {
   log(`Cloning ${slug} into the review cache (blobless)…`);
   ensurePrivateDir(clonesDir());
   fs.rmSync(repoDir, { recursive: true, force: true });
-  const clone = gh(["repo", "clone", slug, repoDir, "--", "--filter=blob:none", "--no-tags", "--quiet"]);
+  // --no-checkout: a clone's own checkout runs inside `gh`'s git, before this
+  // process can see config that applies only to the new repository (a clone
+  // template's, or an includeIf on the cache path) — so a filter driver from
+  // there would run on the repository's files unneutralised. Nothing uses the
+  // clone's working tree; reviews check out into worktrees, after the scan.
+  const clone = gh(["repo", "clone", slug, repoDir, "--", "--filter=blob:none", "--no-tags", "--quiet", "--no-checkout"]);
   if (clone.status !== 0) {
     throw new UserError(
       `Could not clone ${slug}.`,
       "Check that the repository exists and your `gh` account can read it."
     );
   }
+  neutralizeFilterDrivers(repoDir);
   return { repoDir, remote: "origin", mode: "clone" };
 }
 
