@@ -18,6 +18,8 @@ SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/cpr-regression.XXXXXX")"
 trap 'rm -rf "$SANDBOX"' EXIT
 
 export XDG_CACHE_HOME="$SANDBOX/cache"
+# Checks compare plain text; a caller's FORCE_COLOR would colour node's numbers.
+unset FORCE_COLOR
 CACHE="$XDG_CACHE_HOME/codex-pr-reviewer"
 
 pass=0
