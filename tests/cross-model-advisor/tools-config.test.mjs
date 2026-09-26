@@ -5,6 +5,8 @@
  */
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -21,8 +23,10 @@ const { loadConfig, validateConfig, validateRoot, runtimeErrors, snapshotRoot } 
 const { createReviewTools, normalizeFinding } = await import(
   pathToFileURL(path.join(modules, "tools.mjs")).href
 );
+const { snapshotTree } = await import(pathToFileURL(path.join(modules, "snapshot.mjs")).href);
 
 const scratchDirs = [];
+const openTools = [];
 
 async function scratch(prefix) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -30,7 +34,24 @@ async function scratch(prefix) {
   return dir;
 }
 
+/**
+ * Review tools over a snapshot of `options.root` taken now, as the gate
+ * builds them: files written afterwards are not in it.
+ */
+async function reviewTools(options) {
+  try {
+    await fs.access(path.join(options.root, ".git", "objects"));
+  } catch {
+    execFileSync("git", ["init", "-q"], { cwd: options.root });
+  }
+  const tree = await snapshotTree(options.root, await scratch("cma-index-"));
+  const tools = await createReviewTools({ ...options, tree });
+  openTools.push(tools);
+  return tools;
+}
+
 after(async () => {
+  for (const tools of openTools) tools.close();
   for (const dir of scratchDirs) {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -626,7 +647,7 @@ describe("createReviewTools confinement", () => {
     Buffer.from("BIGFILE!").copy(big, 0);
     await fs.writeFile(path.join(root, "huge.txt"), big);
 
-    const tools = await createReviewTools({
+    const tools = await reviewTools({
       root,
       observations: [{ eventId: "obs_1" }]
     });
@@ -680,7 +701,7 @@ describe("createReviewTools confinement", () => {
     await fs.writeFile(path.join(root, ".gitignore"), "!.env\n");
     await fs.writeFile(path.join(root, ".env"), "HARD_ENV_SENTINEL\n");
     await fs.writeFile(path.join(root, "ok.js"), "const ok = true;\n");
-    const tools = await createReviewTools({ root });
+    const tools = await reviewTools({ root });
     const result = await tools.call("read", { path: ".env" });
     assert.equal(String(result).includes("HARD_ENV_SENTINEL"), false);
     const listing = listingNames(await tools.call("list", {}));
@@ -692,7 +713,7 @@ describe("createReviewTools confinement", () => {
     await fs.writeFile(path.join(root, "ok.js"), "const ok = true;\n");
     await fs.writeFile(path.join(root, ".gitignore"), "!settings/\n!settings/**\n");
     const credentialDir = path.join(root, "settings", "cross-model-advisor", "credentials");
-    const tools = await createReviewTools({ root, credentialDir });
+    const tools = await reviewTools({ root, credentialDir });
     await fs.mkdir(credentialDir, { recursive: true });
     await fs.writeFile(path.join(credentialDir, "slot.json"), "REFRESH_TOKEN_SENTINEL\n");
     const joined = [
@@ -706,14 +727,14 @@ describe("createReviewTools confinement", () => {
 
     const rootCred = await scratch("cma-cred-root-");
     await fs.writeFile(path.join(rootCred, "ok.js"), "SOURCE_SENTINEL\n");
-    const blocked = await createReviewTools({ root: rootCred, credentialDir: rootCred });
+    const blocked = await reviewTools({ root: rootCred, credentialDir: rootCred });
     const source = String(await blocked.call("read", { path: "ok.js" }));
     assert.equal(source.includes("SOURCE_SENTINEL"), false);
   });
 
   it("rejects fabricated evidence, content-free notes, unknown observations, and a second advise", async () => {
     const root = await project();
-    const tools = await createReviewTools({
+    const tools = await reviewTools({
       root,
       observations: [{ eventId: "obs_1" }],
       advisor: { name: "correctness" }
@@ -768,15 +789,12 @@ describe("createReviewTools confinement", () => {
     assert.equal(tools.candidate.severity, "concern");
     assert.equal(tools.candidate.evidence[0].hash, firstHash);
 
-    assert.equal(await tools.isFresh(tools.candidate), true);
-    await fs.writeFile(path.join(root, "ok.js"), "const x = 1;\nconst y = 3;\n");
-    assert.equal(await tools.isFresh(tools.candidate), false);
   });
 
   it("redacts configured secrets from tool output and does not treat advise as published", async () => {
     const root = await scratch("cma-secret-");
     await fs.writeFile(path.join(root, "src.js"), 'const token = "abcd-live-secret";\n');
-    const tools = await createReviewTools({ root, secrets: ["abcd-live-secret"] });
+    const tools = await reviewTools({ root, secrets: ["abcd-live-secret"] });
     const body = await tools.call("read", { path: "src.js" });
     assert.equal(String(body).includes("abcd-live-secret"), false);
     assert.equal(String(body).includes("[redacted]"), true);
@@ -795,7 +813,7 @@ describe("createReviewTools confinement", () => {
     await fs.writeFile(path.join(root, ".CLAUDE", "settings.json"), "CLAUDE_CASE_SENTINEL\n");
     await fs.writeFile(path.join(root, "secret.PEM"), "PEM_CASE_SENTINEL\n");
     await fs.writeFile(path.join(root, "ok.js"), "const ok = true;\n");
-    const tools = await createReviewTools({ root });
+    const tools = await reviewTools({ root });
     const joined = [
       await tools.call("read", { path: ".ENV" }),
       await tools.call("read", { path: ".env" }),
@@ -815,13 +833,13 @@ describe("createReviewTools confinement", () => {
     const root = await scratch("cma-wd-");
     await fs.writeFile(path.join(root, "WATCHDOG.md"), "SHOULD_NOT_GUIDE\n");
     await fs.writeFile(path.join(root, "ok.js"), "const ok = true;\n");
-    const ignored = await createReviewTools({ root, exclude: ["WATCHDOG.md"] });
+    const ignored = await reviewTools({ root, exclude: ["WATCHDOG.md"] });
     assert.equal(ignored.guidance.includes("SHOULD_NOT_GUIDE"), false);
     const giRoot = await scratch("cma-wd-gi-");
     await fs.writeFile(path.join(giRoot, ".gitignore"), "WATCHDOG.md\n");
     await fs.writeFile(path.join(giRoot, "WATCHDOG.md"), "SHOULD_NOT_GUIDE\n");
     await fs.writeFile(path.join(giRoot, "ok.js"), "const ok = true;\n");
-    const giTools = await createReviewTools({ root: giRoot });
+    const giTools = await reviewTools({ root: giRoot });
     assert.equal(giTools.guidance.includes("SHOULD_NOT_GUIDE"), false);
   });
 
@@ -829,7 +847,7 @@ describe("createReviewTools confinement", () => {
     const root = await scratch("cma-trunc-");
     const line1 = "A".repeat(70_000);
     await fs.writeFile(path.join(root, "wide.js"), `${line1}\nLINE2_UNIQUE\n`);
-    const tools = await createReviewTools({ root });
+    const tools = await reviewTools({ root });
     const body = String(await tools.call("read", { path: "wide.js" }));
     assert.equal(body.includes("LINE2_UNIQUE"), false);
     assert.equal(Buffer.byteLength(body, "utf8") <= 64 * 1024, true);
@@ -848,7 +866,7 @@ describe("createReviewTools confinement", () => {
 
     const cjkRoot = await scratch("cma-cjk-");
     await fs.writeFile(path.join(cjkRoot, "cjk.txt"), `${"你".repeat(30_000)}\n`);
-    const cjkTools = await createReviewTools({ root: cjkRoot });
+    const cjkTools = await reviewTools({ root: cjkRoot });
     const cjkBody = String(await cjkTools.call("read", { path: "cjk.txt" }));
     assert.equal(Buffer.byteLength(cjkBody, "utf8") <= 64 * 1024, true);
   });
@@ -860,9 +878,10 @@ describe("createReviewTools confinement", () => {
     await fs.writeFile(path.join(overflow, ".gitignore"), gi);
     await fs.writeFile(path.join(overflow, "private.txt"), "TAIL_IGNORE_SENTINEL\n");
     await fs.writeFile(path.join(overflow, "ok.js"), "const ok = true;\n");
-    const overTools = await createReviewTools({ root: overflow });
+    const overTools = await reviewTools({ root: overflow });
     const leaked = String(await overTools.call("read", { path: "private.txt" }));
     assert.equal(leaked.includes("TAIL_IGNORE_SENTINEL"), false);
+    assert.equal(await overTools.excluded("private.txt"), true);
 
     const nested = await scratch("cma-ig-nest-");
     await fs.writeFile(path.join(nested, ".gitignore"), "*.txt\n");
@@ -870,7 +889,7 @@ describe("createReviewTools confinement", () => {
     await fs.writeFile(path.join(nested, "src", ".gitignore"), "!keep.txt\n");
     await fs.writeFile(path.join(nested, "src", "keep.txt"), "NESTED_KEEP\n");
     await fs.writeFile(path.join(nested, "drop.txt"), "NESTED_DROP\n");
-    const nestTools = await createReviewTools({ root: nested });
+    const nestTools = await reviewTools({ root: nested });
     const keep = String(await nestTools.call("read", { path: "src/keep.txt" }));
     const drop = String(await nestTools.call("read", { path: "drop.txt" }));
     assert.equal(keep.includes("NESTED_KEEP"), true);
@@ -883,7 +902,7 @@ describe("createReviewTools confinement", () => {
     await fs.writeFile(path.join(root, "local-secrets.yml"), "INFO_EXCLUDE_SENTINEL\n");
     await fs.mkdir(path.join(root, "cache"));
     await fs.writeFile(path.join(root, "cache", "dump.txt"), "IGNORED_DIR_SENTINEL\n");
-    const tools = await createReviewTools({ root, ignoredPaths: ["local-secrets.yml", "cache/"] });
+    const tools = await reviewTools({ root, ignoredPaths: ["local-secrets.yml", "cache/"] });
     assert.match(await tools.call("read", { path: "local-secrets.yml" }), /^Error:/);
     assert.match(await tools.call("read", { path: "cache/dump.txt" }), /^Error:/);
     assert.equal(await tools.call("list", {}), "app.js");
@@ -898,7 +917,7 @@ describe("createReviewTools confinement", () => {
     await fs.writeFile(path.join(root, "notes", "secret.md"), "CASE_SENTINEL\n");
     await fs.mkdir(path.join(root, "plugin-data"));
     await fs.writeFile(path.join(root, "plugin-data", "state.json"), "PRIVATE_SENTINEL\n");
-    const tools = await createReviewTools({ root, ignoredPaths: ["notes/"], pluginData: path.join(root, "plugin-data") });
+    const tools = await reviewTools({ root, ignoredPaths: ["notes/"], pluginData: path.join(root, "plugin-data") });
     for (const variant of ["notes/secret.md", "NOTES/secret.md", "Notes/Secret.md", "PLUGIN-DATA/state.json"]) {
       assert.equal(await tools.excluded(variant), true, variant);
       assert.match(await tools.call("read", { path: variant }), /^Error:/, variant);
@@ -916,7 +935,7 @@ describe("createReviewTools confinement", () => {
     await fs.mkdir(path.join(root, ".ssh"));
     await fs.writeFile(path.join(root, ".ssh", "config"), "CREDENTIAL_SENTINEL\n");
     await fs.writeFile(path.join(root, "id_rsa.pub"), "public key is fine\n");
-    const tools = await createReviewTools({ root });
+    const tools = await reviewTools({ root });
     for (const name of [...names, ".ssh/config"]) {
       assert.match(await tools.call("read", { path: name }), /^Error:/, name);
     }
@@ -940,7 +959,7 @@ describe("createReviewTools confinement", () => {
         ""
       ].join("\n")
     );
-    const body = await (await createReviewTools({ root })).call("read", { path: "setup.sh" });
+    const body = await (await reviewTools({ root })).call("read", { path: "setup.sh" });
     assert.doesNotMatch(body, /ghp_short456|wJalrXUtnFEMIK7MDENG|ghp_abcdefghij|hunter2|12345678/);
     assert.match(body, /GITHUB_TOKEN=\[redacted\]/);
     assert.match(body, /DB_PASSWORD=\[redacted\]/);
@@ -953,7 +972,7 @@ describe("createReviewTools confinement", () => {
   it("lines from a withdrawn read stop counting as evidence", async () => {
     const root = await scratch("cma-withdraw-");
     await fs.writeFile(path.join(root, "a.js"), "one\ntwo\nthree\n");
-    const tools = await createReviewTools({ root, maxFindings: 5 });
+    const tools = await reviewTools({ root, maxFindings: 5 });
     const cite = (line) =>
       tools.call("advise", { severity: "nit", note: `line ${line} is odd`, evidence: [{ kind: "file", path: "a.js", line, detail: "seen" }] });
     await tools.call("read", { path: "a.js", limit: 1 });
@@ -965,11 +984,73 @@ describe("createReviewTools confinement", () => {
     assert.equal(await cite(1), "Error: duplicate finding");
   });
 
+  it("reads the reviewed snapshot, not the working tree after it", async () => {
+    const root = await scratch("cma-snap-");
+    await fs.writeFile(path.join(root, "a.js"), "SNAPSHOT_A\n");
+    await fs.writeFile(path.join(root, "b.js"), "SNAPSHOT_B\n");
+    const tools = await reviewTools({ root });
+    await fs.writeFile(path.join(root, "a.js"), "LATER_A\n");
+    await fs.rm(path.join(root, "b.js"));
+    await fs.writeFile(path.join(root, "c.js"), "LATER_C\n");
+    assert.equal(await tools.call("read", { path: "a.js" }), "1|SNAPSHOT_A");
+    assert.equal(await tools.call("read", { path: "b.js" }), "1|SNAPSHOT_B");
+    assert.match(await tools.call("read", { path: "c.js" }), /^Error:/);
+    assert.equal(await tools.call("list", {}), "a.js\nb.js");
+    assert.equal(await tools.call("search", { query: "LATER" }), "");
+    assert.equal(await tools.call("search", { query: "snapshot" }), "a.js:1:SNAPSHOT_A\nb.js:1:SNAPSHOT_B");
+    const staged = await tools.call("advise", {
+      severity: "nit",
+      note: "a.js holds the snapshot content.",
+      evidence: [{ kind: "file", path: "a.js", line: 1, detail: "SNAPSHOT_A" }]
+    });
+    assert.equal(staged, "staged");
+    assert.equal(tools.candidate.evidence[0].hash, createHash("sha256").update("SNAPSHOT_A\n").digest("hex"));
+  });
+
+  it("never follows symlinks or submodules in the snapshot, and reads names exactly", async () => {
+    const root = await scratch("cma-links-");
+    await fs.writeFile(path.join(root, "ok.js"), "ok\n");
+    const outside = await scratch("cma-links-out-");
+    await fs.writeFile(path.join(outside, "secret.txt"), "LINKED_SENTINEL\n");
+    await fs.symlink(outside, path.join(root, "linked"));
+    await fs.symlink(path.join(outside, "secret.txt"), path.join(root, "file-link"));
+    const sub = path.join(root, "vendor");
+    await fs.mkdir(sub);
+    execFileSync("git", ["init", "-q"], { cwd: sub });
+    await fs.writeFile(path.join(sub, "inner.js"), "SUBMODULE_SENTINEL\n");
+    execFileSync("git", ["add", "inner.js"], { cwd: sub });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "inner"], { cwd: sub });
+    const tools = await reviewTools({ root });
+    const joined = [
+      await tools.call("read", { path: "linked/secret.txt" }),
+      await tools.call("read", { path: "file-link" }),
+      await tools.call("read", { path: "vendor/inner.js" }),
+      await tools.call("list", { path: "linked" }),
+      await tools.call("list", { path: "vendor" }),
+      await tools.call("search", { query: "SENTINEL" }),
+      await tools.call("read", { path: "OK.js" })
+    ].join("\n");
+    assert.doesNotMatch(joined, /SENTINEL|\bok\b/);
+    assert.equal(await tools.call("list", {}), "ok.js");
+  });
+
+  it("needs a snapshot to read, and stops reading once closed", async () => {
+    const root = await scratch("cma-nosnap-");
+    await fs.writeFile(path.join(root, "ok.js"), "ok\n");
+    const bare = await createReviewTools({ root });
+    await assert.rejects(() => bare.call("read", { path: "ok.js" }), /snapshot tree/);
+    assert.equal(await bare.excluded(".env"), true);
+    const tools = await reviewTools({ root });
+    assert.equal(await tools.call("read", { path: "ok.js" }), "1|ok");
+    tools.close();
+    await assert.rejects(() => tools.call("read", { path: "ok.js" }), /closed/);
+  });
+
   it("rejects a replaced project root when activation identity is pinned", async () => {
     const root = await scratch("cma-ident-");
     await fs.writeFile(path.join(root, "ok.js"), "ORIGINAL_ROOT\n");
     const snap = await snapshotRoot(root);
-    const tools = await createReviewTools({
+    const tools = await reviewTools({
       root: snap.path,
       rootIdent: { dev: snap.dev, ino: snap.ino }
     });

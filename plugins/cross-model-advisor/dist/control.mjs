@@ -501,11 +501,12 @@ async function validateRoot(rootPath, { follow = true } = {}) {
 }
 
 // ../../plugins/cross-model-advisor/src/snapshot.mjs
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs2 from "node:fs/promises";
 import path2 from "node:path";
 var GIT_TIMEOUT_MS = 2e4;
 var MAX_GIT_OUTPUT = 32 * 1024 * 1024;
+var MAX_TREE_OBJECT_BYTES = 16 * 1024 * 1024;
 var MAX_FILE_DIFF_CHARS = 16 * 1024;
 var MAX_TOTAL_DIFF_CHARS = 60 * 1024;
 var SnapshotError = class extends Error {

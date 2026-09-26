@@ -949,7 +949,7 @@ export async function validateApi({
  *   compactSummary?: { text?: string, promptId?: unknown, at?: unknown, generation?: unknown },
  *   turn?: object,
  *   systemPrompt?: string,
- *   tools: { call: Function, candidate?: unknown, isFresh?: Function, guidance?: string },
+ *   tools: { call: Function, candidate?: unknown, guidance?: string },
  *   limits?: { maxToolCallsPerReview?: number, maxOutputTokens?: number, reviewTimeoutSeconds?: number },
  *   signal?: AbortSignal,
  *   env?: NodeJS.ProcessEnv | Record<string, string | undefined>

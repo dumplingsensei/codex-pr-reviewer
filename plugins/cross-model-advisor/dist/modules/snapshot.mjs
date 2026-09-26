@@ -1,11 +1,15 @@
 import { createRequire as __cmaCreateRequire } from "node:module"; const require = __cmaCreateRequire(import.meta.url);
 
 // ../../plugins/cross-model-advisor/src/snapshot.mjs
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { isUtf8 } from "node:buffer";
 import fs from "node:fs/promises";
 import path from "node:path";
 var GIT_TIMEOUT_MS = 2e4;
 var MAX_GIT_OUTPUT = 32 * 1024 * 1024;
+var OBJECT_ID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+var MAX_TREE_OBJECT_BYTES = 16 * 1024 * 1024;
+var MAX_BATCH_HEADER_BYTES = 256;
 var MAX_FILE_DIFF_CHARS = 16 * 1024;
 var MAX_TOTAL_DIFF_CHARS = 60 * 1024;
 var SnapshotError = class extends Error {
@@ -154,6 +158,175 @@ async function turnDiff(root, base, head, { env = process.env, isExcluded, maxFi
   }
   return { files: included, omitted, unshown };
 }
+function parseTree(buf, hashBytes) {
+  const entries = /* @__PURE__ */ new Map();
+  let pos = 0;
+  while (pos < buf.length) {
+    const space = buf.indexOf(32, pos);
+    const nul = space < 0 ? -1 : buf.indexOf(0, space + 1);
+    if (nul < 0 || nul + 1 + hashBytes > buf.length) throw new SnapshotError("git", "malformed tree object");
+    const mode = buf.toString("latin1", pos, space);
+    const nameBytes = buf.subarray(space + 1, nul);
+    const oid = buf.toString("hex", nul + 1, nul + 1 + hashBytes);
+    pos = nul + 1 + hashBytes;
+    if (!isUtf8(nameBytes)) continue;
+    const name = nameBytes.toString("utf8");
+    if (!name || name === "." || name === ".." || name.includes("/")) continue;
+    const kind = mode === "40000" ? "dir" : mode === "100644" || mode === "100755" ? "file" : "other";
+    entries.set(name, { kind, oid });
+  }
+  return entries;
+}
+function openTreeReader(root, tree, { env = process.env, signal } = {}) {
+  if (typeof tree !== "string" || !OBJECT_ID_RE.test(tree)) throw new SnapshotError("git", "invalid tree id");
+  const hashBytes = tree.length / 2;
+  let child = null;
+  let failed = null;
+  const pending = [];
+  let mode = "header";
+  let headerParts = [];
+  let headerLength = 0;
+  let current = null;
+  const fail = (reason) => {
+    if (failed) return;
+    failed = reason instanceof Error ? reason : new SnapshotError("git", "git cat-file failed");
+    for (const request of pending.splice(0)) request.reject(failed);
+    if (child) {
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.kill();
+    }
+    signal?.removeEventListener("abort", onAbort);
+  };
+  const onAbort = () => fail(signal?.reason);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  const hold = (on) => {
+    if (!child) return;
+    for (const handle of [child, child.stdin, child.stdout]) {
+      if (on) handle.ref?.();
+      else handle.unref?.();
+    }
+  };
+  const onData = (chunk) => {
+    let pos = 0;
+    while (pos < chunk.length && !failed) {
+      if (mode === "header") {
+        const nl = chunk.indexOf(10, pos);
+        const end = nl < 0 ? chunk.length : nl;
+        headerParts.push(chunk.subarray(pos, end));
+        headerLength += end - pos;
+        if (headerLength > MAX_BATCH_HEADER_BYTES || !pending.length) {
+          fail(new SnapshotError("git", "unexpected git cat-file output"));
+          return;
+        }
+        if (nl < 0) return;
+        pos = nl + 1;
+        const line = Buffer.concat(headerParts).toString("latin1");
+        headerParts = [];
+        headerLength = 0;
+        const found = /^[0-9a-f]{40,64} (blob|tree|commit|tag) (\d+)$/.exec(line);
+        if (!found) {
+          pending.shift()?.resolve(null);
+          if (!pending.length) hold(false);
+          continue;
+        }
+        const size = Number(found[2]);
+        current = { type: found[1], size, remaining: size, keep: size <= pending[0].maxBytes, chunks: [] };
+        mode = size === 0 ? "newline" : "body";
+      } else if (mode === "body" && current) {
+        const take = Math.min(current.remaining, chunk.length - pos);
+        if (current.keep) current.chunks.push(chunk.subarray(pos, pos + take));
+        current.remaining -= take;
+        pos += take;
+        if (current.remaining === 0) mode = "newline";
+      } else {
+        if (chunk[pos] !== 10 || !current) {
+          fail(new SnapshotError("git", "unexpected git cat-file output"));
+          return;
+        }
+        pos += 1;
+        const done = current;
+        current = null;
+        mode = "header";
+        pending.shift()?.resolve({ type: done.type, size: done.size, bytes: done.keep ? Buffer.concat(done.chunks) : null });
+        if (!pending.length) hold(false);
+      }
+    }
+  };
+  const object = (oid, maxBytes) => {
+    if (failed) return Promise.reject(failed);
+    if (!OBJECT_ID_RE.test(oid)) return Promise.resolve(null);
+    if (!child) {
+      child = spawn("git", ["-c", "core.quotepath=off", "cat-file", "--batch"], {
+        cwd: root,
+        env: gitEnv(env),
+        stdio: ["pipe", "pipe", "ignore"]
+      });
+      child.on("error", () => fail(new SnapshotError("git", "git cat-file failed")));
+      child.on("exit", () => fail(new SnapshotError("git", "git cat-file exited")));
+      child.stdin.on("error", () => fail(new SnapshotError("git", "git cat-file failed")));
+      child.stdout.on("data", onData);
+    }
+    return new Promise((resolve, reject) => {
+      if (!pending.length) hold(true);
+      pending.push({ maxBytes, resolve, reject });
+      child?.stdin.write(`${oid}
+`);
+    });
+  };
+  const dirs = /* @__PURE__ */ new Map();
+  const dirEntries = (relPosix) => {
+    let found = dirs.get(relPosix);
+    if (!found) {
+      found = (async () => {
+        let oid = tree;
+        if (relPosix) {
+          const entry = await entryAt(relPosix);
+          if (entry?.kind !== "dir") return null;
+          oid = entry.oid;
+        }
+        const obj = await object(oid, MAX_TREE_OBJECT_BYTES);
+        return obj?.type === "tree" && obj.bytes ? parseTree(obj.bytes, hashBytes) : null;
+      })();
+      dirs.set(relPosix, found);
+    }
+    return found;
+  };
+  const entryAt = async (relPosix) => {
+    if (!relPosix) return { kind: "dir", oid: tree };
+    const slash = relPosix.lastIndexOf("/");
+    const parent = await dirEntries(slash < 0 ? "" : relPosix.slice(0, slash));
+    return parent?.get(relPosix.slice(slash + 1)) ?? null;
+  };
+  return {
+    /** The entry at a normalized relative path, or null. */
+    entry: entryAt,
+    /**
+     * A directory's files and subdirectories, sorted; symlinks and submodules
+     * are left out. Null when `relPosix` is not a directory.
+     *
+     * @param {string} relPosix
+     */
+    async list(relPosix) {
+      const entries = await dirEntries(relPosix);
+      if (!entries) return null;
+      return [...entries].filter(([, entry]) => entry.kind !== "other").map(([name, entry]) => ({ name, directory: entry.kind === "dir" })).sort((a, b) => a.name.localeCompare(b.name));
+    },
+    /**
+     * A blob's size, and its bytes when it is at most `maxBytes`.
+     *
+     * @param {string} oid
+     * @param {number} maxBytes
+     */
+    async blob(oid, maxBytes) {
+      const obj = await object(oid, maxBytes);
+      return obj?.type === "blob" ? { size: obj.size, bytes: obj.bytes } : null;
+    },
+    close() {
+      fail(new SnapshotError("git", "tree reader closed"));
+    }
+  };
+}
 export {
   MAX_FILE_DIFF_CHARS,
   MAX_TOTAL_DIFF_CHARS,
@@ -161,6 +334,7 @@ export {
   changedFiles,
   gitIgnoredPaths,
   gitTopLevel,
+  openTreeReader,
   reviewBaseTree,
   snapshotTree,
   turnDiff

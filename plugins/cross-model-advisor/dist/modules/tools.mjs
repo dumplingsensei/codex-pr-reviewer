@@ -838,6 +838,7 @@ import { constants } from "node:fs";
 import path from "node:path";
 import { validateRoot } from "./config.mjs";
 import { redactCredentials } from "./session/sanitize.mjs";
+import { openTreeReader } from "./snapshot.mjs";
 var ignore = typeof import_ignore.default === "function" ? import_ignore.default : import_ignore.default.default;
 var MAX_READ_FILE_BYTES = 1024 * 1024;
 var MAX_READ_LINES_DEFAULT = 200;
@@ -1109,7 +1110,9 @@ async function createReviewTools({
   credentialDir,
   secrets = [],
   maxFindings = 1,
-  ignoredPaths = []
+  ignoredPaths = [],
+  tree,
+  env = process.env
 } = {}) {
   const frozenRoot = await validateRoot(root, { follow: false });
   const liveRoot = await fs.lstat(frozenRoot);
@@ -1186,6 +1189,7 @@ async function createReviewTools({
   const findingLimit = Number.isInteger(maxFindings) && maxFindings > 0 ? maxFindings : 1;
   const staged = [];
   let undoLastRead = null;
+  const reader = tree ? openTreeReader(frozenRoot, tree, { env, signal }) : null;
   function checkAbort() {
     if (signal?.aborted) {
       const reason = signal.reason;
@@ -1244,122 +1248,30 @@ async function createReviewTools({
     }
     return gitPathIgnored(relPosix, isDir);
   }
-  async function resolveInside(userPath, { allowRoot = false } = {}) {
-    if (!await rootStillValid()) return { error: denied() };
+  function locate(userPath, { allowRoot = false } = {}) {
     if (typeof userPath !== "string" || userPath.includes("\0")) return { error: denied() };
     const trimmed = userPath.trim();
-    if (!trimmed) {
-      if (!allowRoot) return { error: denied() };
-      return { relPosix: "", abs: frozenRoot };
-    }
+    if (!trimmed) return allowRoot ? { relPosix: "" } : { error: denied() };
     const joined = path.isAbsolute(trimmed) ? path.normalize(trimmed) : path.normalize(path.join(frozenRoot, trimmed));
     if (isOutside(frozenRoot, joined)) return { error: denied() };
     const relPosix = posixRel(path.relative(frozenRoot, joined));
-    let abs = frozenRoot;
-    if (relPosix) {
-      for (const part of relPosix.split("/")) {
-        if (!part || part === ".") continue;
-        if (part === "..") return { error: denied() };
-        abs = path.join(abs, part);
-        let lstat;
-        try {
-          lstat = await fs.lstat(abs);
-        } catch {
-          return { error: denied() };
-        }
-        if (lstat.isSymbolicLink()) return { error: denied() };
-      }
-    }
-    if (isOutside(frozenRoot, abs)) return { error: denied() };
-    return { relPosix, abs };
+    if (relPosix.split("/").includes("..")) return { error: denied() };
+    if (!relPosix && !allowRoot) return { error: denied() };
+    return { relPosix };
   }
-  async function verifyOpened(handle, abs) {
-    if (!await rootStillValid()) return false;
-    const fdStat = await handle.stat();
-    let resolved;
-    try {
-      resolved = await fs.realpath(abs);
-    } catch {
-      return false;
-    }
-    if (isOutside(frozenRoot, resolved)) return false;
-    let resolvedStat;
-    try {
-      resolvedStat = await fs.stat(resolved);
-    } catch {
-      return false;
-    }
-    if (!sameIdent(resolvedStat, fdStat)) return false;
-    let cur = frozenRoot;
-    const rel = posixRel(path.relative(frozenRoot, abs));
-    if (rel) {
-      for (const part of rel.split("/")) {
-        cur = path.join(cur, part);
-        let st;
-        try {
-          st = await fs.lstat(cur);
-        } catch {
-          return false;
-        }
-        if (st.isSymbolicLink()) return false;
-      }
-    }
-    let finalLst;
-    try {
-      finalLst = await fs.lstat(abs);
-    } catch {
-      return false;
-    }
-    if (finalLst.isSymbolicLink() || !sameIdent(finalLst, fdStat)) return false;
-    return rootStillValid();
+  function source() {
+    if (!reader) throw new Error("review tools need a snapshot tree to read");
+    return reader;
   }
-  async function openFile(abs) {
-    let lstat;
-    try {
-      lstat = await fs.lstat(abs);
-    } catch {
-      return { error: denied(), readBytes: 0 };
-    }
-    if (lstat.isSymbolicLink() || !lstat.isFile()) return { error: denied(), readBytes: 0 };
-    let handle;
-    try {
-      handle = await fs.open(abs, OPEN_FLAGS);
-      const stat = await handle.stat();
-      if (!sameIdent(stat, lstat) || !stat.isFile()) {
-        await handle.close().catch(() => {
-        });
-        return { error: denied(), readBytes: 0 };
-      }
-      if (!await verifyOpened(handle, abs)) {
-        await handle.close().catch(() => {
-        });
-        return { error: denied(), readBytes: 0 };
-      }
-      if (stat.size > MAX_READ_FILE_BYTES) {
-        await handle.close().catch(() => {
-        });
-        return { error: denied("file too large"), readBytes: 0 };
-      }
-      const buf = Buffer2.alloc(Number(stat.size));
-      let offset = 0;
-      while (offset < buf.length) {
-        const got = await handle.read(buf, offset, buf.length - offset, offset);
-        if (got.bytesRead === 0) break;
-        offset += got.bytesRead;
-      }
-      await handle.close().catch(() => {
-      });
-      const bytes = offset === buf.length ? buf : buf.subarray(0, offset);
-      if (bytes.includes(0) || !isUtf8(bytes)) {
-        return { error: denied("binary file"), readBytes: bytes.length };
-      }
-      const hash = createHash("sha256").update(bytes).digest("hex");
-      return { bytes, hash, stat, readBytes: bytes.length };
-    } catch {
-      if (handle) await handle.close().catch(() => {
-      });
-      return { error: denied(), readBytes: 0 };
-    }
+  async function readBlob(relPosix, maxBytes = MAX_READ_FILE_BYTES) {
+    const entry = await source().entry(relPosix);
+    if (entry?.kind !== "file") return { error: denied() };
+    const blob = await source().blob(entry.oid, maxBytes);
+    if (!blob) return { error: denied() };
+    if (!blob.bytes) return { error: denied("file too large"), size: blob.size, tooLarge: true };
+    if (blob.bytes.includes(0) || !isUtf8(blob.bytes)) return { error: denied("binary file"), size: blob.size };
+    const hash = createHash("sha256").update(blob.bytes).digest("hex");
+    return { bytes: blob.bytes, hash, size: blob.size };
   }
   async function toolRead(args) {
     const parsed = objectArgs(args, ["path", "offset", "limit"]);
@@ -1370,10 +1282,10 @@ async function createReviewTools({
     if ("limit" in parsed && (!Number.isInteger(parsed.limit) || parsed.limit < 1 || parsed.limit > MAX_READ_LINES)) {
       return denied("invalid arguments");
     }
-    const located = await resolveInside(parsed.path);
+    const located = locate(parsed.path);
     if (located.error) return located.error;
     if (await isExcluded(located.relPosix, false)) return denied();
-    const opened = await openFile(located.abs);
+    const opened = await readBlob(located.relPosix);
     if (opened.error) return opened.error;
     const lines = splitLines(opened.bytes.toString("utf8"));
     if (lines.length && lines[lines.length - 1] === "") lines.pop();
@@ -1396,81 +1308,16 @@ async function createReviewTools({
     }
     return bounded.text;
   }
-  async function readDirents(abs) {
-    let lstat;
-    try {
-      lstat = await fs.lstat(abs);
-    } catch {
-      return { error: denied() };
-    }
-    if (lstat.isSymbolicLink() || !lstat.isDirectory()) return { error: denied() };
-    let handle;
-    try {
-      handle = await fs.open(abs, OPEN_FLAGS | (constants.O_DIRECTORY ?? 0));
-      const stat = await handle.stat();
-      if (!sameIdent(stat, lstat) || !stat.isDirectory()) {
-        await handle.close().catch(() => {
-        });
-        return { error: denied() };
-      }
-      if (!await verifyOpened(handle, abs)) {
-        await handle.close().catch(() => {
-        });
-        return { error: denied() };
-      }
-      let names;
-      try {
-        names = await fs.readdir(abs);
-      } catch {
-        await handle.close().catch(() => {
-        });
-        return { error: denied() };
-      }
-      const later = await fs.lstat(abs);
-      const fdLater = await handle.stat();
-      await handle.close().catch(() => {
-      });
-      if (later.isSymbolicLink() || !later.isDirectory() || !sameIdent(later, stat) || !sameIdent(fdLater, stat)) {
-        return { error: denied() };
-      }
-      names.sort((a, b) => a.localeCompare(b));
-      const entries = [];
-      for (const name of names) {
-        if (name.includes("\0")) continue;
-        const child = path.join(abs, name);
-        let st;
-        try {
-          st = await fs.lstat(child);
-        } catch {
-          continue;
-        }
-        if (st.isSymbolicLink()) continue;
-        if (!st.isDirectory() && !st.isFile()) continue;
-        entries.push({ name, directory: st.isDirectory() });
-      }
-      return { entries };
-    } catch {
-      if (handle) await handle.close().catch(() => {
-      });
-      return { error: denied() };
-    }
-  }
   async function toolList(args) {
     const parsed = objectArgs(args, ["path", "depth"]);
     if (!parsed) return denied("invalid arguments");
     if ("depth" in parsed && (!Number.isInteger(parsed.depth) || parsed.depth < 1 || parsed.depth > MAX_LIST_DEPTH)) {
       return denied("invalid arguments");
     }
-    const located = await resolveInside(parsed.path ?? "", { allowRoot: true });
+    const located = locate(parsed.path ?? "", { allowRoot: true });
     if (located.error) return located.error;
     if (located.relPosix && await isExcluded(located.relPosix, true)) return denied();
-    let startStat;
-    try {
-      startStat = await fs.lstat(located.abs);
-    } catch {
-      return denied();
-    }
-    if (startStat.isSymbolicLink() || !startStat.isDirectory()) return denied();
+    if ((await source().entry(located.relPosix))?.kind !== "dir") return denied();
     const depth = parsed.depth ?? 1;
     const lines = [];
     let truncated = false;
@@ -1480,11 +1327,9 @@ async function createReviewTools({
         truncated = true;
         return;
       }
-      const resolved = await resolveInside(relPosix, { allowRoot: true });
-      if (resolved.error) return;
-      const listed = await readDirents(resolved.abs);
-      if (listed.error) return;
-      for (const entry of listed.entries) {
+      const entries = await source().list(relPosix);
+      if (!entries) return;
+      for (const entry of entries) {
         if (lines.length >= MAX_LIST_ENTRIES) {
           truncated = true;
           return;
@@ -1507,7 +1352,7 @@ async function createReviewTools({
     if ("caseSensitive" in parsed && typeof parsed.caseSensitive !== "boolean") {
       return denied("invalid arguments");
     }
-    const located = await resolveInside(parsed.path ?? "", { allowRoot: true });
+    const located = locate(parsed.path ?? "", { allowRoot: true });
     if (located.error) return located.error;
     if (located.relPosix && await isExcluded(located.relPosix, true)) return denied();
     const caseSensitive = parsed.caseSensitive === true;
@@ -1523,12 +1368,10 @@ async function createReviewTools({
         return;
       }
       if (relPosix && await isExcluded(relPosix, isDir)) return;
-      const resolved = await resolveInside(relPosix, { allowRoot: true });
-      if (resolved.error) return;
       if (isDir) {
-        const listed = await readDirents(resolved.abs);
-        if (listed.error) return;
-        for (const entry of listed.entries) {
+        const entries = await source().list(relPosix);
+        if (!entries) return;
+        for (const entry of entries) {
           if (incomplete || matches.length >= MAX_SEARCH_MATCHES) {
             incomplete = true;
             return;
@@ -1539,35 +1382,18 @@ async function createReviewTools({
         return;
       }
       files += 1;
-      if (files > MAX_SEARCH_FILES) {
+      if (files > MAX_SEARCH_FILES || scanned >= MAX_SEARCH_SCAN_BYTES) {
         incomplete = true;
         return;
       }
-      let lst;
-      try {
-        lst = await fs.lstat(resolved.abs);
-      } catch {
+      const opened = await readBlob(relPosix, Math.min(MAX_READ_FILE_BYTES, MAX_SEARCH_SCAN_BYTES - scanned));
+      if (opened.error) {
+        if (opened.tooLarge) incomplete = true;
+        else scanned += opened.size ?? 0;
         return;
       }
-      if (lst.isSymbolicLink() || !lst.isFile()) return;
-      if (scanned >= MAX_SEARCH_SCAN_BYTES) {
-        incomplete = true;
-        return;
-      }
-      if (lst.size > MAX_READ_FILE_BYTES) {
-        incomplete = true;
-        return;
-      }
-      if (scanned + Number(lst.size) > MAX_SEARCH_SCAN_BYTES) {
-        incomplete = true;
-        return;
-      }
-      const opened = await openFile(resolved.abs);
-      scanned += opened.readBytes ?? 0;
-      if (scanned > MAX_SEARCH_SCAN_BYTES) incomplete = true;
-      if (opened.error) return;
-      const text = opened.bytes.toString("utf8");
-      const lines = splitLines(text);
+      scanned += opened.size;
+      const lines = splitLines(opened.bytes.toString("utf8"));
       if (lines.length && lines[lines.length - 1] === "") lines.pop();
       for (let i = 0; i < lines.length; i += 1) {
         const hay = caseSensitive ? lines[i] : lines[i].toLowerCase();
@@ -1579,14 +1405,9 @@ async function createReviewTools({
         }
       }
     };
-    let startStat;
-    try {
-      startStat = await fs.lstat(located.abs);
-    } catch {
-      return denied();
-    }
-    if (startStat.isSymbolicLink()) return denied();
-    await consider(located.relPosix, startStat.isDirectory());
+    const start = await source().entry(located.relPosix);
+    if (!start || start.kind === "other") return denied();
+    await consider(located.relPosix, start.kind === "dir");
     const bounded = boundItems(matches, MAX_SEARCH_RETURN_BYTES, secretList);
     if (incomplete || bounded.truncated) {
       if (!bounded.text.includes(TRUNCATED_MARKER)) {
@@ -1659,20 +1480,6 @@ ${TRUNCATED_MARKER}` : TRUNCATED_MARKER;
     fingerprints.add(normalized);
     return "staged";
   }
-  async function isFresh(target) {
-    if (!await rootStillValid()) return false;
-    const evidence = Array.isArray(target) ? target : Array.isArray(target?.evidence) ? target.evidence : [];
-    for (const item of evidence) {
-      if (item?.kind !== "file") continue;
-      if (typeof item.path !== "string" || typeof item.hash !== "string") return false;
-      if (await isExcluded(item.path, false)) return false;
-      const located = await resolveInside(item.path);
-      if (located.error) return false;
-      const opened = await openFile(located.abs);
-      if (opened.error || opened.hash !== item.hash) return false;
-    }
-    return true;
-  }
   async function call(name, args) {
     undoLastRead = null;
     checkAbort();
@@ -1700,7 +1507,10 @@ ${TRUNCATED_MARKER}` : TRUNCATED_MARKER;
   }
   return {
     call,
-    isFresh,
+    /** Stops the snapshot reader; call once the review ends. */
+    close() {
+      reader?.close();
+    },
     /** The host withheld the latest result from the model: its lines are no longer evidence. */
     withdrawLastResult() {
       undoLastRead?.();

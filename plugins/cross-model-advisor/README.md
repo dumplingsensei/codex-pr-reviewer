@@ -66,7 +66,7 @@ network bootstrap at install time. From a local checkout,
    Claude's final message (as a claim to check, not evidence), and the diff
    between the two snapshots, minus excluded paths. Committing during the turn
    does not change what is measured, and your earlier uncommitted work is not
-   part of it. Advisors may read, list, and search the project, and report up
+   part of it. Advisors may read, list, and search that snapshot, and report up
    to five findings each, every one backed by evidence: a line they actually
    read, or the request, final message, or a file's diff.
 4. **The outcome.**

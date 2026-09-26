@@ -23,7 +23,7 @@ Reports about any of those are wanted.
 The sibling review gate sends each reviewed turn's request, Claude's final
 message, the git diff (minus excluded paths), and explicitly read project files
 to external model providers selected in trusted user configuration. Its
-model-visible tools are read-only and project-confined; the request, diff, and
+model-visible tools only read the reviewed git snapshot; the request, diff, and
 source are untrusted data, not authority to broaden that access. Confinement
 bypasses, excluded content reaching a provider, forged or unevidenced findings
 sent back to Claude, and credential leakage are in scope.

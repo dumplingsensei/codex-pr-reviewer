@@ -361,6 +361,19 @@ test("a message sent before the turn's Stop extends the turn instead of moving i
   assert.equal(blocked.reviews[2].turn.request, "next task");
 });
 
+test("advisors read the reviewed snapshot even when files change during the review", async () => {
+  const w = await world();
+  await w.prompt("change");
+  await fs.writeFile(path.join(w.root, "src", "a.js"), "REVIEWED\n");
+  let seen;
+  w.setScript(async ({ tools }) => {
+    await fs.writeFile(path.join(w.root, "src", "a.js"), "EDITED_DURING_REVIEW\n");
+    seen = await tools.call("read", { path: "src/a.js" });
+  });
+  await w.stop();
+  assert.equal(seen, "1|REVIEWED");
+});
+
 test("a partial failure with no findings is not reported as a silent pass", async () => {
   const advisor = (name) => ({ name, provider: "local", model: "gpt-test", instructions: name, enabled: true, reasoningEffort: "default" });
   const w = await world({ advisors: [advisor("alpha"), advisor("beta")] });

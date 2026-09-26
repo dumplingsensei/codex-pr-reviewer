@@ -6,6 +6,18 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.22
+
+- The advisors' read, list, and search tools now read the reviewed snapshot's
+  git tree through one `git cat-file --batch`, not the live working tree. What
+  an advisor reads is exactly what was reviewed, even if files change while
+  the review runs (a test edits a file mid-review and still reads the
+  snapshot). Lookups are by exact name and symlinks and submodules are never
+  followed, which removes the filesystem race handling the live reads needed.
+  Exclusion rules still come from the project on disk, so an ignore file that
+  is itself git-ignored still applies. Submodule contents are no longer
+  readable; they were never part of the reviewed diff.
+
 ## 2.1.21
 
 - Security: on a case-insensitive filesystem (macOS by default), an advisor

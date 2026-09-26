@@ -344,9 +344,10 @@ async function pool(tasks, limit) {
  *
  * @param {{ runnable: any[], config: any, state: any, session: any, deps: typeof defaultDeps, env: NodeJS.ProcessEnv,
  *   secrets: string[], credDir: string, ignoredPaths: string[], turnContext: object, observations: object[],
- *   deadline: number, projectRoot?: string }} input
+ *   deadline: number, tree: string, projectRoot?: string }} input `tree` is the snapshot under review, which
+ *   the advisors' tools read instead of the working tree.
  */
-function runAdvisors({ runnable, config, state, session, deps, env, secrets, credDir, ignoredPaths, turnContext, observations, deadline, projectRoot = state.projectRoot }) {
+function runAdvisors({ runnable, config, state, session, deps, env, secrets, credDir, ignoredPaths, turnContext, observations, deadline, tree, projectRoot = state.projectRoot }) {
   const { limits } = config;
   return pool(
     runnable.map((advisor) => async () => {
@@ -378,7 +379,9 @@ function runAdvisors({ runnable, config, state, session, deps, env, secrets, cre
           credentialDir: credDir,
           secrets,
           maxFindings: MAX_FINDINGS_PER_REVIEW,
-          ignoredPaths
+          ignoredPaths,
+          tree,
+          env
         });
         const result = await deps.reviewApi({
           provider,
@@ -401,6 +404,7 @@ function runAdvisors({ runnable, config, state, session, deps, env, secrets, cre
         return { ...base, ok: false, error: stats.lastError, findings: tools?.candidates ?? [] };
       } finally {
         clearTimeout(timer);
+        tools?.close?.();
       }
     }),
     limits.maxConcurrentAdvisors
@@ -593,7 +597,8 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
     ignoredPaths,
     turnContext,
     observations,
-    deadline
+    deadline,
+    tree: head
   });
 
   state.reviewed.push(key);
@@ -738,6 +743,7 @@ export async function runReview(env, { base = null } = {}, overrides = {}) {
     turnContext,
     observations,
     deadline,
+    tree: head,
     projectRoot
   });
   await saveState(session.dir, state);
