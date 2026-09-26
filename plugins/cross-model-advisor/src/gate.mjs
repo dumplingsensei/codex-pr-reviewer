@@ -623,17 +623,19 @@ async function reviewMeasured({ config, session, deps, env, projectRoot, totals,
  * @returns {Promise<string>}
  */
 export async function runStop(payload, options = {}) {
-  const startedAt = (options.deps?.now ?? defaultDeps.now)();
-  const out = await stopTurn(payload, options);
-  return afterStop(payload, out, options, startedAt);
+  /** What this Stop did, for afterStop: whether it queued a background job. */
+  const stop = { queued: false };
+  const out = await stopTurn(payload, options, stop);
+  return afterStop(payload, out, options, stop);
 }
 
 /**
  * @param {any} payload
- * @param {{ env?: NodeJS.ProcessEnv, deps?: Partial<typeof defaultDeps> }} [options]
+ * @param {{ env?: NodeJS.ProcessEnv, deps?: Partial<typeof defaultDeps> }} options
+ * @param {{ queued: boolean }} stop
  * @returns {Promise<string>}
  */
-async function stopTurn(payload, { env = process.env, deps: overrides = {} } = {}) {
+async function stopTurn(payload, { env = process.env, deps: overrides = {} }, stop) {
   const deps = { ...defaultDeps, ...overrides };
   const deadline = deps.now() + STOP_REVIEW_BUDGET_MS;
   if (!payload || typeof payload !== "object" || payload.agent_id) return "";
@@ -730,6 +732,7 @@ async function stopTurn(payload, { env = process.env, deps: overrides = {} } = {
       // Appended, never replacing: another Stop can share this key.
       fresh.advise.stops = [...fresh.advise.stops, { id: randomUUID(), stopKey, at: deps.now(), job }].slice(-MAX_ADVISE_STOPS);
     });
+    stop.queued = true;
     return "";
   }
 
@@ -838,9 +841,9 @@ function joinHookOutput(first, second) {
  * @param {any} payload
  * @param {string} out
  * @param {{ env?: NodeJS.ProcessEnv, deps?: Partial<typeof defaultDeps> }} options
- * @param {number} startedAt when this Stop began
+ * @param {{ queued: boolean }} stop what this Stop did
  */
-async function afterStop(payload, out, { env = process.env, deps: overrides = {} }, startedAt) {
+async function afterStop(payload, out, { env = process.env, deps: overrides = {} }, stop) {
   if (!payload || typeof payload !== "object" || payload.agent_id) return out;
   const deps = { ...defaultDeps, ...overrides };
   const session = sessionFrom(env, payload);
@@ -853,8 +856,9 @@ async function afterStop(payload, out, { env = process.env, deps: overrides = {}
   if (!advise && !seen.advise.stops.length && !seen.advise.notices.some((notice) => notice.user)) return out;
   const stopKey = stopKeyOf(payload);
   const notices = await updateState(session.dir, (state) => {
-    const queued = state.advise.stops.some((stop) => stop.stopKey === stopKey && !stop.claimedAt && stop.at >= startedAt);
-    if (advise && !queued) {
+    // Only a Stop that queued nothing leaves a marker. Its background hook may
+    // already have taken the job, so the list cannot answer this.
+    if (advise && !stop.queued) {
       state.advise.stops = [...state.advise.stops, { id: randomUUID(), stopKey, at: deps.now(), job: null }].slice(-MAX_ADVISE_STOPS);
     }
     sweepAdviseStops(state, deps.now());
@@ -1013,6 +1017,8 @@ async function reviewClaimed({ payload, config, session, deps, env, state, claim
     }
     if (failed.length === results.length) {
       const detail = failed.map((result) => `${result.name}: ${result.error}`).join("; ");
+      // Not reviewed, so a later Stop on this diff may try again.
+      fresh.reviewed = fresh.reviewed.filter((item) => item !== job.key);
       record("failed", "every advisor failed");
       pushNotice(fresh, truncateLabeled(sanitizeText(`cross-model-advisor: the background review failed, so an earlier turn was not reviewed (${detail})`), USER_SUMMARY_CHARS));
       return null;

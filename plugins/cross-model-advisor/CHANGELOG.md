@@ -19,6 +19,11 @@ fails the build otherwise.
     now report such a turn as not reviewed and un-mark its diff; a hook that
     fails after taking a job says so at once. The hook also waits up to 120s
     for the Stop gate, not 60s.
+  - A background review in which every advisor failed left its diff marked as
+    reviewed, so a later Stop on it was skipped; it is un-marked now.
+  - A Stop whose job its background hook took early also left a "nothing to
+    review" marker, which a later Stop with the same key could take instead of
+    its own job. The Stop gate now knows whether it queued a job itself.
 
 ## 2.1.23
 

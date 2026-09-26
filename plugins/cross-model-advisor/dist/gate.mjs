@@ -96390,11 +96390,11 @@ async function reviewMeasured({ config, session, deps, env: env2, projectRoot, t
   return { outcome: "reviewed", findings, advisors, failed: results.filter((result) => !result.ok), results };
 }
 async function runStop(payload, options = {}) {
-  const startedAt = (options.deps?.now ?? defaultDeps.now)();
-  const out = await stopTurn(payload, options);
-  return afterStop(payload, out, options, startedAt);
+  const stop = { queued: false };
+  const out = await stopTurn(payload, options, stop);
+  return afterStop(payload, out, options, stop);
 }
-async function stopTurn(payload, { env: env2 = process.env, deps: overrides = {} } = {}) {
+async function stopTurn(payload, { env: env2 = process.env, deps: overrides = {} }, stop) {
   const deps = { ...defaultDeps, ...overrides };
   const deadline = deps.now() + STOP_REVIEW_BUDGET_MS;
   if (!payload || typeof payload !== "object" || payload.agent_id) return "";
@@ -96470,6 +96470,7 @@ async function stopTurn(payload, { env: env2 = process.env, deps: overrides = {}
       fresh.reviewed = [.../* @__PURE__ */ new Set([...fresh.reviewed, ...state2.reviewed])];
       fresh.advise.stops = [...fresh.advise.stops, { id: randomUUID4(), stopKey, at: deps.now(), job }].slice(-MAX_ADVISE_STOPS);
     });
+    stop.queued = true;
     return "";
   }
   if (state2.rounds.promptId !== promptId) state2.rounds = { promptId, count: 0 };
@@ -96550,7 +96551,7 @@ function joinHookOutput(first, second) {
   return `${JSON.stringify({ ...a, ...systemMessage ? { systemMessage } : {} })}
 `;
 }
-async function afterStop(payload, out, { env: env2 = process.env, deps: overrides = {} }, startedAt) {
+async function afterStop(payload, out, { env: env2 = process.env, deps: overrides = {} }, stop) {
   if (!payload || typeof payload !== "object" || payload.agent_id) return out;
   const deps = { ...defaultDeps, ...overrides };
   const session = sessionFrom(env2, payload);
@@ -96563,8 +96564,7 @@ async function afterStop(payload, out, { env: env2 = process.env, deps: override
   if (!advise && !seen.advise.stops.length && !seen.advise.notices.some((notice) => notice.user)) return out;
   const stopKey = stopKeyOf(payload);
   const notices = await updateState(session.dir, (state2) => {
-    const queued = state2.advise.stops.some((stop) => stop.stopKey === stopKey && !stop.claimedAt && stop.at >= startedAt);
-    if (advise && !queued) {
+    if (advise && !stop.queued) {
       state2.advise.stops = [...state2.advise.stops, { id: randomUUID4(), stopKey, at: deps.now(), job: null }].slice(-MAX_ADVISE_STOPS);
     }
     sweepAdviseStops(state2, deps.now());
@@ -96692,6 +96692,7 @@ async function reviewClaimed({ payload, config, session, deps, env: env2, state:
     }
     if (failed.length === results.length) {
       const detail = failed.map((result) => `${result.name}: ${result.error}`).join("; ");
+      fresh.reviewed = fresh.reviewed.filter((item) => item !== job.key);
       record("failed", "every advisor failed");
       pushNotice(fresh, truncateLabeled(sanitizeText(`cross-model-advisor: the background review failed, so an earlier turn was not reviewed (${detail})`), USER_SUMMARY_CHARS));
       return null;

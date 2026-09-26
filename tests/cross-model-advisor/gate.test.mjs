@@ -560,6 +560,8 @@ test("advise mode: a background review that fails is reported as not reviewed wi
   await w.prompt("next");
   assert.match(w.promptOut.systemMessage, /the background review failed, so an earlier turn was not reviewed \(correctness: auth:/);
   assert.equal((await w.status()).lastReview.outcome, "failed");
+  // Not reviewed, so the diff is free to be reviewed again.
+  assert.deepEqual((await loadState(w.stateDir)).reviewed, []);
 });
 
 test("advise mode: two Stops that share a key are both reviewed", async () => {
@@ -575,6 +577,24 @@ test("advise mode: two Stops that share a key are both reviewed", async () => {
   await w.stop();
   assert.deepEqual(await Promise.all([w.advise(), w.advise()]), [null, null]);
   assert.deepEqual(w.reviews.map((review) => review.turn.request).sort(), ["first", "second"]);
+  assert.deepEqual((await loadState(w.stateDir)).advise.stops, []);
+});
+
+test("advise mode: a Stop whose job is taken before it finishes leaves no stray marker", async () => {
+  const w = await world({ gate: { mode: "advise", maxRounds: 2 } });
+  await w.prompt("change");
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+  // Slow config loads: the background hook takes the job while the Stop gate
+  // is still loading config for its last step.
+  w.deps.loadConfig = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return w.config;
+  };
+  const background = w.advise({}, { waitMs: 10_000 });
+  await w.stop();
+  assert.equal(await background, null);
+  assert.equal(w.reviews.length, 1);
+  // A marker left here could be taken by a later Stop that shares this key.
   assert.deepEqual((await loadState(w.stateDir)).advise.stops, []);
 });
 
