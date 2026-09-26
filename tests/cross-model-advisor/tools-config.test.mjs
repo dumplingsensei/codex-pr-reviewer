@@ -891,6 +891,24 @@ describe("createReviewTools confinement", () => {
     assert.equal(await tools.excluded("cache/dump.txt"), true);
   });
 
+  it("excludes git-ignored and private paths whatever their case", async () => {
+    const root = await scratch("cma-case-");
+    await fs.writeFile(path.join(root, "app.js"), "ok\n");
+    await fs.mkdir(path.join(root, "notes"));
+    await fs.writeFile(path.join(root, "notes", "secret.md"), "CASE_SENTINEL\n");
+    await fs.mkdir(path.join(root, "plugin-data"));
+    await fs.writeFile(path.join(root, "plugin-data", "state.json"), "PRIVATE_SENTINEL\n");
+    const tools = await createReviewTools({ root, ignoredPaths: ["notes/"], pluginData: path.join(root, "plugin-data") });
+    for (const variant of ["notes/secret.md", "NOTES/secret.md", "Notes/Secret.md", "PLUGIN-DATA/state.json"]) {
+      assert.equal(await tools.excluded(variant), true, variant);
+      assert.match(await tools.call("read", { path: variant }), /^Error:/, variant);
+    }
+    for (const dir of ["NOTES", "Plugin-Data"]) {
+      assert.doesNotMatch(await tools.call("search", { query: "SENTINEL", path: dir }), /SENTINEL/, dir);
+      assert.match(await tools.call("list", { path: dir }), /^Error:/, dir);
+    }
+  });
+
   it("excludes common credential files by name", async () => {
     const root = await scratch("cma-credfiles-");
     const names = [".npmrc", ".netrc", ".envrc", ".pypirc", ".git-credentials", "id_ed25519", "id_rsa", "cert.p12", "store.jks"];

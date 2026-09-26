@@ -94252,7 +94252,7 @@ async function createReviewTools({
     }
     if (!isOutside(canonical, frozenRoot)) privateRels.push("");
     else if (!isOutside(frozenRoot, canonical)) {
-      privateRels.push(posixRel(path9.relative(frozenRoot, canonical)));
+      privateRels.push(posixRel(path9.relative(frozenRoot, canonical)).toLowerCase());
     }
   }
   const userIgnore = ignoreFrom(
@@ -94271,8 +94271,15 @@ async function createReviewTools({
     }
     if (extra.length) userIgnore.add(extra);
   }
-  const gitIgnored = new Set(Array.isArray(ignoredPaths) ? ignoredPaths.filter((item) => typeof item === "string") : []);
-  const ignoredByGit = (relPosix) => gitIgnored.has(relPosix) || gitIgnored.has(`${relPosix}/`);
+  const gitIgnored = new Set(
+    (Array.isArray(ignoredPaths) ? ignoredPaths.filter((item) => typeof item === "string") : []).map(
+      (item) => item.toLowerCase()
+    )
+  );
+  const ignoredByGit = (relPosix) => {
+    const lower2 = relPosix.toLowerCase();
+    return gitIgnored.has(lower2) || gitIgnored.has(`${lower2}/`);
+  };
   const gitignoreCache = /* @__PURE__ */ new Map();
   const reads = /* @__PURE__ */ new Map();
   const findingLimit = Number.isInteger(maxFindings) && maxFindings > 0 ? maxFindings : 1;
@@ -94293,7 +94300,8 @@ async function createReviewTools({
     }
   }
   function privatePathExcluded(relPosix) {
-    return privateRels.some((rel) => rel === "" || relPosix === rel || relPosix.startsWith(`${rel}/`));
+    const lower2 = relPosix.toLowerCase();
+    return privateRels.some((rel) => rel === "" || lower2 === rel || lower2.startsWith(`${rel}/`));
   }
   async function gitignoreFor(dirRel) {
     if (gitignoreCache.has(dirRel)) return gitignoreCache.get(dirRel);

@@ -401,7 +401,7 @@ export async function createReviewTools({
     }
     if (!isOutside(canonical, frozenRoot)) privateRels.push("");
     else if (!isOutside(frozenRoot, canonical)) {
-      privateRels.push(posixRel(path.relative(frozenRoot, canonical)));
+      privateRels.push(posixRel(path.relative(frozenRoot, canonical)).toLowerCase());
     }
   }
 
@@ -425,8 +425,17 @@ export async function createReviewTools({
   // Paths git itself ignores (from `git ls-files --others --ignored
   // --exclude-standard --directory`), so .git/info/exclude and the global
   // excludes file count as well as .gitignore. Directories end in `/`.
-  const gitIgnored = new Set(Array.isArray(ignoredPaths) ? ignoredPaths.filter((item) => typeof item === "string") : []);
-  const ignoredByGit = (relPosix) => gitIgnored.has(relPosix) || gitIgnored.has(`${relPosix}/`);
+  // Compared without case, like every other exclusion: on a case-insensitive
+  // filesystem `NOTES/x` opens `notes/x`.
+  const gitIgnored = new Set(
+    (Array.isArray(ignoredPaths) ? ignoredPaths.filter((item) => typeof item === "string") : []).map((item) =>
+      item.toLowerCase()
+    )
+  );
+  const ignoredByGit = (relPosix) => {
+    const lower = relPosix.toLowerCase();
+    return gitIgnored.has(lower) || gitIgnored.has(`${lower}/`);
+  };
   const gitignoreCache = new Map();
   /** @type {Map<string, { hash: string, lines: Set<number> }>} */
   const reads = new Map();
@@ -453,7 +462,8 @@ export async function createReviewTools({
   }
 
   function privatePathExcluded(relPosix) {
-    return privateRels.some((rel) => rel === "" || relPosix === rel || relPosix.startsWith(`${rel}/`));
+    const lower = relPosix.toLowerCase();
+    return privateRels.some((rel) => rel === "" || lower === rel || lower.startsWith(`${rel}/`));
   }
 
   async function gitignoreFor(dirRel) {

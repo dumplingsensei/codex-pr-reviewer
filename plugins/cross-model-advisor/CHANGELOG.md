@@ -6,6 +6,15 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.21
+
+- Security: on a case-insensitive filesystem (macOS by default), an advisor
+  could read or search a file git ignores through `.git/info/exclude` or the
+  global excludes file by asking for it in another case (`NOTES/secret.md` for
+  an ignored `notes/`). Those paths, and the plugin's private directories, were
+  compared case-sensitively; they now match without case, like every other
+  exclusion.
+
 ## 2.1.20
 
 - A message sent while Claude is still working (typed mid-turn, or a
