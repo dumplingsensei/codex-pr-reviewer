@@ -13,7 +13,7 @@ import {
 } from "./config.mjs";
 import { FILE_MODE, MAX_STDIN_BYTES } from "./session/constants.mjs";
 import { sanitizeText } from "./session/sanitize.mjs";
-var USAGE = "usage: setup-control.mjs catalog|summary|models <provider-id>|efforts <provider-id> <api|oauth> <model>|save|apply [--dry-run]";
+var USAGE = "usage: setup-control.mjs catalog|summary|providers|models <provider-id>|efforts <provider-id> <api|oauth> <model>|save|apply [--dry-run]";
 var SAVE_KEYS = Object.freeze(["revision", "config"]);
 var DEFAULT_MODEL_LIMIT = 20;
 var MAX_MODEL_LIMIT = 40;
@@ -106,7 +106,7 @@ function parseCount(raw, label) {
 }
 function parseSetupArgv(argv) {
   const command = argv[0];
-  if (command === "catalog" || command === "save" || command === "summary") {
+  if (command === "catalog" || command === "save" || command === "summary" || command === "providers") {
     if (argv.length !== 1) fail("usage", USAGE);
     return { command };
   }
@@ -469,32 +469,32 @@ var APPLY_KEYS = Object.freeze(["revision", "change"]);
 var ADVISOR_SET_KEYS = Object.freeze(["model", "reasoningEffort", "instructions", "enabled"]);
 var GATE_SET_KEYS = Object.freeze(["mode", "maxRounds", "autoOn", "skipWhenOnly"]);
 var TERMINAL_ONLY = "Custom OpenAI-compatible endpoints are set up in the terminal menu, where the URL and model metadata are entered.";
-function summarizeSetup(state, providers) {
+var SHORT_REVISION = 16;
+function summarizeSetup(state) {
   const config = state.config;
-  const slots = config ? Object.entries(config.providers).map(([slot, entry]) => ({
-    slot,
-    provider: entry.provider,
-    kind: entry.kind,
-    ...entry.apiKeyEnv ? { apiKeyEnv: entry.apiKeyEnv } : {}
-  })) : [];
+  const roleOf = (text) => ROLE_PRESETS.find((preset) => preset.instructions === text)?.role;
   return {
     ok: true,
-    path: state.path,
-    revision: state.revision,
-    configError: state.configError,
-    advisors: (config?.advisors ?? []).map((advisor) => ({
-      name: advisor.name,
-      slot: advisor.provider,
-      provider: config.providers[advisor.provider]?.provider,
-      model: advisor.model,
-      reasoningEffort: advisor.reasoningEffort,
-      enabled: advisor.enabled !== false,
-      instructions: advisor.instructions
-    })),
-    slots,
-    gate: config?.gate ?? { mode: "block", maxRounds: 2 },
-    providers: providers.filter((entry) => entry.id !== "openai-compatible"),
-    presets: ROLE_PRESETS
+    revision: state.revision ? state.revision.slice(0, SHORT_REVISION) : null,
+    ...state.configError ? { configError: state.configError } : {},
+    advisors: (config?.advisors ?? []).map((advisor) => {
+      const role = roleOf(advisor.instructions);
+      return {
+        name: advisor.name,
+        slot: advisor.provider,
+        model: advisor.model,
+        effort: advisor.reasoningEffort,
+        on: advisor.enabled !== false,
+        ...role ? { role } : { instructions: advisor.instructions.length > 60 ? `${advisor.instructions.slice(0, 57)}...` : advisor.instructions }
+      };
+    }),
+    slots: config ? Object.entries(config.providers).map(([slot, entry]) => ({
+      slot,
+      provider: entry.provider,
+      kind: entry.kind,
+      ...entry.apiKeyEnv ? { env: entry.apiKeyEnv } : {}
+    })) : [],
+    gate: config?.gate ?? { mode: "block", maxRounds: 2 }
   };
 }
 function parseApplyPayload(raw) {
@@ -517,6 +517,14 @@ function assertOnlyKeys(value, allowed, label) {
     if (!allowed.includes(key)) fail("input", `${label} has an unknown key: ${sanitizeText(key).slice(0, 64)}.`);
   }
 }
+function resolvePreset(fields) {
+  if (!("instructionsPreset" in fields)) return;
+  if ("instructions" in fields) fail("input", "Give instructions or instructionsPreset, not both.");
+  const preset = ROLE_PRESETS.find((entry) => entry.role === fields.instructionsPreset);
+  if (!preset) fail("input", `instructionsPreset must be one of ${ROLE_PRESETS.map((entry) => entry.role).join(", ")}.`);
+  fields.instructions = preset.instructions;
+  delete fields.instructionsPreset;
+}
 function withChange(config, change) {
   const next = config ? structuredClone(config) : { version: 2, providers: {}, advisors: [], exclude: [], limits: {} };
   next.version = 2;
@@ -524,7 +532,8 @@ function withChange(config, change) {
   switch (change.op) {
     case "add-advisor": {
       assertOnlyKeys(change, ["op", "advisor", "slot"], "add-advisor");
-      assertOnlyKeys(change.advisor, ["name", "provider", "model", "instructions", "reasoningEffort", "enabled"], "advisor");
+      assertOnlyKeys(change.advisor, ["name", "provider", "model", "instructions", "instructionsPreset", "reasoningEffort", "enabled"], "advisor");
+      resolvePreset(change.advisor);
       if (advisorNamed(change.advisor.name)) fail("config", `An advisor named ${sanitizeText(String(change.advisor.name))} already exists.`);
       if (change.slot !== void 0) {
         assertOnlyKeys(change.slot, ["id", "kind", "provider", "apiKeyEnv"], "slot");
@@ -539,7 +548,8 @@ function withChange(config, change) {
     }
     case "update-advisor": {
       assertOnlyKeys(change, ["op", "name", "set"], "update-advisor");
-      assertOnlyKeys(change.set, ADVISOR_SET_KEYS, "set");
+      assertOnlyKeys(change.set, [...ADVISOR_SET_KEYS, "instructionsPreset"], "set");
+      resolvePreset(change.set);
       const advisor = advisorNamed(change.name);
       if (!advisor) fail("config", `No advisor named ${sanitizeText(String(change.name))}.`);
       Object.assign(advisor, change.set);
@@ -601,7 +611,8 @@ async function applyChange(payload, options = {}) {
   const env = options.env ?? process.env;
   const state = await readConfigState({ env });
   if (state.configError) fail("config", `${state.configError} Fix it in the terminal menu first.`);
-  if (payload.revision !== state.revision) fail("revision", "The configuration changed since summary. Run summary again and retry.");
+  const matches = payload.revision === state.revision || typeof payload.revision === "string" && typeof state.revision === "string" && payload.revision.length >= SHORT_REVISION && state.revision.startsWith(payload.revision);
+  if (!matches) fail("revision", "The configuration changed since summary. Run summary again and retry.");
   const next = withChange(state.config, payload.change);
   let validated;
   try {
@@ -636,9 +647,9 @@ async function applyChange(payload, options = {}) {
   await assertAdvisorReasoning(validated, scopedReasoning);
   const changes = describeChange(state.config, validated);
   if (changes.length === 0) fail("input", "That change leaves the configuration as it is.");
-  if (options.dryRun) return { ok: true, dryRun: true, revision: state.revision, changes };
-  const saved = await saveConfig({ revision: payload.revision, config: validated }, { env, validateReasoning: scopedReasoning });
-  return { ok: true, dryRun: false, path: saved.path, revision: saved.revision, changes };
+  if (options.dryRun) return { ok: true, dryRun: true, changes };
+  const saved = await saveConfig({ revision: state.revision, config: validated }, { env, validateReasoning: scopedReasoning });
+  return { ok: true, dryRun: false, revision: saved.revision.slice(0, SHORT_REVISION), changes };
 }
 function writeJson(stdout, value) {
   stdout.write(`${JSON.stringify(value)}
@@ -663,13 +674,25 @@ async function runSetup(options = {}) {
     return 0;
   }
   if (parsed.command === "summary") {
-    writeJson(stdout, summarizeSetup(await readConfigState({ env }), await getProviderCatalog({ createBuiltinProvider: createProviderFn })));
+    writeJson(stdout, summarizeSetup(await readConfigState({ env })));
+    return 0;
+  }
+  if (parsed.command === "providers") {
+    const providers = await getProviderCatalog({ createBuiltinProvider: createProviderFn });
+    writeJson(stdout, {
+      ok: true,
+      providers: providers.filter((entry) => entry.id !== "openai-compatible").map((entry) => ({ id: entry.id, name: entry.name, auth: entry.auth, ...entry.suggestedApiKeyEnv ? { env: entry.suggestedApiKeyEnv } : {} }))
+    });
     return 0;
   }
   if (parsed.command === "efforts") {
     const { getReasoningChoices } = await import("./reasoning.mjs");
     const slot = { kind: parsed.kind, provider: parsed.providerId, ...parsed.kind === "api" ? { apiKeyEnv: "UNUSED" } : {} };
-    writeJson(stdout, { ok: true, ...await getReasoningChoices(slot, parsed.model) });
+    const { choices } = await getReasoningChoices(slot, parsed.model);
+    const aliases = Object.fromEntries(
+      choices.filter((choice) => choice.effective && choice.effective !== choice.value).map((choice) => [choice.value, choice.effective])
+    );
+    writeJson(stdout, { ok: true, choices: choices.map((choice) => choice.value), ...Object.keys(aliases).length ? { aliases } : {} });
     return 0;
   }
   if (parsed.command === "apply") {

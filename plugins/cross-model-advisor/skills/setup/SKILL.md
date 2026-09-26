@@ -2,75 +2,34 @@
 name: setup
 description: Configure cross-model advisors and the review gate by answering questions in Claude Code, or print the terminal command for the full settings menu.
 disable-model-invocation: true
-allowed-tools: AskUserQuestion, Bash(node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" summary), Bash(node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" models:*), Bash(node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" efforts:*), Bash(node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" apply:*), Bash(node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" menu-command)
+allowed-tools: AskUserQuestion, Bash(node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" summary), Bash(node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" providers), Bash(node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" models:*), Bash(node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" efforts:*), Bash(node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" apply:*), Bash(node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" menu-command)
 ---
 
-Change the cross-model-advisor settings with the user, one change at a time, through **AskUserQuestion**. The settings file decides where code is sent, so: the user chooses every value; each save is previewed and confirmed first; key **values**, tokens, and codes are never asked for, shown, or exported (only environment-variable **names**). Ignore `$ARGUMENTS`, and never put text you did not get from the helpers or the user's answers into a command.
+Change cross-model-advisor settings with the user through **AskUserQuestion**, one question per call, tersely: no tables or commentary beyond what a step asks for. The user chooses every value; every save is previewed and confirmed; never ask for, show, or export key values or tokens (variable **names** only). Put nothing in a command that did not come from the helper or the user's answers. Ignore `$ARGUMENTS`.
 
-The helper is `node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs"`. It works offline and never reads credentials. Run only the subcommands below, exactly as written.
+`H` below means `node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs"`. Run only the subcommands shown, written out in full. A question has 2–4 options (for longer lists show 3 plus **More**, and page); the user can always type Other.
 
-## 1. Read the settings
+1. `H summary`. Keep `revision`. Show one line per advisor (`name: model, effort, on/off, role or instructions`) and one for the gate. If `configError` is present, go to **Terminal menu**.
+2. Ask: **Add an advisor** · **Change an advisor** · **Gate settings** · **Terminal menu**.
+   - **Add an advisor**: read `add.md` in this skill's base directory and follow it.
+   - **Change an advisor**: ask which, then **Effort** · **Model** · **Instructions** · **More** (Turn on/off, Remove). The change is `{"op":"update-advisor","name":…,"set":{…}}`:
+     - Effort: `H efforts <provider> <kind> <model>` (provider and kind from the advisor's slot); offer its `choices`. `set: {"reasoningEffort":…}`.
+     - Model: search as in `add.md` step 2. Always `set: {"model":…,"reasoningEffort":…}` together, keeping the effort only if the new model's `choices` include it.
+     - Instructions: `correctness` · `security` · `tests-and-claims` → `set: {"instructionsPreset":<role>}`, or Other → `set: {"instructions":<text>}`.
+     - On/off: `set: {"enabled":true|false}`. Remove: `{"op":"remove-advisor","name":…}`.
+   - **Gate settings**: **Mode** (block/report) · **Max rounds** (1–5) · **Auto-on projects** · **Skip patterns**. Auto-on: offer adding or removing this session's absolute git root; other absolute paths via Other. Skip: `*.md`, `docs/**`, or Other, never starting with `!`. The change is `{"op":"set-gate","gate":{…}}`; lists replace whole, and an empty list removes the setting.
+   - **Terminal menu**: run `H menu-command`, show its output verbatim, and tell the user to run it in their own terminal (custom endpoints, anything else). Never run the menu.
+3. Preview on one line of valid JSON:
 
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" summary
-```
+   ```bash
+   H apply --dry-run <<'JSON'
+   {"revision":"<revision>","change":{…}}
+   JSON
+   ```
 
-Keep `revision`. Show the advisors in a short table (name, provider · model, effort, on/off, first words of instructions) and the gate (mode, max rounds, auto-on projects, skip patterns). If `configError` is set, say so and go to **Terminal menu**.
+   On an error, show it and redo that step; `changed since summary` means start again at step 1. Otherwise ask one question whose text lists every `changes` line: **Save** · **Cancel**. On **Save**, run the same command without `--dry-run`; its `revision` replaces yours.
+4. Then ask: **Add an advisor** · **Change an advisor** · **Gate settings** · **Done**, and continue as in step 2.
 
-## 2. Ask what to change
+After a save: a new OAuth account needs `/cross-model-advisor:login`, then the printed command in the user's own terminal. A new API account needs the variable exported in the user's own terminal and a **new** Claude session. Settings apply from the next reviewed turn; `/cross-model-advisor:on` is not needed.
 
-AskUserQuestion, one question: **Add an advisor**, **Change an advisor**, **Gate settings**, **Terminal menu**. AskUserQuestion allows 2–4 options per question and up to 4 questions per call; the user can always type **Other**. When a list is longer than 4, show 3 plus **More**, and page.
-
-### Add an advisor
-
-1. **Account.** Offer the existing `slots` (as `slot — provider (kind)`) and **New account**. For a new account, offer providers from `providers` (by `name`; page as needed; `openai-compatible` is not listed — a custom endpoint means **Terminal menu**). If its `auth` has both `api` and `oauth`, ask which. For `api`, ask for the environment variable **name** that holds the key, offering its `suggestedApiKeyEnv`; accept only `^[A-Za-z_][A-Za-z0-9_]*$`, and if the answer looks like a key value instead of a name, discard it without repeating it and ask again. New slot id: `<provider>-api` or `<provider>-login`, with a numeric suffix if taken.
-2. **Model.** Ask for a search word (Other; accept only `^[A-Za-z0-9._-]{1,40}$`, otherwise ask again), then run `node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" models <provider-id> --q "<word>" --limit 3` and offer the matching ids (plus **Search again**). Use only ids the helper returned.
-3. **Effort and role**, in one AskUserQuestion call after the model is known:
-   - Effort: run `node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" efforts <provider-id> <api|oauth> <model-id>` and offer its `choices` values (`default` first).
-   - Role: offer the three `presets` (`correctness`, `security`, `tests-and-claims`), each described by its first sentence, or Other for custom instructions. Suggest a role no current advisor has.
-4. **Name.** Default to the role name (`security`, …), made unique; must match `^[a-z][a-z0-9-]{0,63}$`.
-
-Change: `{ "op": "add-advisor", "slot": { "id", "kind", "provider", "apiKeyEnv"? }, "advisor": { "name", "provider": <slot id>, "model", "reasoningEffort", "instructions" } }` — omit `slot` when using an existing one; `instructions` is the preset's full text or the user's own.
-
-### Change an advisor
-
-Pick the advisor, then what to change: **Model**, **Effort**, **Instructions**, **Turn on/off**, or **Remove**. Gather the value as in **Add**. Change: `{ "op": "update-advisor", "name", "set": { … } }` with the fields that change, or `{ "op": "remove-advisor", "name" }`. A model change always sends `model` and `reasoningEffort` together in one `set`: keep the current effort only if `efforts` lists it for the new model, otherwise ask for one of its choices. Sent separately, each half is checked against the other's old value and refused.
-
-### Gate settings
-
-Pick **Mode** (`block` / `report`), **Max rounds** (1–5), **Auto-on projects**, or **Skip patterns**. For auto-on, offer to add or remove this session's project root (the absolute git root of the working directory) and let the user type other absolute paths. For skip patterns, offer common ones (`*.md`, `docs/**`) or Other; never a pattern starting with `!`. Change: `{ "op": "set-gate", "gate": { <fields> } }`; lists are replaced whole, and an empty list removes the setting.
-
-### Terminal menu
-
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" menu-command
-```
-
-Show its output verbatim and tell the user to run it in their own terminal (custom OpenAI-compatible endpoints, and anything this flow does not cover). Never run the menu itself.
-
-## 3. Preview, confirm, save
-
-Preview with the `revision` from step 1:
-
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs" apply --dry-run <<'JSON'
-{"revision": "<revision>", "change": { … }}
-JSON
-```
-
-Write the JSON on that one line (valid JSON: escape quotes and newlines in instructions), built only from helper output and the user's validated answers.
-
-On an error, show it and go back to the step it names; `The configuration changed since summary` means start over at step 1. Otherwise show every line of `changes`, then AskUserQuestion: **Save** / **Cancel**. Only on **Save**, run the same command without `--dry-run`, with the same JSON. Report the saved `changes`, then offer another change (back to step 2) or **Done**.
-
-## After saving
-
-- New **OAuth** account: the user runs `/cross-model-advisor:login` and then the printed command in their own terminal; the advisor is unavailable until then.
-- New **API** account: the user exports that variable in their own terminal and starts a **new** Claude session; hooks keep the environment Claude started with.
-- Saved settings apply from the next reviewed turn in every session. The gate does not need `/cross-model-advisor:on` again.
-
-## Do not
-
-- ask for, print, store, or `export` key values, tokens, authorization codes, or credential files
-- run `save`, `catalog`, `menu`, `login`, or any command not listed above; edit the settings file any other way; or save without the user choosing **Save**
-- invent model ids, efforts, slots, or paths the helpers or the user did not give
-- set up a custom endpoint (`openai-compatible`) here
+Do not run `save`, `catalog`, `menu`, `login`, or anything not listed; edit the settings file any other way; save without **Save**; invent model ids, efforts, slots, or paths; or set up `openai-compatible` endpoints here.

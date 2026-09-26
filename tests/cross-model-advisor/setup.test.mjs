@@ -644,17 +644,56 @@ describe("chat setup: summary and apply", () => {
   const summary = async (dir, env) => (await run(dir, ["summary"], "", env)).stdout.json();
   const apply = (dir, payload, dryRun = false) => run(dir, dryRun ? ["apply", "--dry-run"] : ["apply"], payload);
 
-  it("summarizes advisors, slots, gate, providers, and presets with key names only", async () => {
+  it("summarizes advisors, slots, and gate compactly, with key names only", async () => {
     const dir = await scratch("cma-chat-summary-");
     await fs.writeFile(configPath(dir), JSON.stringify(baseConfig()));
     const result = await summary(dir, { OPENAI_API_KEY: "sk-live-never-shown" });
     assert.equal(result.ok, true);
-    assert.equal(typeof result.revision, "string");
-    assert.deepEqual(result.advisors.map((advisor) => [advisor.name, advisor.slot, advisor.provider, advisor.model]), [["correctness", "openai-api", "openai", "gpt-4.1"]]);
-    assert.deepEqual(result.slots, [{ slot: "openai-api", provider: "openai", kind: "api", apiKeyEnv: "OPENAI_API_KEY" }]);
-    assert.deepEqual(result.presets.map((preset) => preset.role), ["correctness", "security", "tests-and-claims"]);
-    assert.equal(result.providers.some((entry) => entry.id === "openai-compatible"), false);
+    assert.equal(result.revision.length, 16);
+    assert.deepEqual(result.advisors, [{ name: "correctness", slot: "openai-api", model: "gpt-4.1", effort: "default", on: true, instructions: "Look for observable correctness failures." }]);
+    assert.deepEqual(result.slots, [{ slot: "openai-api", provider: "openai", kind: "api", env: "OPENAI_API_KEY" }]);
+    assert.equal("providers" in result || "presets" in result, false);
     assert.doesNotMatch(JSON.stringify(result), /sk-live-never-shown/);
+    assert.ok(JSON.stringify(result).length < 600);
+  });
+
+  it("lists providers compactly, without custom endpoints", async () => {
+    const dir = await scratch("cma-chat-providers-");
+    const { providers } = (await run(dir, ["providers"])).stdout.json();
+    assert.deepEqual(providers.find((entry) => entry.id === "google"), { id: "google", name: "Google", auth: ["api"], env: "GEMINI_API_KEY" });
+    assert.equal(providers.some((entry) => entry.id === "openai-compatible"), false);
+  });
+
+  it("lists effort values only, naming aliases once", async () => {
+    const dir = await scratch("cma-chat-efforts-");
+    const result = (await run(dir, ["efforts", "openai", "api", "gpt-5"])).stdout.json();
+    assert.deepEqual(result.choices, ["default", "minimal", "low", "medium", "high"]);
+    assert.equal(JSON.stringify(result).includes("label"), false);
+  });
+
+  it("fills a preset by name and shows its full text in the preview", async () => {
+    const dir = await scratch("cma-chat-preset-");
+    await fs.writeFile(configPath(dir), JSON.stringify(baseConfig()));
+    const { revision } = await summary(dir);
+    const preview = (await apply(dir, { revision, change: { op: "update-advisor", name: "correctness", set: { instructionsPreset: "security" } } }, true)).stdout.json();
+    assert.match(preview.changes[0], /^advisor correctness: instructions "Look for observable correctness failures\." → "Focus only on security and trust boundaries;/);
+    assert.match(preview.changes[0], /not hardening wishes or style\."$/);
+    const saved = (await apply(dir, { revision, change: { op: "update-advisor", name: "correctness", set: { instructionsPreset: "security" } } })).stdout.json();
+    assert.equal(saved.revision.length, 16);
+    assert.deepEqual((await summary(dir)).advisors[0].role, "security");
+    const both = await apply(dir, { revision: saved.revision, change: { op: "update-advisor", name: "correctness", set: { instructions: "x", instructionsPreset: "security" } } }, true);
+    assert.match(both.code.message, /not both/);
+    const unknown = await apply(dir, { revision: saved.revision, change: { op: "update-advisor", name: "correctness", set: { instructionsPreset: "vibes" } } }, true);
+    assert.match(unknown.code.message, /must be one of correctness, security, tests-and-claims/);
+  });
+
+  it("accepts the short revision but not a shorter prefix", async () => {
+    const dir = await scratch("cma-chat-revision-");
+    await fs.writeFile(configPath(dir), JSON.stringify(baseConfig()));
+    const { revision } = await summary(dir);
+    const change = { op: "update-advisor", name: "correctness", set: { enabled: false } };
+    assert.equal((await apply(dir, { revision: revision.slice(0, 8), change }, true)).code instanceof Error, true);
+    assert.equal((await apply(dir, { revision, change }, true)).stdout.json().ok, true);
   });
 
   it("previews a change without writing, then saves it under the same revision", async () => {

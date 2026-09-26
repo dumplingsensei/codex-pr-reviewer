@@ -6,6 +6,18 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.13
+
+- **Chat setup uses far fewer tokens.** A one-field change cost over 5k
+  tokens. The skill prompt is about 40% shorter and names the helper path
+  once; the add-advisor steps moved to `add.md`, read only on that path.
+  `summary` shrinks from about 840 to 140 tokens: provider listings move to a
+  new `providers` command, preset texts stay in the helper (`apply` takes
+  `instructionsPreset`, and the preview still shows the full text), and the
+  revision is a 16-character prefix. `efforts` returns values only. The
+  preview goes inside the Save question, and the next change is offered
+  directly instead of asking "anything else?" first.
+
 ## 2.1.12
 
 - 2.1.11 scoped the catalog check to the advisors a change selects, but the
