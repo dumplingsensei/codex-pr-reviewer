@@ -664,6 +664,15 @@ describe("chat setup: summary and apply", () => {
     assert.equal(providers.some((entry) => entry.id === "openai-compatible"), false);
   });
 
+  it("prints the add-advisor guide through the helper, and nothing else", async () => {
+    const dir = await scratch("cma-chat-guide-");
+    const guide = (await run(dir, ["guide", "add"])).stdout.text();
+    assert.match(guide, /^# Add an advisor/);
+    assert.match(guide, /"op":"add-advisor"/);
+    const other = await run(dir, ["guide", "../../package.json"]);
+    assert.ok(other.code instanceof Error);
+  });
+
   it("lists effort values only, naming aliases once", async () => {
     const dir = await scratch("cma-chat-efforts-");
     const result = (await run(dir, ["efforts", "openai", "api", "gpt-5"])).stdout.json();

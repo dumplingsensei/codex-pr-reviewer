@@ -8,6 +8,7 @@ import { createHash, randomBytes } from "node:crypto";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   API_PROVIDERS,
   OAUTH_PROVIDERS,
@@ -18,7 +19,7 @@ import { FILE_MODE, MAX_STDIN_BYTES } from "./session/constants.mjs";
 import { sanitizeText } from "./session/sanitize.mjs";
 
 const USAGE =
-  "usage: setup-control.mjs catalog|summary|providers|models <provider-id>|efforts <provider-id> <api|oauth> <model>|save|apply [--dry-run]";
+  "usage: setup-control.mjs catalog|summary|providers|guide add|models <provider-id>|efforts <provider-id> <api|oauth> <model>|save|apply [--dry-run]";
 const SAVE_KEYS = Object.freeze(["revision", "config"]);
 const DEFAULT_MODEL_LIMIT = 20;
 const MAX_MODEL_LIMIT = 40;
@@ -164,6 +165,10 @@ export function parseSetupArgv(argv) {
   if (command === "catalog" || command === "save" || command === "summary" || command === "providers") {
     if (argv.length !== 1) fail("usage", USAGE);
     return { command };
+  }
+  if (command === "guide") {
+    if (argv.length !== 2 || argv[1] !== "add") fail("usage", USAGE);
+    return { command, topic: "add" };
   }
   if (command === "apply") {
     if (argv.length === 1) return { command, dryRun: false };
@@ -926,6 +931,15 @@ export async function runSetup(options = {}) {
 
   if (parsed.command === "summary") {
     writeJson(stdout, summarizeSetup(await readConfigState({ env })));
+    return 0;
+  }
+
+  if (parsed.command === "guide") {
+    // The add-advisor steps live beside the skill and load only on that path;
+    // printed here because the skill pre-approves this helper, while a Read of
+    // the plugin cache would stop for a permission prompt.
+    const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), path.basename(path.dirname(fileURLToPath(import.meta.url))) === "modules" ? "../.." : "..");
+    stdout.write(await fs.readFile(path.join(pluginRoot, "skills", "setup", `${parsed.topic}.md`), "utf8"));
     return 0;
   }
 

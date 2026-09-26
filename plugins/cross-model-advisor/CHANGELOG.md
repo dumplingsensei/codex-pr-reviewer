@@ -6,6 +6,14 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.14
+
+- 2.1.13 told the setup skill to read `add.md`, which lives in the plugin
+  cache outside the project, so reading it would stop for a permission prompt,
+  and a model change pointed at it too. The steps now come from `H guide add`,
+  which the skill already pre-approves, and model search is inline. Found by
+  the cross-model advisor on 2.1.13.
+
 ## 2.1.13
 
 - **Chat setup uses far fewer tokens.** A one-field change cost over 5k

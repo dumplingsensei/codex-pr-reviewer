@@ -7,7 +7,7 @@ import { SetupError, main as storeMain } from "./setup-store.mjs";
 import { runSetupMenu } from "./setup-menu.mjs";
 import { sanitizeText } from "./session/sanitize.mjs";
 import { formatMenuCommand, resolvedPath } from "./terminal-command.mjs";
-var USAGE = "usage: setup-control.mjs catalog|summary|providers|models <provider-id>|efforts <provider-id> <api|oauth> <model>|save|apply [--dry-run]|menu|menu-command";
+var USAGE = "usage: setup-control.mjs catalog|summary|providers|guide add|models <provider-id>|efforts <provider-id> <api|oauth> <model>|save|apply [--dry-run]|menu|menu-command";
 var MAX_ERROR_CHARS = 500;
 function writeFailure(stderr, error) {
   if (error instanceof SetupError) {
@@ -54,7 +54,7 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     }
     return;
   }
-  if (["catalog", "summary", "providers", "models", "efforts", "save", "apply"].includes(command)) {
+  if (["catalog", "summary", "providers", "guide", "models", "efforts", "save", "apply"].includes(command)) {
     await storeMain(argv, env);
     return;
   }

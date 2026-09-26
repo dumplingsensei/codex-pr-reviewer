@@ -95241,13 +95241,14 @@ var init_terminal_ui = __esm({
 });
 
 // ../../plugins/cross-model-advisor/src/setup-control.mjs
-import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
 
 // ../../plugins/cross-model-advisor/src/setup-store.mjs
 import { createHash, randomBytes } from "node:crypto";
 import fsSync from "node:fs";
 import fs7 from "node:fs/promises";
 import path7 from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ../../plugins/cross-model-advisor/src/config.mjs
 import os from "node:os";
@@ -95717,7 +95718,7 @@ function sanitizeText(text, secrets = []) {
 }
 
 // ../../plugins/cross-model-advisor/src/setup-store.mjs
-var USAGE = "usage: setup-control.mjs catalog|summary|providers|models <provider-id>|efforts <provider-id> <api|oauth> <model>|save|apply [--dry-run]";
+var USAGE = "usage: setup-control.mjs catalog|summary|providers|guide add|models <provider-id>|efforts <provider-id> <api|oauth> <model>|save|apply [--dry-run]";
 var SAVE_KEYS = Object.freeze(["revision", "config"]);
 var DEFAULT_MODEL_LIMIT = 20;
 var MAX_MODEL_LIMIT = 40;
@@ -95813,6 +95814,10 @@ function parseSetupArgv(argv) {
   if (command === "catalog" || command === "save" || command === "summary" || command === "providers") {
     if (argv.length !== 1) fail3("usage", USAGE);
     return { command };
+  }
+  if (command === "guide") {
+    if (argv.length !== 2 || argv[1] !== "add") fail3("usage", USAGE);
+    return { command, topic: "add" };
   }
   if (command === "apply") {
     if (argv.length === 1) return { command, dryRun: false };
@@ -96381,6 +96386,11 @@ async function runSetup(options = {}) {
     writeJson(stdout, summarizeSetup(await readConfigState({ env: env2 })));
     return 0;
   }
+  if (parsed.command === "guide") {
+    const pluginRoot = path7.resolve(path7.dirname(fileURLToPath(import.meta.url)), path7.basename(path7.dirname(fileURLToPath(import.meta.url))) === "modules" ? "../.." : "..");
+    stdout.write(await fs7.readFile(path7.join(pluginRoot, "skills", "setup", `${parsed.topic}.md`), "utf8"));
+    return 0;
+  }
   if (parsed.command === "providers") {
     const providers = await getProviderCatalog({ createBuiltinProvider: createProviderFn });
     writeJson(stdout, {
@@ -96461,7 +96471,7 @@ async function main(argv = process.argv.slice(2), env2 = process.env) {
 // ../../plugins/cross-model-advisor/src/setup-menu.mjs
 import { spawn as spawn2 } from "node:child_process";
 import path9 from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 init_reasoning();
 
 // ../../plugins/cross-model-advisor/src/terminal-command.mjs
@@ -96533,7 +96543,7 @@ function emptyConfig() {
   };
 }
 function siblingExecutable(name, fromUrl = import.meta.url) {
-  const here = path9.dirname(fileURLToPath(fromUrl));
+  const here = path9.dirname(fileURLToPath2(fromUrl));
   if (path9.basename(here) === "modules") return path9.join(here, "..", name);
   return path9.join(here, name);
 }
@@ -97700,7 +97710,7 @@ async function runSetupMenu(options = {}) {
 }
 
 // ../../plugins/cross-model-advisor/src/setup-control.mjs
-var USAGE2 = "usage: setup-control.mjs catalog|summary|providers|models <provider-id>|efforts <provider-id> <api|oauth> <model>|save|apply [--dry-run]|menu|menu-command";
+var USAGE2 = "usage: setup-control.mjs catalog|summary|providers|guide add|models <provider-id>|efforts <provider-id> <api|oauth> <model>|save|apply [--dry-run]|menu|menu-command";
 var MAX_ERROR_CHARS2 = 500;
 function writeFailure2(stderr, error) {
   if (error instanceof SetupError) {
@@ -97717,7 +97727,7 @@ function isAbortError5(error) {
 }
 async function main2(argv = process.argv.slice(2), env2 = process.env) {
   const command = argv[0];
-  const helperPath = resolvedPath(fileURLToPath2(import.meta.url));
+  const helperPath = resolvedPath(fileURLToPath3(import.meta.url));
   if (command === "menu-command") {
     try {
       if (argv.length !== 1) throw new SetupError("usage", USAGE2);
@@ -97747,7 +97757,7 @@ async function main2(argv = process.argv.slice(2), env2 = process.env) {
     }
     return;
   }
-  if (["catalog", "summary", "providers", "models", "efforts", "save", "apply"].includes(command)) {
+  if (["catalog", "summary", "providers", "guide", "models", "efforts", "save", "apply"].includes(command)) {
     await main(argv, env2);
     return;
   }
@@ -97755,7 +97765,7 @@ async function main2(argv = process.argv.slice(2), env2 = process.env) {
 `);
   process.exitCode = 1;
 }
-var invokedDirectly = process.argv[1] && resolvedPath(process.argv[1]) === resolvedPath(fileURLToPath2(import.meta.url));
+var invokedDirectly = process.argv[1] && resolvedPath(process.argv[1]) === resolvedPath(fileURLToPath3(import.meta.url));
 if (invokedDirectly) {
   main2().catch(() => {
     process.exitCode = 1;
