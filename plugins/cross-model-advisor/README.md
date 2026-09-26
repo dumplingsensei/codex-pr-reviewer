@@ -7,9 +7,9 @@ git measured, inspect the surrounding code themselves, and either send Claude
 back to address concerns or show their findings to you.
 
 The idea of a second model from another family watching the work comes from
-Oh My Pi's advisors. Claude Code's hooks cannot stream a turn to an outside
-model or steer it mid-run, so this plugin reviews the finished turn instead.
-It does not copy OMP's prompts or vendor its agent framework.
+Oh My Pi's advisors. Claude Code's hooks see a turn between tool calls and at
+its end, not as it streams, so the advisors review what changed at those
+points. It does not copy OMP's prompts or vendor its agent framework.
 
 ## Commands
 

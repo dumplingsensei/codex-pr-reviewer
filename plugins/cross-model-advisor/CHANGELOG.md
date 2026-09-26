@@ -6,6 +6,13 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.25
+
+- README: Claude Code's hooks can reach Claude mid-turn, between tool calls
+  (measured: a PostToolUse hook's context, and an asyncRewake PostToolUse
+  hook's message, both land before the turn's final answer). The README said
+  they could not.
+
 ## 2.1.24
 
 - Advise mode no longer loses a background review without saying so. Found by
