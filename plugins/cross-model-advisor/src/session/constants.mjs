@@ -52,3 +52,7 @@ export const WAKE_MARKER = "[cross-model-advisor background review]";
 export const USER_SUMMARY_CHARS = 2_000;
 /** Longest context handed to Claude with a prompt. */
 export const NOTICE_CONTEXT_CHARS = 8_000;
+/** How long advise mode's background hook waits for the Stop gate to measure the turn. */
+export const ADVISE_WAIT_MS = 120_000;
+/** The background hook's timeout in hooks.json: Claude Code kills it then. */
+export const ADVISE_HOOK_TIMEOUT_MS = 300_000;

@@ -4,7 +4,7 @@ import { createRequire as __cmaCreateRequire } from "node:module"; const require
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { FILE_MODE, NOTICE_CONTEXT_CHARS, STATE_VERSION, USER_SUMMARY_CHARS } from "./constants.mjs";
+import { ADVISE_HOOK_TIMEOUT_MS, ADVISE_WAIT_MS, FILE_MODE, NOTICE_CONTEXT_CHARS, STATE_VERSION, USER_SUMMARY_CHARS } from "./constants.mjs";
 import { truncateLabeled } from "./sanitize.mjs";
 import { atomicWriteJson, ensurePrivateDir, statePath } from "./paths.mjs";
 var MAX_REVIEWED = 64;
@@ -145,10 +145,39 @@ function takeNotices(state, { context }) {
   return Object.keys(out).length ? `${JSON.stringify(out)}
 ` : "";
 }
+var MAX_NOTICES = 16;
+var ADVISE_GRACE_MS = 3e4;
+function pushNotice(state, user, context = null, at = Date.now()) {
+  state.advise.notices = [...state.advise.notices, { id: randomUUID(), at, user, context }].slice(-MAX_NOTICES);
+}
+function sweepAdviseStops(state, now) {
+  const kept = [];
+  for (const stop of state.advise.stops) {
+    const orphaned = !stop.claimedAt && now - stop.at > ADVISE_WAIT_MS + ADVISE_GRACE_MS;
+    const died = Boolean(stop.claimedAt) && now - /** @type {number} */
+    stop.claimedAt > ADVISE_HOOK_TIMEOUT_MS + ADVISE_GRACE_MS;
+    if (!orphaned && !died) {
+      kept.push(stop);
+      continue;
+    }
+    if (!stop.job) continue;
+    const key = stop.job.key;
+    state.reviewed = state.reviewed.filter((item) => item !== key);
+    pushNotice(
+      state,
+      `cross-model-advisor: an earlier turn was not reviewed in the background (${orphaned ? "no background review picked it up" : "the background review did not finish"})`,
+      null,
+      now
+    );
+  }
+  state.advise.stops = kept;
+}
 export {
   emptyState,
   loadState,
+  pushNotice,
   saveState,
+  sweepAdviseStops,
   takeNotices,
   updateState
 };

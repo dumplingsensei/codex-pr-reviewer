@@ -91027,6 +91027,8 @@ var PLUGIN_NAME = "cross-model-advisor";
 var WAKE_MARKER = "[cross-model-advisor background review]";
 var USER_SUMMARY_CHARS = 2e3;
 var NOTICE_CONTEXT_CHARS = 8e3;
+var ADVISE_WAIT_MS = 12e4;
+var ADVISE_HOOK_TIMEOUT_MS = 3e5;
 
 // ../../plugins/cross-model-advisor/src/session/paths.mjs
 import fs2 from "node:fs/promises";
@@ -95989,11 +95991,37 @@ function takeNotices(state2, { context }) {
   return Object.keys(out).length ? `${JSON.stringify(out)}
 ` : "";
 }
+var MAX_NOTICES = 16;
+var ADVISE_GRACE_MS = 3e4;
+function pushNotice(state2, user, context = null, at = Date.now()) {
+  state2.advise.notices = [...state2.advise.notices, { id: randomUUID3(), at, user, context }].slice(-MAX_NOTICES);
+}
+function sweepAdviseStops(state2, now) {
+  const kept = [];
+  for (const stop of state2.advise.stops) {
+    const orphaned = !stop.claimedAt && now - stop.at > ADVISE_WAIT_MS + ADVISE_GRACE_MS;
+    const died = Boolean(stop.claimedAt) && now - /** @type {number} */
+    stop.claimedAt > ADVISE_HOOK_TIMEOUT_MS + ADVISE_GRACE_MS;
+    if (!orphaned && !died) {
+      kept.push(stop);
+      continue;
+    }
+    if (!stop.job) continue;
+    const key = stop.job.key;
+    state2.reviewed = state2.reviewed.filter((item) => item !== key);
+    pushNotice(
+      state2,
+      `cross-model-advisor: an earlier turn was not reviewed in the background (${orphaned ? "no background review picked it up" : "the background review did not finish"})`,
+      null,
+      now
+    );
+  }
+  state2.advise.stops = kept;
+}
 
 // ../../plugins/cross-model-advisor/src/gate.mjs
-var ADVISE_WAIT_MS = 6e4;
 var MAX_ADVISE_STOPS = 16;
-var MAX_NOTICES = 16;
+var ADVISE_CLOCK_SLACK_MS = 1e3;
 var USAGE = "usage: gate.mjs stop | advise | on|doctor --plugin-data <path> | review --plugin-data <path> [--base <ref>]";
 var DISCLOSURE = "At the end of each turn that changes files, the request, Claude's final message, and the git diff (minus excluded paths) go to the configured external providers, which may also read allowed project files. Claude's own credentials are never used.";
 var GateError = class extends Error {
@@ -96362,8 +96390,9 @@ async function reviewMeasured({ config, session, deps, env: env2, projectRoot, t
   return { outcome: "reviewed", findings, advisors, failed: results.filter((result) => !result.ok), results };
 }
 async function runStop(payload, options = {}) {
+  const startedAt = (options.deps?.now ?? defaultDeps.now)();
   const out = await stopTurn(payload, options);
-  return afterStop(payload, out, options);
+  return afterStop(payload, out, options, startedAt);
 }
 async function stopTurn(payload, { env: env2 = process.env, deps: overrides = {} } = {}) {
   const deps = { ...defaultDeps, ...overrides };
@@ -96439,9 +96468,7 @@ async function stopTurn(payload, { env: env2 = process.env, deps: overrides = {}
       fresh.turn = state2.turn;
       fresh.rounds = state2.rounds;
       fresh.reviewed = [.../* @__PURE__ */ new Set([...fresh.reviewed, ...state2.reviewed])];
-      fresh.advise.stops = [...fresh.advise.stops.filter((stop) => stop.stopKey !== stopKey), { stopKey, at: deps.now(), job }].slice(
-        -MAX_ADVISE_STOPS
-      );
+      fresh.advise.stops = [...fresh.advise.stops, { id: randomUUID4(), stopKey, at: deps.now(), job }].slice(-MAX_ADVISE_STOPS);
     });
     return "";
   }
@@ -96514,9 +96541,6 @@ async function stopTurn(payload, { env: env2 = process.env, deps: overrides = {}
 function stopKeyOf(payload) {
   return createHash2("sha256").update(JSON.stringify([payload?.prompt_id ?? null, payload?.stop_hook_active === true, String(payload?.last_assistant_message ?? "")])).digest("hex").slice(0, 32);
 }
-function pushNotice(state2, user, context = null) {
-  state2.advise.notices = [...state2.advise.notices, { id: randomUUID4(), at: Date.now(), user, context }].slice(-MAX_NOTICES);
-}
 function joinHookOutput(first, second) {
   if (!second) return first;
   if (!first) return second;
@@ -96526,7 +96550,7 @@ function joinHookOutput(first, second) {
   return `${JSON.stringify({ ...a, ...systemMessage ? { systemMessage } : {} })}
 `;
 }
-async function afterStop(payload, out, { env: env2 = process.env, deps: overrides = {} } = {}) {
+async function afterStop(payload, out, { env: env2 = process.env, deps: overrides = {} }, startedAt) {
   if (!payload || typeof payload !== "object" || payload.agent_id) return out;
   const deps = { ...defaultDeps, ...overrides };
   const session = sessionFrom(env2, payload);
@@ -96536,12 +96560,14 @@ async function afterStop(payload, out, { env: env2 = process.env, deps: override
     (config) => config.gate.mode === "advise",
     () => false
   );
-  if (!advise && !seen.advise.notices.some((notice) => notice.user)) return out;
+  if (!advise && !seen.advise.stops.length && !seen.advise.notices.some((notice) => notice.user)) return out;
   const stopKey = stopKeyOf(payload);
   const notices = await updateState(session.dir, (state2) => {
-    if (advise && !state2.advise.stops.some((stop) => stop.stopKey === stopKey)) {
-      state2.advise.stops = [...state2.advise.stops, { stopKey, at: deps.now(), job: null }].slice(-MAX_ADVISE_STOPS);
+    const queued = state2.advise.stops.some((stop) => stop.stopKey === stopKey && !stop.claimedAt && stop.at >= startedAt);
+    if (advise && !queued) {
+      state2.advise.stops = [...state2.advise.stops, { id: randomUUID4(), stopKey, at: deps.now(), job: null }].slice(-MAX_ADVISE_STOPS);
     }
+    sweepAdviseStops(state2, deps.now());
     return takeNotices(state2, { context: false });
   });
   return joinHookOutput(out, notices);
@@ -96562,22 +96588,39 @@ async function runAdvise(payload, { env: env2 = process.env, deps: overrides = {
   }
   if (config.gate.mode !== "advise") return null;
   const stopKey = stopKeyOf(payload);
+  const ours = (stop) => stop.stopKey === stopKey && !stop.claimedAt && stop.at >= started - ADVISE_CLOCK_SLACK_MS;
   for (; ; ) {
-    if (state2.advise.stops.some((stop) => stop.stopKey === stopKey) || deps.now() - started > waitMs) break;
+    if (state2.advise.stops.some(ours) || deps.now() - started > waitMs) break;
     await new Promise((resolve2) => setTimeout(resolve2, pollMs));
     state2 = await loadState(session.dir);
   }
   const claimed = await updateState(session.dir, (fresh) => {
-    const stop = fresh.advise.stops.find((item) => item.stopKey === stopKey);
+    const stop = fresh.advise.stops.find(ours);
     if (!stop) return null;
-    if (!stop.job || stop.job.status !== "queued") {
-      if (!stop.job) fresh.advise.stops = fresh.advise.stops.filter((item) => item !== stop);
+    if (!stop.job) {
+      fresh.advise.stops = fresh.advise.stops.filter((item) => item !== stop);
       return null;
     }
+    stop.claimedAt = deps.now();
     stop.job.status = "running";
-    return { job: { ...stop.job }, totals: structuredClone(fresh.advisors), wakes: fresh.advise.wakes, last: fresh.last };
+    return { id: stop.id, job: { ...stop.job }, totals: structuredClone(fresh.advisors), wakes: fresh.advise.wakes, last: fresh.last };
   });
   if (!claimed) return null;
+  try {
+    return await reviewClaimed({ payload, config, session, deps, env: env2, state: state2, claimed, deadline });
+  } catch (error) {
+    await createErrorLog(session.dir).record(error).catch(() => {
+    });
+    await updateState(session.dir, (fresh) => {
+      fresh.advise.stops = fresh.advise.stops.filter((item) => item.id !== claimed.id);
+      fresh.reviewed = fresh.reviewed.filter((item) => item !== claimed.job.key);
+      pushNotice(fresh, "cross-model-advisor: an earlier turn was not reviewed in the background (the background review failed)");
+    }).catch(() => {
+    });
+    return null;
+  }
+}
+async function reviewClaimed({ payload, config, session, deps, env: env2, state: state2, claimed, deadline }) {
   const { job } = claimed;
   const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
   const maxWakes = config.gate.maxRounds;
@@ -96611,8 +96654,8 @@ async function runAdvise(payload, { env: env2 = process.env, deps: overrides = {
     review = { outcome: "failed", reason: "the background review failed", notice: "the background review failed" };
   }
   return updateState(session.dir, (fresh) => {
-    fresh.advise.stops = fresh.advise.stops.filter((item) => item.stopKey !== stopKey);
-    fresh.reviewed = [.../* @__PURE__ */ new Set([...fresh.reviewed, ...reviewed])];
+    fresh.advise.stops = fresh.advise.stops.filter((item) => item.id !== claimed.id);
+    fresh.reviewed = [.../* @__PURE__ */ new Set([...fresh.reviewed.filter((item) => item !== job.key), ...reviewed])];
     addUsage(fresh, spent);
     const at = deps.now();
     if (review.outcome !== "reviewed") {

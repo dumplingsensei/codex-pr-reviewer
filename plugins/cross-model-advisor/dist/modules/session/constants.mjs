@@ -28,7 +28,11 @@ var PLUGIN_NAME = "cross-model-advisor";
 var WAKE_MARKER = "[cross-model-advisor background review]";
 var USER_SUMMARY_CHARS = 2e3;
 var NOTICE_CONTEXT_CHARS = 8e3;
+var ADVISE_WAIT_MS = 12e4;
+var ADVISE_HOOK_TIMEOUT_MS = 3e5;
 export {
+  ADVISE_HOOK_TIMEOUT_MS,
+  ADVISE_WAIT_MS,
   CONTROL_COMMANDS,
   DIR_MODE,
   ERROR_LOG_INTERVAL_MS,

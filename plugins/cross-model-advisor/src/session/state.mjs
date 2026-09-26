@@ -8,7 +8,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { FILE_MODE, NOTICE_CONTEXT_CHARS, STATE_VERSION, USER_SUMMARY_CHARS } from "./constants.mjs";
+import { ADVISE_HOOK_TIMEOUT_MS, ADVISE_WAIT_MS, FILE_MODE, NOTICE_CONTEXT_CHARS, STATE_VERSION, USER_SUMMARY_CHARS } from "./constants.mjs";
 import { truncateLabeled } from "./sanitize.mjs";
 import { atomicWriteJson, ensurePrivateDir, statePath } from "./paths.mjs";
 
@@ -37,8 +37,10 @@ const LOCK_STALE_MS = 30_000;
  * }} LastReview
  *
  * @typedef {{
+ *   id: string,
  *   stopKey: string,
  *   at: number,
+ *   claimedAt?: number,
  *   job: { base: string, head: string, key: string, request: string, status: "queued" | "running", wake: boolean } | null
  * }} AdviseStop
  */
@@ -224,4 +226,50 @@ export function takeNotices(state, { context }) {
     };
   }
   return Object.keys(out).length ? `${JSON.stringify(out)}\n` : "";
+}
+
+const MAX_NOTICES = 16;
+// Clocks and hooks never line up exactly; a job is given up for lost only
+// well after the process that could still take or finish it is gone.
+const ADVISE_GRACE_MS = 30_000;
+
+/**
+ * @param {ReturnType<typeof emptyState>} state
+ * @param {string | null} user shown to the user
+ * @param {string | null} [context] given to Claude with the next prompt
+ * @param {number} [at]
+ */
+export function pushNotice(state, user, context = null, at = Date.now()) {
+  state.advise.notices = [...state.advise.notices, { id: randomUUID(), at, user, context }].slice(-MAX_NOTICES);
+}
+
+/**
+ * Tell the user about background reviews that were lost: a job no background
+ * hook took before it stopped waiting, or one taken whose hook never finished
+ * (killed at its timeout, crashed, or unable to save). Their diffs are no
+ * longer counted as reviewed, so a later Stop can queue them again.
+ *
+ * @param {ReturnType<typeof emptyState>} state
+ * @param {number} now
+ */
+export function sweepAdviseStops(state, now) {
+  const kept = [];
+  for (const stop of state.advise.stops) {
+    const orphaned = !stop.claimedAt && now - stop.at > ADVISE_WAIT_MS + ADVISE_GRACE_MS;
+    const died = Boolean(stop.claimedAt) && now - /** @type {number} */ (stop.claimedAt) > ADVISE_HOOK_TIMEOUT_MS + ADVISE_GRACE_MS;
+    if (!orphaned && !died) {
+      kept.push(stop);
+      continue;
+    }
+    if (!stop.job) continue;
+    const key = stop.job.key;
+    state.reviewed = state.reviewed.filter((item) => item !== key);
+    pushNotice(
+      state,
+      `cross-model-advisor: an earlier turn was not reviewed in the background (${orphaned ? "no background review picked it up" : "the background review did not finish"})`,
+      null,
+      now
+    );
+  }
+  state.advise.stops = kept;
 }

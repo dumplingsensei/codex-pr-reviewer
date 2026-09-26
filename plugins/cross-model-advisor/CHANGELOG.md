@@ -6,6 +6,20 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.24
+
+- Advise mode no longer loses a background review without saying so. Found by
+  the cross-model advisors on 2.1.23:
+  - Two Stops with the same prompt id and final message shared a key, so the
+    second replaced the first's queued job and the first's completion removed
+    the second's. Each queued turn now has its own id and is taken once.
+  - A job queued after its background hook stopped waiting (a slow snapshot),
+    or taken by a hook that was killed, crashed, or could not save, stayed
+    silent and its diff stayed marked as reviewed. The prompt and Stop hooks
+    now report such a turn as not reviewed and un-mark its diff; a hook that
+    fails after taking a job says so at once. The hook also waits up to 120s
+    for the Stop gate, not 60s.
+
 ## 2.1.23
 
 - New `gate.mode: "advise"`, modelled on Oh My Pi's advisor: Claude stops at

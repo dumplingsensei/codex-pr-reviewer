@@ -26,7 +26,7 @@ import {
   validateSessionId
 } from "./session/paths.mjs";
 import { sanitizeText, truncateLabeled } from "./session/sanitize.mjs";
-import { loadState, takeNotices, updateState } from "./session/state.mjs";
+import { loadState, sweepAdviseStops, takeNotices, updateState } from "./session/state.mjs";
 
 const USAGE = "usage: control.mjs hook | session-start | off|status --plugin-data <path>";
 
@@ -98,6 +98,7 @@ export async function recordPrompt(payload, { env = process.env, snapshot = snap
     state.turn = turn;
     // The user's own prompt, not a wake, lets the background review wake Claude again.
     if (!wake) state.advise.wakes = 0;
+    sweepAdviseStops(state, now());
     return takeNotices(state, { context: true });
   });
 }

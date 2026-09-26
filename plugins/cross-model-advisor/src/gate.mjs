@@ -35,6 +35,7 @@ import {
   SEVERITY_ORDER,
   STOP_REVIEW_BUDGET_MS,
   USER_SUMMARY_CHARS,
+  ADVISE_WAIT_MS,
   USER_TEXT_CAP,
   WAKE_MARKER
 } from "./session/constants.mjs";
@@ -48,13 +49,12 @@ import {
   validateSessionId
 } from "./session/paths.mjs";
 import { resolveSecrets, sanitizeText, secretNamesFromSnapshot, truncateLabeled } from "./session/sanitize.mjs";
-import { loadState, takeNotices, updateState } from "./session/state.mjs";
+import { loadState, pushNotice, sweepAdviseStops, takeNotices, updateState } from "./session/state.mjs";
 
-// The Stop gate normally measures a turn in well under a second; a large
-// repository's snapshot can take longer.
-const ADVISE_WAIT_MS = 60_000;
 const MAX_ADVISE_STOPS = 16;
-const MAX_NOTICES = 16;
+// Both Stop hooks start together, so this Stop's entry is never older than
+// the background hook by more than clock noise.
+const ADVISE_CLOCK_SLACK_MS = 1_000;
 
 const USAGE = "usage: gate.mjs stop | advise | on|doctor --plugin-data <path> | review --plugin-data <path> [--base <ref>]";
 const DISCLOSURE =
@@ -623,8 +623,9 @@ async function reviewMeasured({ config, session, deps, env, projectRoot, totals,
  * @returns {Promise<string>}
  */
 export async function runStop(payload, options = {}) {
+  const startedAt = (options.deps?.now ?? defaultDeps.now)();
   const out = await stopTurn(payload, options);
-  return afterStop(payload, out, options);
+  return afterStop(payload, out, options, startedAt);
 }
 
 /**
@@ -726,9 +727,8 @@ async function stopTurn(payload, { env = process.env, deps: overrides = {} } = {
       fresh.turn = state.turn;
       fresh.rounds = state.rounds;
       fresh.reviewed = [...new Set([...fresh.reviewed, ...state.reviewed])];
-      fresh.advise.stops = [...fresh.advise.stops.filter((stop) => stop.stopKey !== stopKey), { stopKey, at: deps.now(), job }].slice(
-        -MAX_ADVISE_STOPS
-      );
+      // Appended, never replacing: another Stop can share this key.
+      fresh.advise.stops = [...fresh.advise.stops, { id: randomUUID(), stopKey, at: deps.now(), job }].slice(-MAX_ADVISE_STOPS);
     });
     return "";
   }
@@ -814,15 +814,6 @@ export function stopKeyOf(payload) {
 }
 
 /**
- * @param {ReturnType<typeof loadState> extends Promise<infer T> ? T : never} state
- * @param {string | null} user
- * @param {string | null} [context]
- */
-function pushNotice(state, user, context = null) {
-  state.advise.notices = [...state.advise.notices, { id: randomUUID(), at: Date.now(), user, context }].slice(-MAX_NOTICES);
-}
-
-/**
  * Both outputs' user messages, one after the other; the first output's
  * decision, if any, stands.
  *
@@ -840,14 +831,16 @@ function joinHookOutput(first, second) {
 
 /**
  * After every Stop: in advise mode, record it so its background review stops
- * waiting even when there is nothing to review, and show the user what
- * earlier background reviews left (Claude gets its part with the next prompt).
+ * waiting even when there is nothing to review, report background reviews
+ * that were lost, and show the user what earlier ones left (Claude gets its
+ * part with the next prompt).
  *
  * @param {any} payload
  * @param {string} out
- * @param {{ env?: NodeJS.ProcessEnv, deps?: Partial<typeof defaultDeps> }} [options]
+ * @param {{ env?: NodeJS.ProcessEnv, deps?: Partial<typeof defaultDeps> }} options
+ * @param {number} startedAt when this Stop began
  */
-async function afterStop(payload, out, { env = process.env, deps: overrides = {} } = {}) {
+async function afterStop(payload, out, { env = process.env, deps: overrides = {} }, startedAt) {
   if (!payload || typeof payload !== "object" || payload.agent_id) return out;
   const deps = { ...defaultDeps, ...overrides };
   const session = sessionFrom(env, payload);
@@ -857,12 +850,14 @@ async function afterStop(payload, out, { env = process.env, deps: overrides = {}
     (config) => config.gate.mode === "advise",
     () => false
   );
-  if (!advise && !seen.advise.notices.some((notice) => notice.user)) return out;
+  if (!advise && !seen.advise.stops.length && !seen.advise.notices.some((notice) => notice.user)) return out;
   const stopKey = stopKeyOf(payload);
   const notices = await updateState(session.dir, (state) => {
-    if (advise && !state.advise.stops.some((stop) => stop.stopKey === stopKey)) {
-      state.advise.stops = [...state.advise.stops, { stopKey, at: deps.now(), job: null }].slice(-MAX_ADVISE_STOPS);
+    const queued = state.advise.stops.some((stop) => stop.stopKey === stopKey && !stop.claimedAt && stop.at >= startedAt);
+    if (advise && !queued) {
+      state.advise.stops = [...state.advise.stops, { id: randomUUID(), stopKey, at: deps.now(), job: null }].slice(-MAX_ADVISE_STOPS);
     }
+    sweepAdviseStops(state, deps.now());
     return takeNotices(state, { context: false });
   });
   return joinHookOutput(out, notices);
@@ -895,24 +890,50 @@ export async function runAdvise(payload, { env = process.env, deps: overrides = 
   }
   if (config.gate.mode !== "advise") return null;
 
+  // This Stop's entry: its key, not yet taken, and written since this hook
+  // started (another Stop can share the key; an older entry is not ours).
   const stopKey = stopKeyOf(payload);
+  const ours = (/** @type {{ stopKey: string, at: number, claimedAt?: number }} */ stop) =>
+    stop.stopKey === stopKey && !stop.claimedAt && stop.at >= started - ADVISE_CLOCK_SLACK_MS;
   for (;;) {
-    if (state.advise.stops.some((stop) => stop.stopKey === stopKey) || deps.now() - started > waitMs) break;
+    if (state.advise.stops.some(ours) || deps.now() - started > waitMs) break;
     await new Promise((resolve) => setTimeout(resolve, pollMs));
     state = await loadState(session.dir);
   }
   const claimed = await updateState(session.dir, (fresh) => {
-    const stop = fresh.advise.stops.find((item) => item.stopKey === stopKey);
+    const stop = fresh.advise.stops.find(ours);
     if (!stop) return null;
-    if (!stop.job || stop.job.status !== "queued") {
-      if (!stop.job) fresh.advise.stops = fresh.advise.stops.filter((item) => item !== stop);
+    if (!stop.job) {
+      fresh.advise.stops = fresh.advise.stops.filter((item) => item !== stop);
       return null;
     }
+    stop.claimedAt = deps.now();
     stop.job.status = "running";
-    return { job: { ...stop.job }, totals: structuredClone(fresh.advisors), wakes: fresh.advise.wakes, last: fresh.last };
+    return { id: stop.id, job: { ...stop.job }, totals: structuredClone(fresh.advisors), wakes: fresh.advise.wakes, last: fresh.last };
   });
   if (!claimed) return null;
+  try {
+    return await reviewClaimed({ payload, config, session, deps, env, state, claimed, deadline });
+  } catch (error) {
+    // Say so now; if even this cannot save, the next prompt's sweep reports it.
+    await createErrorLog(session.dir).record(error).catch(() => {});
+    await updateState(session.dir, (fresh) => {
+      fresh.advise.stops = fresh.advise.stops.filter((item) => item.id !== claimed.id);
+      fresh.reviewed = fresh.reviewed.filter((item) => item !== claimed.job.key);
+      pushNotice(fresh, "cross-model-advisor: an earlier turn was not reviewed in the background (the background review failed)");
+    }).catch(() => {});
+    return null;
+  }
+}
 
+/**
+ * Review a claimed background job and save the result.
+ *
+ * @param {{ payload: any, config: any, session: any, deps: typeof defaultDeps, env: NodeJS.ProcessEnv, state: any,
+ *   claimed: { id: string, job: any, totals: Record<string, AdvisorUsage>, wakes: number, last: any }, deadline: number }} input
+ * @returns {Promise<string | null>}
+ */
+async function reviewClaimed({ payload, config, session, deps, env, state, claimed, deadline }) {
   const { job } = claimed;
   const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
   const maxWakes = config.gate.maxRounds;
@@ -952,8 +973,10 @@ export async function runAdvise(payload, { env = process.env, deps: overrides = 
   }
 
   return updateState(session.dir, (fresh) => {
-    fresh.advise.stops = fresh.advise.stops.filter((item) => item.stopKey !== stopKey);
-    fresh.reviewed = [...new Set([...fresh.reviewed, ...reviewed])];
+    fresh.advise.stops = fresh.advise.stops.filter((item) => item.id !== claimed.id);
+    // The Stop gate counted the diff as reviewed when it queued it; it stays so
+    // only if this review got that far, as in block mode.
+    fresh.reviewed = [...new Set([...fresh.reviewed.filter((item) => item !== job.key), ...reviewed])];
     addUsage(fresh, spent);
     const at = deps.now();
     if (review.outcome !== "reviewed") {

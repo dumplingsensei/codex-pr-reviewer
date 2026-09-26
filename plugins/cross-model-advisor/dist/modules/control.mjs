@@ -16,7 +16,7 @@ import {
   validateSessionId
 } from "./session/paths.mjs";
 import { sanitizeText, truncateLabeled } from "./session/sanitize.mjs";
-import { loadState, takeNotices, updateState } from "./session/state.mjs";
+import { loadState, sweepAdviseStops, takeNotices, updateState } from "./session/state.mjs";
 var USAGE = "usage: control.mjs hook | session-start | off|status --plugin-data <path>";
 function sessionFrom(env, payload = {}) {
   const identity = readIdentity(env, payload);
@@ -70,6 +70,7 @@ ${truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP / 2)}`;
     if (!state.enabled) return "";
     state.turn = turn;
     if (!wake) state.advise.wakes = 0;
+    sweepAdviseStops(state, now());
     return takeNotices(state, { context: true });
   });
 }

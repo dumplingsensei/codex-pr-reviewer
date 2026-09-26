@@ -76,7 +76,9 @@ async function world({ gate, advisors, limits } = {}) {
   delete env.CLAUDE_SESSION_ID;
   const reviews = [];
   let script = async () => {};
+  let clock = () => Date.now();
   const deps = {
+    now: () => clock(),
     loadConfig: async () => config,
     validateApi: async () => ({ available: true }),
     reviewApi: async (args) => {
@@ -97,8 +99,13 @@ async function world({ gate, advisors, limits } = {}) {
     setScript(fn) {
       script = fn;
     },
+    /** Every hook's clock from now on. */
+    setClock(fn) {
+      clock = fn;
+    },
+    stateDir: path.join(data, "sessions", sessionId),
     async prompt(text, promptId = `p${++seq}`) {
-      const out = await recordPrompt({ session_id: sessionId, prompt: text, prompt_id: promptId }, { env });
+      const out = await recordPrompt({ session_id: sessionId, prompt: text, prompt_id: promptId }, { env, now: deps.now });
       w.promptOut = out ? JSON.parse(out) : null;
       w.promptId = promptId;
       return promptId;
@@ -553,6 +560,76 @@ test("advise mode: a background review that fails is reported as not reviewed wi
   await w.prompt("next");
   assert.match(w.promptOut.systemMessage, /the background review failed, so an earlier turn was not reviewed \(correctness: auth:/);
   assert.equal((await w.status()).lastReview.outcome, "failed");
+});
+
+test("advise mode: two Stops that share a key are both reviewed", async () => {
+  const w = await world({ gate: { mode: "advise", maxRounds: 2 } });
+  const file = path.join(w.root, "src", "a.js");
+  w.setScript(async () => {});
+  // No prompt ids and the same final message: both Stops have one key.
+  await w.prompt("first", null);
+  await fs.appendFile(file, "// one\n");
+  await w.stop();
+  await w.prompt("second", null);
+  await fs.appendFile(file, "// two\n");
+  await w.stop();
+  assert.deepEqual(await Promise.all([w.advise(), w.advise()]), [null, null]);
+  assert.deepEqual(w.reviews.map((review) => review.turn.request).sort(), ["first", "second"]);
+  assert.deepEqual((await loadState(w.stateDir)).advise.stops, []);
+});
+
+test("advise mode: a job no background hook took, or one whose hook never finished, is reported as not reviewed", async () => {
+  const minutes = (n) => n * 60_000;
+  const w = await world({ gate: { mode: "advise", maxRounds: 2 } });
+  await w.prompt("change");
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+  // The background hook gave up before the Stop gate finished measuring.
+  assert.equal(await w.advise({}, { waitMs: 20 }), null);
+  await w.stop();
+  assert.equal(w.reviews.length, 0);
+  await w.prompt("soon after");
+  assert.equal(w.promptOut, null);
+  w.setClock(() => Date.now() + minutes(3));
+  await w.prompt("later");
+  assert.match(w.promptOut.systemMessage, /an earlier turn was not reviewed in the background \(no background review picked it up\)/);
+  let state = await loadState(w.stateDir);
+  assert.deepEqual([state.advise.stops, state.reviewed], [[], []]);
+
+  // Taken, but its hook was killed before saving a result.
+  w.setClock(() => Date.now());
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// y\n");
+  await w.stop();
+  await updateState(w.stateDir, (fresh) => {
+    fresh.advise.stops[0].claimedAt = Date.now();
+    fresh.advise.stops[0].job.status = "running";
+  });
+  w.setClock(() => Date.now() + minutes(4));
+  await w.prompt("still waiting");
+  assert.equal(w.promptOut, null);
+  w.setClock(() => Date.now() + minutes(6));
+  await w.prompt("much later");
+  assert.match(w.promptOut.systemMessage, /not reviewed in the background \(the background review did not finish\)/);
+  state = await loadState(w.stateDir);
+  assert.deepEqual(state.advise.stops, []);
+});
+
+test("advise mode: a background review that cannot save its result says so", async () => {
+  const w = await world({ gate: { mode: "advise", maxRounds: 2 } });
+  await w.prompt("change");
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+  await w.stop();
+  // Fails once the advisors are done, where the result is saved.
+  w.setScript(async () => {
+    w.setClock(() => {
+      throw new Error("state could not be saved");
+    });
+  });
+  assert.equal(await w.advise(), null);
+  w.setClock(() => Date.now());
+  await w.prompt("next");
+  assert.match(w.promptOut.systemMessage, /not reviewed in the background \(the background review failed\)/);
+  const state = await loadState(w.stateDir);
+  assert.deepEqual([state.advise.stops, state.reviewed], [[], []]);
 });
 
 test("a partial failure with no findings is not reported as a silent pass", async () => {

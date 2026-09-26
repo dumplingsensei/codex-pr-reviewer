@@ -603,6 +603,8 @@ var STATE_VERSION = 2;
 var WAKE_MARKER = "[cross-model-advisor background review]";
 var USER_SUMMARY_CHARS = 2e3;
 var NOTICE_CONTEXT_CHARS = 8e3;
+var ADVISE_WAIT_MS = 12e4;
+var ADVISE_HOOK_TIMEOUT_MS = 3e5;
 
 // ../../plugins/cross-model-advisor/src/session/classifier.mjs
 var CONTROL_SET = new Set(CONTROL_COMMANDS);
@@ -838,6 +840,33 @@ function takeNotices(state, { context }) {
   return Object.keys(out).length ? `${JSON.stringify(out)}
 ` : "";
 }
+var MAX_NOTICES = 16;
+var ADVISE_GRACE_MS = 3e4;
+function pushNotice(state, user, context = null, at = Date.now()) {
+  state.advise.notices = [...state.advise.notices, { id: randomUUID(), at, user, context }].slice(-MAX_NOTICES);
+}
+function sweepAdviseStops(state, now) {
+  const kept = [];
+  for (const stop of state.advise.stops) {
+    const orphaned = !stop.claimedAt && now - stop.at > ADVISE_WAIT_MS + ADVISE_GRACE_MS;
+    const died = Boolean(stop.claimedAt) && now - /** @type {number} */
+    stop.claimedAt > ADVISE_HOOK_TIMEOUT_MS + ADVISE_GRACE_MS;
+    if (!orphaned && !died) {
+      kept.push(stop);
+      continue;
+    }
+    if (!stop.job) continue;
+    const key = stop.job.key;
+    state.reviewed = state.reviewed.filter((item) => item !== key);
+    pushNotice(
+      state,
+      `cross-model-advisor: an earlier turn was not reviewed in the background (${orphaned ? "no background review picked it up" : "the background review did not finish"})`,
+      null,
+      now
+    );
+  }
+  state.advise.stops = kept;
+}
 
 // ../../plugins/cross-model-advisor/src/control.mjs
 var USAGE = "usage: control.mjs hook | session-start | off|status --plugin-data <path>";
@@ -893,6 +922,7 @@ ${truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP / 2)}`;
     if (!state.enabled) return "";
     state.turn = turn;
     if (!wake) state.advise.wakes = 0;
+    sweepAdviseStops(state, now());
     return takeNotices(state, { context: true });
   });
 }

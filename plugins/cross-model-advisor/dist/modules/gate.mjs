@@ -850,6 +850,7 @@ import {
   SEVERITY_ORDER,
   STOP_REVIEW_BUDGET_MS,
   USER_SUMMARY_CHARS,
+  ADVISE_WAIT_MS,
   USER_TEXT_CAP,
   WAKE_MARKER
 } from "./session/constants.mjs";
@@ -863,10 +864,9 @@ import {
   validateSessionId
 } from "./session/paths.mjs";
 import { resolveSecrets, sanitizeText, secretNamesFromSnapshot, truncateLabeled } from "./session/sanitize.mjs";
-import { loadState, takeNotices, updateState } from "./session/state.mjs";
-var ADVISE_WAIT_MS = 6e4;
+import { loadState, pushNotice, sweepAdviseStops, takeNotices, updateState } from "./session/state.mjs";
 var MAX_ADVISE_STOPS = 16;
-var MAX_NOTICES = 16;
+var ADVISE_CLOCK_SLACK_MS = 1e3;
 var USAGE = "usage: gate.mjs stop | advise | on|doctor --plugin-data <path> | review --plugin-data <path> [--base <ref>]";
 var DISCLOSURE = "At the end of each turn that changes files, the request, Claude's final message, and the git diff (minus excluded paths) go to the configured external providers, which may also read allowed project files. Claude's own credentials are never used.";
 var GateError = class extends Error {
@@ -1235,8 +1235,9 @@ async function reviewMeasured({ config, session, deps, env, projectRoot, totals,
   return { outcome: "reviewed", findings, advisors, failed: results.filter((result) => !result.ok), results };
 }
 async function runStop(payload, options = {}) {
+  const startedAt = (options.deps?.now ?? defaultDeps.now)();
   const out = await stopTurn(payload, options);
-  return afterStop(payload, out, options);
+  return afterStop(payload, out, options, startedAt);
 }
 async function stopTurn(payload, { env = process.env, deps: overrides = {} } = {}) {
   const deps = { ...defaultDeps, ...overrides };
@@ -1312,9 +1313,7 @@ async function stopTurn(payload, { env = process.env, deps: overrides = {} } = {
       fresh.turn = state.turn;
       fresh.rounds = state.rounds;
       fresh.reviewed = [.../* @__PURE__ */ new Set([...fresh.reviewed, ...state.reviewed])];
-      fresh.advise.stops = [...fresh.advise.stops.filter((stop) => stop.stopKey !== stopKey), { stopKey, at: deps.now(), job }].slice(
-        -MAX_ADVISE_STOPS
-      );
+      fresh.advise.stops = [...fresh.advise.stops, { id: randomUUID(), stopKey, at: deps.now(), job }].slice(-MAX_ADVISE_STOPS);
     });
     return "";
   }
@@ -1387,9 +1386,6 @@ async function stopTurn(payload, { env = process.env, deps: overrides = {} } = {
 function stopKeyOf(payload) {
   return createHash("sha256").update(JSON.stringify([payload?.prompt_id ?? null, payload?.stop_hook_active === true, String(payload?.last_assistant_message ?? "")])).digest("hex").slice(0, 32);
 }
-function pushNotice(state, user, context = null) {
-  state.advise.notices = [...state.advise.notices, { id: randomUUID(), at: Date.now(), user, context }].slice(-MAX_NOTICES);
-}
 function joinHookOutput(first, second) {
   if (!second) return first;
   if (!first) return second;
@@ -1399,7 +1395,7 @@ function joinHookOutput(first, second) {
   return `${JSON.stringify({ ...a, ...systemMessage ? { systemMessage } : {} })}
 `;
 }
-async function afterStop(payload, out, { env = process.env, deps: overrides = {} } = {}) {
+async function afterStop(payload, out, { env = process.env, deps: overrides = {} }, startedAt) {
   if (!payload || typeof payload !== "object" || payload.agent_id) return out;
   const deps = { ...defaultDeps, ...overrides };
   const session = sessionFrom(env, payload);
@@ -1409,12 +1405,14 @@ async function afterStop(payload, out, { env = process.env, deps: overrides = {}
     (config) => config.gate.mode === "advise",
     () => false
   );
-  if (!advise && !seen.advise.notices.some((notice) => notice.user)) return out;
+  if (!advise && !seen.advise.stops.length && !seen.advise.notices.some((notice) => notice.user)) return out;
   const stopKey = stopKeyOf(payload);
   const notices = await updateState(session.dir, (state) => {
-    if (advise && !state.advise.stops.some((stop) => stop.stopKey === stopKey)) {
-      state.advise.stops = [...state.advise.stops, { stopKey, at: deps.now(), job: null }].slice(-MAX_ADVISE_STOPS);
+    const queued = state.advise.stops.some((stop) => stop.stopKey === stopKey && !stop.claimedAt && stop.at >= startedAt);
+    if (advise && !queued) {
+      state.advise.stops = [...state.advise.stops, { id: randomUUID(), stopKey, at: deps.now(), job: null }].slice(-MAX_ADVISE_STOPS);
     }
+    sweepAdviseStops(state, deps.now());
     return takeNotices(state, { context: false });
   });
   return joinHookOutput(out, notices);
@@ -1435,22 +1433,39 @@ async function runAdvise(payload, { env = process.env, deps: overrides = {}, pol
   }
   if (config.gate.mode !== "advise") return null;
   const stopKey = stopKeyOf(payload);
+  const ours = (stop) => stop.stopKey === stopKey && !stop.claimedAt && stop.at >= started - ADVISE_CLOCK_SLACK_MS;
   for (; ; ) {
-    if (state.advise.stops.some((stop) => stop.stopKey === stopKey) || deps.now() - started > waitMs) break;
+    if (state.advise.stops.some(ours) || deps.now() - started > waitMs) break;
     await new Promise((resolve) => setTimeout(resolve, pollMs));
     state = await loadState(session.dir);
   }
   const claimed = await updateState(session.dir, (fresh) => {
-    const stop = fresh.advise.stops.find((item) => item.stopKey === stopKey);
+    const stop = fresh.advise.stops.find(ours);
     if (!stop) return null;
-    if (!stop.job || stop.job.status !== "queued") {
-      if (!stop.job) fresh.advise.stops = fresh.advise.stops.filter((item) => item !== stop);
+    if (!stop.job) {
+      fresh.advise.stops = fresh.advise.stops.filter((item) => item !== stop);
       return null;
     }
+    stop.claimedAt = deps.now();
     stop.job.status = "running";
-    return { job: { ...stop.job }, totals: structuredClone(fresh.advisors), wakes: fresh.advise.wakes, last: fresh.last };
+    return { id: stop.id, job: { ...stop.job }, totals: structuredClone(fresh.advisors), wakes: fresh.advise.wakes, last: fresh.last };
   });
   if (!claimed) return null;
+  try {
+    return await reviewClaimed({ payload, config, session, deps, env, state, claimed, deadline });
+  } catch (error) {
+    await createErrorLog(session.dir).record(error).catch(() => {
+    });
+    await updateState(session.dir, (fresh) => {
+      fresh.advise.stops = fresh.advise.stops.filter((item) => item.id !== claimed.id);
+      fresh.reviewed = fresh.reviewed.filter((item) => item !== claimed.job.key);
+      pushNotice(fresh, "cross-model-advisor: an earlier turn was not reviewed in the background (the background review failed)");
+    }).catch(() => {
+    });
+    return null;
+  }
+}
+async function reviewClaimed({ payload, config, session, deps, env, state, claimed, deadline }) {
   const { job } = claimed;
   const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
   const maxWakes = config.gate.maxRounds;
@@ -1484,8 +1499,8 @@ async function runAdvise(payload, { env = process.env, deps: overrides = {}, pol
     review = { outcome: "failed", reason: "the background review failed", notice: "the background review failed" };
   }
   return updateState(session.dir, (fresh) => {
-    fresh.advise.stops = fresh.advise.stops.filter((item) => item.stopKey !== stopKey);
-    fresh.reviewed = [.../* @__PURE__ */ new Set([...fresh.reviewed, ...reviewed])];
+    fresh.advise.stops = fresh.advise.stops.filter((item) => item.id !== claimed.id);
+    fresh.reviewed = [.../* @__PURE__ */ new Set([...fresh.reviewed.filter((item) => item !== job.key), ...reviewed])];
     addUsage(fresh, spent);
     const at = deps.now();
     if (review.outcome !== "reviewed") {
