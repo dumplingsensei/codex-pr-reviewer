@@ -71,16 +71,16 @@ network bootstrap at install time. From a local checkout,
    read, or the request, final message, or a file's diff.
 4. **The outcome.**
    - `gate.mode: "block"` (default): any `concern` or `blocker` sends Claude
-     back with the findings, labelled as unverified claims from other models
-     that it should check, fix, or rebut. Claude keeps working, and the next
-     Stop reviews the whole turn again with the earlier findings attached. After
-     `gate.maxRounds` rounds (default 2), Claude is allowed to stop and you are
-     told so. A rebuttal without further edits is accepted.
+     back with the findings (you see them too), labelled as unverified claims
+     from other models that it should check, fix, or rebut. Claude keeps
+     working, and the next Stop reviews the whole turn again with the earlier
+     findings attached. After `gate.maxRounds` rounds (default 2), Claude may
+     stop and you are told so. A rebuttal without further edits is accepted.
    - Only `nit`s, or `gate.mode: "report"`: Claude stops, and the findings are
      shown to you.
-   - Nothing found: Claude stops silently.
-5. **Failures fail open.** A timeout, provider error, or failed login lets
-   Claude stop, names each advisor that did not finish reviewing, and records
+   - Nothing found: Claude stops, and you are told which advisors found nothing.
+5. **Failures fail open.** A timeout, provider error, failed login, or no usable
+   advisor lets Claude stop, tells you what was not reviewed and why, and records
    the error for `status`. A failed review is never reported as a pass.
 
 You wait for the review: a turn that changed files ends 10 to 120 seconds later

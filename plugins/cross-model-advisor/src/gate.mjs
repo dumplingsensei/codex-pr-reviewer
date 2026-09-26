@@ -243,6 +243,35 @@ export function formatUserSummary(findings, failed = []) {
 }
 
 /**
+ * What the user sees when the gate sends Claude back. The block reason goes to
+ * Claude, so without this the user would only learn of the findings from
+ * Claude's reply.
+ *
+ * @param {ReturnType<typeof collectFindings>} findings
+ * @param {{ name: string, error?: string }[]} failed
+ * @param {{ round: number, maxRounds: number }} rounds
+ */
+export function formatBlockedSummary(findings, failed, { round, maxRounds }) {
+  const count = `${findings.length} finding${findings.length === 1 ? "" : "s"}`;
+  const lines = [`cross-model-advisor: sent Claude back with ${count} (round ${round} of at most ${maxRounds})`];
+  if (failed.length) lines.push(`- ${notReviewedBy(failed)}`);
+  for (const item of findings) lines.push(`- [${item.severity}] ${item.advisor}: ${item.note}`);
+  return truncateLabeled(sanitizeText(lines.join("\n")), USER_SUMMARY_CHARS);
+}
+
+/**
+ * What the user sees when the gate lets Claude stop without reviewing a turn
+ * that changed files.
+ *
+ * @param {string} why
+ */
+export function formatNotReviewed(why) {
+  return `${JSON.stringify({
+    systemMessage: truncateLabeled(sanitizeText(`cross-model-advisor: this turn was not reviewed (${why})`), USER_SUMMARY_CHARS)
+  })}\n`;
+}
+
+/**
  * @param {{ name: string, error?: string }[]} failed
  */
 function notReviewedBy(failed) {
@@ -251,18 +280,12 @@ function notReviewedBy(failed) {
 }
 
 /**
- * What the user sees when some advisors failed and the rest found nothing, or
- * found enough to send Claude back. The block reason goes to Claude, not the
- * user, so without this a failed advisor would go unmentioned.
+ * What the user sees when some advisors failed and the rest found nothing.
  *
  * @param {{ name: string, error?: string }[]} failed
- * @param {{ blocked?: boolean }} [options]
  */
-export function formatPartialFailure(failed, { blocked = false } = {}) {
-  const text = blocked
-    ? `cross-model-advisor: ${notReviewedBy(failed)}. Claude was sent back with the findings reported.`
-    : `cross-model-advisor: no findings, but ${notReviewedBy(failed)}`;
-  return truncateLabeled(sanitizeText(text), USER_SUMMARY_CHARS);
+export function formatPartialFailure(failed) {
+  return truncateLabeled(sanitizeText(`cross-model-advisor: no findings, but ${notReviewedBy(failed)}`), USER_SUMMARY_CHARS);
 }
 
 /**
@@ -433,8 +456,9 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
     return "";
   }
   if (!turn.baseTree) {
-    await record("skipped", `no snapshot for this prompt: ${turn.error ?? "unknown"}`);
-    return "";
+    const why = `no snapshot for this prompt: ${turn.error ?? "unknown"}`;
+    await record("skipped", why);
+    return formatNotReviewed(why);
   }
 
   let config;
@@ -452,7 +476,7 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
     head = await deps.snapshotTree(state.projectRoot, session.dir, { env });
   } catch {
     await record("failed", "could not snapshot the working tree");
-    return "";
+    return formatNotReviewed("could not snapshot the working tree");
   }
   if (head === turn.baseTree) {
     await record("skipped", "no file changes this turn");
@@ -482,7 +506,11 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
   });
   if (runnable.length === 0) {
     await record("skipped", "no available advisors");
-    return "";
+    const enabled = diagnosed.filter((row) => row.enabled);
+    const why = enabled.length
+      ? enabled.map((row) => `${row.name}: ${row.available ? "session review limit reached" : row.error}`).join("; ")
+      : "no advisor is enabled";
+    return formatNotReviewed(why);
   }
 
   let ignoredPaths;
@@ -490,7 +518,7 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
     ignoredPaths = await deps.gitIgnoredPaths(state.projectRoot, { env });
   } catch {
     await record("failed", "could not list the paths git ignores");
-    return "";
+    return formatNotReviewed("could not list the paths git ignores");
   }
 
   let diff;
@@ -507,7 +535,7 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
     diff = await deps.turnDiff(state.projectRoot, turn.baseTree, head, { env, isExcluded: probe.excluded });
   } catch {
     await record("failed", "could not compute the diff");
-    return "";
+    return formatNotReviewed("could not compute the diff");
   }
   // Every changed path, shown or not, must match for a turn to be skipped.
   const changed = [...diff.files.map((file) => file.path), ...diff.omitted, ...diff.unshown];
@@ -572,7 +600,7 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
     return `${JSON.stringify({
       decision: "block",
       reason: formatBlockReason(findings, { round, maxRounds: gate.maxRounds }),
-      ...(failed.length ? { systemMessage: formatPartialFailure(failed, { blocked: true }) } : {})
+      systemMessage: formatBlockedSummary(findings, failed, { round, maxRounds: gate.maxRounds })
     })}\n`;
   }
   if (findings.length) {
@@ -589,7 +617,9 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
     findings,
     advisors
   });
-  return failed.length ? `${JSON.stringify({ systemMessage: formatPartialFailure(failed) })}\n` : "";
+  if (failed.length) return `${JSON.stringify({ systemMessage: formatPartialFailure(failed) })}\n`;
+  const names = results.map((result) => result.name).join(", ");
+  return `${JSON.stringify({ systemMessage: truncateLabeled(sanitizeText(`cross-model-advisor: no findings from ${names}`), USER_SUMMARY_CHARS) })}\n`;
 }
 
 /**

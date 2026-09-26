@@ -140,6 +140,8 @@ test("a concern sends Claude back with the finding, and an unchanged rebuttal is
   assert.match(out.reason, /reads past the end/);
   assert.match(out.reason, /not the user/);
   assert.match(out.reason, /round 1 of at most 2/);
+  // The user sees the findings too, not only Claude's reply to them.
+  assert.equal(out.systemMessage, "cross-model-advisor: sent Claude back with 1 finding (round 1 of at most 2)\n- [concern] correctness: items[items.length] reads past the end; use length - 1.");
   const review = w.reviews[0];
   assert.equal(review.turn.request, "make last() safe on empty arrays");
   assert.equal(review.turn.final, "Done.");
@@ -182,7 +184,7 @@ test("a later round sees the earlier findings, and the round limit lets Claude s
   await w.prompt("next task");
   await fs.appendFile(file, "// four\n");
   w.setScript(async () => {});
-  assert.equal(await w.stop(), null);
+  assert.equal((await w.stop()).decision, undefined);
   assert.equal(w.reviews.length, 3);
 });
 
@@ -228,6 +230,57 @@ test("a failed review fails open and says so", async () => {
   assert.match(status.advisors.correctness.lastError, /^auth:/);
 });
 
+test("a clean review says which advisors found nothing", async () => {
+  const w = await world();
+  await w.prompt("change");
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+  const out = await w.stop();
+  assert.equal(out.decision, undefined);
+  assert.equal(out.systemMessage, "cross-model-advisor: no findings from correctness");
+  assert.equal((await w.status()).lastReview.outcome, "passed");
+});
+
+test("a changed turn the gate cannot review tells the user instead of passing silently", async () => {
+  const cases = [
+    ["snapshotTree", "could not snapshot the working tree"],
+    ["gitIgnoredPaths", "could not list the paths git ignores"],
+    ["turnDiff", "could not compute the diff"]
+  ];
+  for (const [dep, why] of cases) {
+    const w = await world();
+    await w.prompt("change");
+    await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+    w.deps[dep] = async () => {
+      throw new Error("boom");
+    };
+    const out = await w.stop();
+    assert.equal(out.decision, undefined, dep);
+    assert.equal(out.systemMessage, `cross-model-advisor: this turn was not reviewed (${why})`, dep);
+    assert.equal(w.reviews.length, 0, dep);
+  }
+
+  const unavailable = await world();
+  await unavailable.prompt("change");
+  await fs.appendFile(path.join(unavailable.root, "src", "a.js"), "// x\n");
+  unavailable.deps.validateApi = async () => ({ available: false, error: "CMA_TEST_KEY is not set" });
+  assert.equal(
+    (await unavailable.stop()).systemMessage,
+    "cross-model-advisor: this turn was not reviewed (correctness: CMA_TEST_KEY is not set)"
+  );
+
+  const capped = await world({ limits: { maxReviewsPerAdvisorPerSession: 1 } });
+  await capped.prompt("change");
+  await fs.appendFile(path.join(capped.root, "src", "a.js"), "// x\n");
+  await capped.stop();
+  await capped.prompt("change again");
+  await fs.appendFile(path.join(capped.root, "src", "a.js"), "// y\n");
+  assert.equal(
+    (await capped.stop()).systemMessage,
+    "cross-model-advisor: this turn was not reviewed (correctness: session review limit reached)"
+  );
+  assert.equal(capped.reviews.length, 1);
+});
+
 test("a partial failure with no findings is not reported as a silent pass", async () => {
   const advisor = (name) => ({ name, provider: "local", model: "gpt-test", instructions: name, enabled: true, reasoningEffort: "default" });
   const w = await world({ advisors: [advisor("alpha"), advisor("beta")] });
@@ -268,7 +321,10 @@ test("a failed advisor is named to the user when the rest send Claude back or re
   assert.equal(out.decision, "block");
   assert.match(out.reason, /real bug/);
   assert.doesNotMatch(out.reason, /rate_limit/);
-  assert.match(out.systemMessage, /one advisor did not finish reviewing this turn \(beta: rate_limit:.*\)\. Claude was sent back with the findings reported\./);
+  const told = out.systemMessage.split("\n");
+  assert.match(told[0], /sent Claude back with 1 finding \(round 1 of at most 2\)/);
+  assert.match(told[1], /^- one advisor did not finish reviewing this turn \(beta: rate_limit:/);
+  assert.match(told[2], /\[concern\] alpha: real bug/);
 
   const reported = await world({ advisors: [advisor("alpha"), advisor("beta")], gate: { mode: "report", maxRounds: 2 } });
   await reported.prompt("change");
@@ -285,7 +341,7 @@ test("a failed advisor is named to the user when the rest send Claude back or re
   clean.setScript(concern("real bug"));
   const cleanOut = await clean.stop();
   assert.equal(cleanOut.decision, "block");
-  assert.equal(cleanOut.systemMessage, undefined);
+  assert.doesNotMatch(cleanOut.systemMessage, /did not finish/);
 });
 
 test("findings an advisor reported before being cut off still count", async () => {
@@ -535,7 +591,7 @@ test("invalid evidence is refused, so a finding cannot cite what the reviewer ne
       evidence: [{ kind: "file", path: "src/a.js", line: 1, detail: "never read" }]
     });
   });
-  assert.equal(await w.stop(), null);
+  assert.equal((await w.stop()).systemMessage, "cross-model-advisor: no findings from correctness");
   assert.notEqual(refused, "staged");
   assert.equal((await w.status()).lastReview.outcome, "passed");
 });

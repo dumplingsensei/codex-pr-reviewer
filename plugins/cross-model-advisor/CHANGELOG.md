@@ -6,6 +6,19 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.17
+
+- You now see what the advisors found when the gate sends Claude back: a
+  summary of every finding, the round, and any advisor that did not finish.
+  Before, the findings reached only Claude, so you learned of them from
+  Claude's reply, if at all.
+- A clean review says so (`no findings from <advisors>`) instead of ending
+  silently, so a reviewed turn is distinguishable from a skipped one.
+- A turn that changed files but could not be reviewed now tells you why: a
+  failed snapshot, diff, or ignored-paths listing, a snapshot missing from the
+  prompt, or no usable advisor (missing key, session review limit). These used
+  to let Claude stop without a word.
+
 ## 2.1.16
 
 - 2.1.15's shorter `login` skill dropped a rule: questions need 2 to 4

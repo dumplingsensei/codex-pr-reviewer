@@ -96029,13 +96029,25 @@ function formatUserSummary(findings, failed = []) {
   for (const item of findings) lines.push(`- [${item.severity}] ${item.advisor}: ${item.note}`);
   return truncateLabeled(sanitizeText(lines.join("\n")), USER_SUMMARY_CHARS);
 }
+function formatBlockedSummary(findings, failed, { round, maxRounds }) {
+  const count = `${findings.length} finding${findings.length === 1 ? "" : "s"}`;
+  const lines = [`cross-model-advisor: sent Claude back with ${count} (round ${round} of at most ${maxRounds})`];
+  if (failed.length) lines.push(`- ${notReviewedBy(failed)}`);
+  for (const item of findings) lines.push(`- [${item.severity}] ${item.advisor}: ${item.note}`);
+  return truncateLabeled(sanitizeText(lines.join("\n")), USER_SUMMARY_CHARS);
+}
+function formatNotReviewed(why) {
+  return `${JSON.stringify({
+    systemMessage: truncateLabeled(sanitizeText(`cross-model-advisor: this turn was not reviewed (${why})`), USER_SUMMARY_CHARS)
+  })}
+`;
+}
 function notReviewedBy(failed) {
   const detail = failed.map((result) => `${result.name}: ${result.error}`).join("; ");
   return `${failed.length === 1 ? "one advisor" : `${failed.length} advisors`} did not finish reviewing this turn (${detail})`;
 }
-function formatPartialFailure(failed, { blocked = false } = {}) {
-  const text = blocked ? `cross-model-advisor: ${notReviewedBy(failed)}. Claude was sent back with the findings reported.` : `cross-model-advisor: no findings, but ${notReviewedBy(failed)}`;
-  return truncateLabeled(sanitizeText(text), USER_SUMMARY_CHARS);
+function formatPartialFailure(failed) {
+  return truncateLabeled(sanitizeText(`cross-model-advisor: no findings, but ${notReviewedBy(failed)}`), USER_SUMMARY_CHARS);
 }
 function collectFindings(results) {
   const seen = /* @__PURE__ */ new Set();
@@ -96157,8 +96169,9 @@ async function runStop(payload, { env: env2 = process.env, deps: overrides = {} 
     return "";
   }
   if (!turn.baseTree) {
-    await record("skipped", `no snapshot for this prompt: ${turn.error ?? "unknown"}`);
-    return "";
+    const why = `no snapshot for this prompt: ${turn.error ?? "unknown"}`;
+    await record("skipped", why);
+    return formatNotReviewed(why);
   }
   let config;
   try {
@@ -96175,7 +96188,7 @@ async function runStop(payload, { env: env2 = process.env, deps: overrides = {} 
     head = await deps.snapshotTree(state2.projectRoot, session.dir, { env: env2 });
   } catch {
     await record("failed", "could not snapshot the working tree");
-    return "";
+    return formatNotReviewed("could not snapshot the working tree");
   }
   if (head === turn.baseTree) {
     await record("skipped", "no file changes this turn");
@@ -96204,14 +96217,16 @@ async function runStop(payload, { env: env2 = process.env, deps: overrides = {} 
   });
   if (runnable.length === 0) {
     await record("skipped", "no available advisors");
-    return "";
+    const enabled = diagnosed.filter((row) => row.enabled);
+    const why = enabled.length ? enabled.map((row) => `${row.name}: ${row.available ? "session review limit reached" : row.error}`).join("; ") : "no advisor is enabled";
+    return formatNotReviewed(why);
   }
   let ignoredPaths;
   try {
     ignoredPaths = await deps.gitIgnoredPaths(state2.projectRoot, { env: env2 });
   } catch {
     await record("failed", "could not list the paths git ignores");
-    return "";
+    return formatNotReviewed("could not list the paths git ignores");
   }
   let diff;
   try {
@@ -96227,7 +96242,7 @@ async function runStop(payload, { env: env2 = process.env, deps: overrides = {} 
     diff = await deps.turnDiff(state2.projectRoot, turn.baseTree, head, { env: env2, isExcluded: probe.excluded });
   } catch {
     await record("failed", "could not compute the diff");
-    return "";
+    return formatNotReviewed("could not compute the diff");
   }
   const changed = [...diff.files.map((file) => file.path), ...diff.omitted, ...diff.unshown];
   if (gate.skipWhenOnly?.length && changed.length) {
@@ -96285,7 +96300,7 @@ async function runStop(payload, { env: env2 = process.env, deps: overrides = {} 
     return `${JSON.stringify({
       decision: "block",
       reason: formatBlockReason(findings, { round, maxRounds: gate.maxRounds }),
-      ...failed.length ? { systemMessage: formatPartialFailure(failed, { blocked: true }) } : {}
+      systemMessage: formatBlockedSummary(findings, failed, { round, maxRounds: gate.maxRounds })
     })}
 `;
   }
@@ -96305,8 +96320,11 @@ async function runStop(payload, { env: env2 = process.env, deps: overrides = {} 
     findings,
     advisors
   });
-  return failed.length ? `${JSON.stringify({ systemMessage: formatPartialFailure(failed) })}
-` : "";
+  if (failed.length) return `${JSON.stringify({ systemMessage: formatPartialFailure(failed) })}
+`;
+  const names2 = results.map((result) => result.name).join(", ");
+  return `${JSON.stringify({ systemMessage: truncateLabeled(sanitizeText(`cross-model-advisor: no findings from ${names2}`), USER_SUMMARY_CHARS) })}
+`;
 }
 async function runReview(env2, { base = null } = {}, overrides = {}) {
   const deps = { ...defaultDeps, ...overrides };
@@ -96539,6 +96557,8 @@ export {
   collectFindings,
   diagnoseAdvisors,
   formatBlockReason,
+  formatBlockedSummary,
+  formatNotReviewed,
   formatPartialFailure,
   formatUserSummary,
   main,
