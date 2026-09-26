@@ -7,7 +7,7 @@ allowed-tools: AskUserQuestion, Bash(node "${CLAUDE_PLUGIN_ROOT}/dist/setup-cont
 
 Change cross-model-advisor settings with the user through **AskUserQuestion**, one question per call, tersely: no tables or commentary beyond what a step asks for. The user chooses every value; every save is previewed and confirmed; never ask for, show, or export key values or tokens (variable **names** only). Put nothing in a command that did not come from the helper or the user's answers. Ignore `$ARGUMENTS`.
 
-`H` below means `node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs"`. Run only the subcommands shown, written out in full. A question has 2–4 options (for longer lists show 3 plus **More**, and page); the user can always type Other.
+`H` below means `node "${CLAUDE_PLUGIN_ROOT}/dist/setup-control.mjs"`. Run only the subcommands shown, written out in full. A question needs 2–4 options: for longer lists show 3 plus **More** per page, adding **Cancel** when a last page holds a single item; the user can always type Other.
 
 1. `H summary`. Keep `revision`. Show one line per advisor (`name: model, effort, on/off, role or instructions`) and one for the gate. If `configError` is present, go to **Terminal menu**.
 2. Ask: **Add an advisor** · **Change an advisor** · **Gate settings** · **Terminal menu**.

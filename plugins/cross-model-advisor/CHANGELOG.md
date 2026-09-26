@@ -6,6 +6,14 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.16
+
+- 2.1.15's shorter `login` skill dropped a rule: questions need 2 to 4
+  options, so a last page with a single slot needs **Cancel** added. The
+  `setup` skill had the same gap, and there it was reachable: ten providers
+  page 3, 3, 3, then 1. Both now state the rule. Found by the cross-model
+  advisor on 2.1.15.
+
 ## 2.1.15
 
 - The `login` skill prompt is about half as long (~950 to ~450 tokens), with
