@@ -6,6 +6,12 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.15
+
+- The `login` skill prompt is about half as long (~950 to ~450 tokens), with
+  every rule kept once: a validated slot, OAuth slots only, the formatter's
+  command shown verbatim, and nothing run under Claude.
+
 ## 2.1.14
 
 - 2.1.13 told the setup skill to read `add.md`, which lives in the plugin
