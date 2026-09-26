@@ -296,6 +296,29 @@ test("a prompt the prompt hook failed to snapshot is reported as not reviewed, a
   }
 });
 
+test("a missed snapshot is reported without prompt ids, and on the first prompt after /on", async () => {
+  const notice = "cross-model-advisor: this turn was not reviewed (the prompt hook did not snapshot this prompt)";
+
+  // /on's own turn stays quiet; the next prompt's hook fails.
+  const first = await world();
+  assert.equal(await first.stop(), null);
+  await fs.appendFile(path.join(first.root, "src", "a.js"), "// x\n");
+  assert.equal((await first.stop()).systemMessage, notice);
+  // A continuation cannot fall back to an older baseline either.
+  assert.equal((await first.stop({ stop_hook_active: true })).systemMessage, notice);
+  assert.equal(first.reviews.length, 0);
+
+  for (const before of ["earlier work", "/cross-model-advisor:status"]) {
+    const w = await world();
+    await w.prompt(before, null);
+    await w.stop();
+    const reviews = w.reviews.length;
+    await fs.appendFile(path.join(w.root, "src", "a.js"), "// y\n");
+    assert.equal((await w.stop()).systemMessage, notice, before);
+    assert.equal(w.reviews.length, reviews, before);
+  }
+});
+
 test("a partial failure with no findings is not reported as a silent pass", async () => {
   const advisor = (name) => ({ name, provider: "local", model: "gpt-test", instructions: name, enabled: true, reasoningEffort: "default" });
   const w = await world({ advisors: [advisor("alpha"), advisor("beta")] });

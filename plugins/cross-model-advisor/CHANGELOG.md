@@ -6,6 +6,14 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.19
+
+- 2.1.18's missed-snapshot notice relied on prompt ids and a recorded earlier
+  prompt. A Stop now marks its prompt's snapshot used, so any later Stop that is
+  not a continuation, with or without ids, and the first prompt after `/on`,
+  reports a missed snapshot instead of passing silently or reviewing against
+  an older baseline. Found by the cross-model advisors on 2.1.18.
+
 ## 2.1.18
 
 - A prompt the prompt hook failed to snapshot now ends with `this turn was not

@@ -451,16 +451,19 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
   };
 
   const turn = state.turn;
-  // No turn: the gate came on after this prompt was submitted.
-  if (!turn) {
-    await record("skipped", "no snapshot for this prompt");
-    return "";
-  }
-  if (promptId && turn.promptId && turn.promptId !== promptId) {
+  // Every prompt leaves a turn, and a Stop marks it used, so a Stop that is not
+  // a continuation and finds no fresh turn belongs to a prompt the prompt hook
+  // missed. Prompt ids catch the same when both hooks have them.
+  const stale = Boolean(turn?.stopped) && payload.stop_hook_active !== true;
+  const mismatched = Boolean(promptId && turn?.promptId && turn.promptId !== promptId);
+  if (!turn || stale || mismatched) {
+    // Dropped, so a continuation of this prompt cannot reuse an older baseline.
+    state.turn = null;
     const why = "the prompt hook did not snapshot this prompt";
     await record("skipped", why);
     return formatNotReviewed(why);
   }
+  turn.stopped = true;
   if (turn.control) {
     await record("skipped", "control prompt");
     return "";
@@ -776,7 +779,8 @@ export async function runOn(env, overrides = {}) {
   state.enabled = enabled;
   state.optedOut = false;
   state.projectRoot = projectRoot;
-  state.turn = null;
+  // The prompt that ran /on was submitted while the gate was off.
+  state.turn = { promptId: null, control: true };
   state.rounds = { promptId: null, count: 0 };
   await saveState(session.dir, state);
   await pruneSessions(session.pluginData, session.sessionId, deps.now());

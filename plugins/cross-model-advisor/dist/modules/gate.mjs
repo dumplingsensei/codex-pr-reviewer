@@ -1129,15 +1129,15 @@ async function runStop(payload, { env = process.env, deps: overrides = {} } = {}
     await saveState(session.dir, state);
   };
   const turn = state.turn;
-  if (!turn) {
-    await record("skipped", "no snapshot for this prompt");
-    return "";
-  }
-  if (promptId && turn.promptId && turn.promptId !== promptId) {
+  const stale = Boolean(turn?.stopped) && payload.stop_hook_active !== true;
+  const mismatched = Boolean(promptId && turn?.promptId && turn.promptId !== promptId);
+  if (!turn || stale || mismatched) {
+    state.turn = null;
     const why = "the prompt hook did not snapshot this prompt";
     await record("skipped", why);
     return formatNotReviewed(why);
   }
+  turn.stopped = true;
   if (turn.control) {
     await record("skipped", "control prompt");
     return "";
@@ -1422,7 +1422,7 @@ async function runOn(env, overrides = {}) {
   state.enabled = enabled;
   state.optedOut = false;
   state.projectRoot = projectRoot;
-  state.turn = null;
+  state.turn = { promptId: null, control: true };
   state.rounds = { promptId: null, count: 0 };
   await saveState(session.dir, state);
   await pruneSessions(session.pluginData, session.sessionId, deps.now());
