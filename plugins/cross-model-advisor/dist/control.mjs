@@ -3,7 +3,7 @@ import { createRequire as __cmaCreateRequire } from "node:module"; const require
 
 // ../../plugins/cross-model-advisor/src/control.mjs
 import fs5 from "node:fs";
-import path4 from "node:path";
+import path5 from "node:path";
 import { fileURLToPath } from "node:url";
 
 // ../../plugins/cross-model-advisor/src/config.mjs
@@ -58,7 +58,7 @@ var DEFAULT_LIMITS = Object.freeze({
   maxOutputTokens: 1500,
   maxReviewsPerAdvisorPerSession: 40
 });
-var GATE_MODES = Object.freeze(["block", "report"]);
+var GATE_MODES = Object.freeze(["block", "report", "advise"]);
 var DEFAULT_GATE = Object.freeze({ mode: "block", maxRounds: 2 });
 var GATE_KEYS = Object.freeze(["mode", "maxRounds", "autoOn", "skipWhenOnly"]);
 var MAX_GATE_LIST = 64;
@@ -600,6 +600,9 @@ var ERROR_LOG_MAX_BYTES = 64 * 1024;
 var DIR_MODE = 448;
 var FILE_MODE = 384;
 var STATE_VERSION = 2;
+var WAKE_MARKER = "[cross-model-advisor background review]";
+var USER_SUMMARY_CHARS = 2e3;
+var NOTICE_CONTEXT_CHARS = 8e3;
 
 // ../../plugins/cross-model-advisor/src/session/classifier.mjs
 var CONTROL_SET = new Set(CONTROL_COMMANDS);
@@ -694,8 +697,12 @@ function truncateLabeled(text, cap) {
 }
 
 // ../../plugins/cross-model-advisor/src/session/state.mjs
+import { randomUUID } from "node:crypto";
 import fs4 from "node:fs/promises";
+import path4 from "node:path";
 var MAX_REVIEWED = 64;
+var LOCK_WAIT_MS = 1e4;
+var LOCK_STALE_MS = 3e4;
 function emptyState(overrides = {}) {
   return {
     version: STATE_VERSION,
@@ -712,6 +719,15 @@ function emptyState(overrides = {}) {
     lastSkip: null,
     /** @type {Record<string, { reviews: number, usage: object | null, lastError: string | null }>} */
     advisors: {},
+    /**
+     * Advise mode. `stops`: turns the Stop gate measured for the background
+     * review, keyed by Stop. `notices`: background results not yet shown to
+     * the user (`user`) or given to Claude (`context`). `wakes`: times the
+     * background review has woken Claude since the user's last prompt.
+     *
+     * @type {{ stops: AdviseStop[], notices: { id: string, at: number, user: string | null, context: string | null }[], wakes: number }}
+     */
+    advise: { stops: [], notices: [], wakes: 0 },
     ...overrides
   };
 }
@@ -734,6 +750,94 @@ async function saveState(dir, state) {
   const reviewed = Array.isArray(state.reviewed) ? state.reviewed.slice(-MAX_REVIEWED) : [];
   await atomicWriteJson(statePath(dir), { ...state, reviewed });
 }
+var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || /** @type {number} */
+  pid <= 0) return false;
+  try {
+    process.kill(
+      /** @type {number} */
+      pid,
+      0
+    );
+    return true;
+  } catch (error) {
+    return (
+      /** @type {NodeJS.ErrnoException} */
+      error?.code === "EPERM"
+    );
+  }
+}
+async function readLock(file) {
+  try {
+    const [raw, st] = await Promise.all([fs4.readFile(file, "utf8"), fs4.stat(file)]);
+    let owner = null;
+    try {
+      owner = JSON.parse(raw);
+    } catch {
+    }
+    return { owner, age: Date.now() - st.mtimeMs };
+  } catch {
+    return null;
+  }
+}
+async function acquireStateLock(dir) {
+  const file = path4.join(dir, "state.lock");
+  const token = randomUUID();
+  const started = Date.now();
+  for (; ; ) {
+    try {
+      await fs4.writeFile(file, JSON.stringify({ pid: process.pid, token }), { flag: "wx", mode: FILE_MODE });
+      return { file, token };
+    } catch (error) {
+      if (
+        /** @type {NodeJS.ErrnoException} */
+        error?.code !== "EEXIST"
+      ) throw error;
+    }
+    const held = await readLock(file);
+    if (!held) continue;
+    if (held.owner && !processAlive(held.owner.pid) || held.age > LOCK_STALE_MS) {
+      const again = await readLock(file);
+      if (again && again.owner?.token === held.owner?.token) await fs4.rm(file, { force: true });
+      continue;
+    }
+    if (Date.now() - started > LOCK_WAIT_MS) throw new Error("session state is locked");
+    await sleep(10 + Math.floor(Math.random() * 20));
+  }
+}
+async function releaseStateLock(lock) {
+  const held = await readLock(lock.file);
+  if (held?.owner?.token === lock.token) await fs4.rm(lock.file, { force: true });
+}
+async function updateState(dir, mutate) {
+  await ensurePrivateDir(dir);
+  const lock = await acquireStateLock(dir);
+  try {
+    const state = await loadState(dir);
+    const result = await mutate(state);
+    await saveState(dir, state);
+    return result;
+  } finally {
+    await releaseStateLock(lock);
+  }
+}
+function takeNotices(state, { context }) {
+  const notices = Array.isArray(state.advise?.notices) ? state.advise.notices : [];
+  const user = notices.map((notice) => notice.user).filter(Boolean);
+  const forClaude = context ? notices.map((notice) => notice.context).filter(Boolean) : [];
+  state.advise.notices = notices.map((notice) => ({ ...notice, user: null, context: context ? null : notice.context })).filter((notice) => notice.user || notice.context);
+  const out = {};
+  if (user.length) out.systemMessage = truncateLabeled(user.join("\n"), USER_SUMMARY_CHARS);
+  if (forClaude.length) {
+    out.hookSpecificOutput = {
+      hookEventName: "UserPromptSubmit",
+      additionalContext: truncateLabeled(forClaude.join("\n\n"), NOTICE_CONTEXT_CHARS)
+    };
+  }
+  return Object.keys(out).length ? `${JSON.stringify(out)}
+` : "";
+}
 
 // ../../plugins/cross-model-advisor/src/control.mjs
 var USAGE = "usage: control.mjs hook | session-start | off|status --plugin-data <path>";
@@ -747,53 +851,58 @@ function sessionFrom(env, payload = {}) {
   return { ...identity, sessionId, dir: sessionDir(identity.pluginData, sessionId) };
 }
 async function recordPrompt(payload, { env = process.env, snapshot = snapshotTree, now = Date.now } = {}) {
-  if (!payload || typeof payload !== "object" || payload.agent_id) return;
+  if (!payload || typeof payload !== "object" || payload.agent_id) return "";
   const session = sessionFrom(env, payload);
-  const state = await loadState(session.dir);
-  if (!state.enabled || !state.projectRoot) return;
+  const seen = await loadState(session.dir);
+  if (!seen.enabled || !seen.projectRoot) return "";
   const prompt = typeof payload.prompt === "string" ? payload.prompt : "";
   const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
-  const current = state.turn;
+  const wake = prompt.includes(WAKE_MARKER);
+  const current = seen.turn;
+  let turn;
   if (current && !current.control && !current.stopped) {
     const addition = `
 
 [Also sent during this turn]
 ${truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP / 2)}`;
-    current.request = truncateLabeled(current.request ?? "", USER_TEXT_CAP - addition.length) + addition;
-    current.promptId = promptId ?? current.promptId;
-    await saveState(session.dir, state);
-    return;
+    turn = {
+      ...current,
+      request: truncateLabeled(current.request ?? "", USER_TEXT_CAP - addition.length) + addition,
+      promptId: promptId ?? current.promptId
+    };
+  } else if (classifyPrompt(prompt).kind === "control") {
+    turn = { promptId, control: true };
+  } else {
+    turn = {
+      promptId,
+      baseTree: (
+        /** @type {string | null} */
+        null
+      ),
+      request: truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP),
+      at: now(),
+      ...wake ? { wake: true } : {}
+    };
+    try {
+      turn.baseTree = await snapshot(seen.projectRoot, session.dir, { env });
+    } catch (error) {
+      turn.error = error instanceof Error ? error.message : "snapshot failed";
+    }
   }
-  if (classifyPrompt(prompt).kind === "control") {
-    state.turn = { promptId, control: true };
-    await saveState(session.dir, state);
-    return;
-  }
-  const turn = {
-    promptId,
-    baseTree: (
-      /** @type {string | null} */
-      null
-    ),
-    request: truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP),
-    at: now()
-  };
-  try {
-    turn.baseTree = await snapshot(state.projectRoot, session.dir, { env });
-  } catch (error) {
-    turn.error = error instanceof Error ? error.message : "snapshot failed";
-  }
-  state.turn = turn;
-  await saveState(session.dir, state);
+  return updateState(session.dir, (state) => {
+    if (!state.enabled) return "";
+    state.turn = turn;
+    if (!wake) state.advise.wakes = 0;
+    return takeNotices(state, { context: true });
+  });
 }
 async function runOff(env) {
   const session = sessionFrom(env);
-  await ensurePrivateDir(session.dir);
-  const state = await loadState(session.dir);
-  state.enabled = false;
-  state.optedOut = true;
-  state.turn = null;
-  await saveState(session.dir, state);
+  await updateState(session.dir, (state) => {
+    state.enabled = false;
+    state.optedOut = true;
+    state.turn = null;
+  });
   return { ok: true, enabled: false };
 }
 async function runSessionStart(payload, { env = process.env } = {}) {
@@ -814,12 +923,15 @@ async function runSessionStart(payload, { env = process.env } = {}) {
     if (resolved === projectRoot) match = true;
   }
   if (!match) return "";
-  await ensurePrivateDir(session.dir);
-  state.enabled = true;
-  state.projectRoot = projectRoot;
-  state.turn = null;
-  state.rounds = { promptId: null, count: 0 };
-  await saveState(session.dir, state);
+  const turnedOn = await updateState(session.dir, (fresh) => {
+    if (fresh.enabled || fresh.optedOut) return false;
+    fresh.enabled = true;
+    fresh.projectRoot = projectRoot;
+    fresh.turn = null;
+    fresh.rounds = { promptId: null, count: 0 };
+    return true;
+  });
+  if (!turnedOn) return "";
   const notice = `cross-model-advisor: review gate on for ${projectRoot} (gate.autoOn). Changed turns go to your configured advisors; /cross-model-advisor:off stops it for this session.`;
   return `${JSON.stringify({ systemMessage: notice })}
 `;
@@ -852,7 +964,8 @@ async function main(argv = process.argv.slice(2), env = process.env) {
   if (op === "hook" && argv.length === 1) {
     try {
       const raw = await readStdin(process.stdin);
-      if (raw.trim()) await recordPrompt(JSON.parse(raw), { env });
+      const out = raw.trim() ? await recordPrompt(JSON.parse(raw), { env }) : "";
+      if (out) process.stdout.write(out);
     } catch {
     }
     process.exitCode = 0;
@@ -896,10 +1009,10 @@ var realPath = (value) => {
   try {
     return fs5.realpathSync(value);
   } catch {
-    return path4.resolve(value);
+    return path5.resolve(value);
   }
 };
-var invokedDirectly = process.argv[1] && path4.basename(fileURLToPath(import.meta.url)) === "control.mjs" && realPath(process.argv[1]) === realPath(fileURLToPath(import.meta.url));
+var invokedDirectly = process.argv[1] && path5.basename(fileURLToPath(import.meta.url)) === "control.mjs" && realPath(process.argv[1]) === realPath(fileURLToPath(import.meta.url));
 if (invokedDirectly) {
   main().catch(() => {
     process.exitCode = process.argv[2] === "hook" ? 0 : 1;

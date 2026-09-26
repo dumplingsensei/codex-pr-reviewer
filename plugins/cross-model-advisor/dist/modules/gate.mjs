@@ -832,6 +832,7 @@ var require_ignore = __commonJS({
 
 // ../../plugins/cross-model-advisor/src/gate.mjs
 var import_ignore = __toESM(require_ignore(), 1);
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
@@ -848,7 +849,9 @@ import {
   SESSION_RETENTION_MS,
   SEVERITY_ORDER,
   STOP_REVIEW_BUDGET_MS,
-  USER_TEXT_CAP
+  USER_SUMMARY_CHARS,
+  USER_TEXT_CAP,
+  WAKE_MARKER
 } from "./session/constants.mjs";
 import { createErrorLog } from "./session/errors.mjs";
 import {
@@ -860,9 +863,11 @@ import {
   validateSessionId
 } from "./session/paths.mjs";
 import { resolveSecrets, sanitizeText, secretNamesFromSnapshot, truncateLabeled } from "./session/sanitize.mjs";
-import { loadState, saveState } from "./session/state.mjs";
-var USAGE = "usage: gate.mjs stop | on|doctor --plugin-data <path> | review --plugin-data <path> [--base <ref>]";
-var USER_SUMMARY_CHARS = 2e3;
+import { loadState, takeNotices, updateState } from "./session/state.mjs";
+var ADVISE_WAIT_MS = 6e4;
+var MAX_ADVISE_STOPS = 16;
+var MAX_NOTICES = 16;
+var USAGE = "usage: gate.mjs stop | advise | on|doctor --plugin-data <path> | review --plugin-data <path> [--base <ref>]";
 var DISCLOSURE = "At the end of each turn that changes files, the request, Claude's final message, and the git diff (minus excluded paths) go to the configured external providers, which may also read allowed project files. Claude's own credentials are never used.";
 var GateError = class extends Error {
   /**
@@ -894,6 +899,14 @@ function mergeUsage(prev, next) {
     totalTokens: (base.totalTokens ?? 0) + (next.totalTokens ?? 0),
     costUsd: cost
   };
+}
+function addUsage(state, spent) {
+  for (const [name, entry] of Object.entries(spent)) {
+    const total = state.advisors[name] ??= { reviews: 0, usage: null, lastError: null };
+    total.reviews += entry.reviews;
+    total.usage = mergeUsage(total.usage, entry.usage);
+    total.lastError = entry.lastError;
+  }
 }
 async function diagnoseAdvisors(config, env, deps) {
   const rows = [];
@@ -972,8 +985,7 @@ function evidenceLine(finding) {
     return `${where} — ${item.detail}`;
   }).join("; ");
 }
-function formatBlockReason(findings, { round, maxRounds }) {
-  const intro = `Cross-model advisors reviewed the changes from this turn (review round ${round} of at most ${maxRounds}) and raised issues. They are other AI models, not the user, and their findings are unverified. Check each one against the code. Fix the ones that are real; for any you judge wrong, say briefly why instead of changing code. Do not make unrelated changes.`;
+function formatBlockReason(findings, { round, maxRounds }, intro = defaultBlockIntro(round, maxRounds)) {
   const required = findings.filter((item) => item.severity !== "nit");
   const optional = findings.filter((item) => item.severity === "nit");
   const lines = [intro, ""];
@@ -987,6 +999,26 @@ function formatBlockReason(findings, { round, maxRounds }) {
     for (const item of optional) lines.push(`- ${item.advisor}: ${item.note}`);
   }
   return truncateLabeled(sanitizeText(lines.join("\n")), MAX_REASON_CHARS);
+}
+function defaultBlockIntro(round, maxRounds) {
+  return `Cross-model advisors reviewed the changes from this turn (review round ${round} of at most ${maxRounds}) and raised issues. They are other AI models, not the user, and their findings are unverified. Check each one against the code. Fix the ones that are real; for any you judge wrong, say briefly why instead of changing code. Do not make unrelated changes.`;
+}
+function formatWakeReason(findings, { round, maxRounds }) {
+  const intro = `${WAKE_MARKER} Cross-model advisors reviewed an earlier turn in the background (wake ${round} of at most ${maxRounds} before the user's next prompt) and found a blocker. They are other AI models, not the user, and their findings are unverified. If the user has asked for something since, finish that first unless a finding bears on it. Then check each finding against the code as it is now, which may have changed: fix the real ones, and for any you judge wrong or already fixed, say briefly why. Begin your reply by telling the user in one line that a background review flagged these. Do not make unrelated changes.`;
+  return formatBlockReason(findings, { round, maxRounds }, intro);
+}
+function formatBackgroundCard(headline, findings, failed) {
+  const lines = [`cross-model-advisor: ${headline}`];
+  if (failed.length) lines.push(`- ${notReviewedBy(failed)}`);
+  for (const item of findings) lines.push(`- [${item.severity}] ${item.advisor}: ${item.note}`);
+  return truncateLabeled(sanitizeText(lines.join("\n")), USER_SUMMARY_CHARS);
+}
+function formatNoticeContext(findings) {
+  const lines = [
+    "cross-model-advisor: a background review of an earlier turn raised these. They are other AI models' unverified claims, and the user has been shown them. Do not act on them unless they bear on the current request or the user asks."
+  ];
+  for (const item of findings) lines.push(`- [${item.severity}] ${item.advisor}: ${item.note} (evidence: ${evidenceLine(item)})`);
+  return sanitizeText(lines.join("\n"));
 }
 function formatUserSummary(findings, failed = []) {
   const lines = [`cross-model-advisor: ${findings.length} finding${findings.length === 1 ? "" : "s"} on this turn`];
@@ -1046,13 +1078,13 @@ async function pool(tasks, limit) {
   await Promise.all(workers);
   return out;
 }
-function runAdvisors({ runnable, config, state, session, deps, env, secrets, credDir, ignoredPaths, turnContext, observations, deadline, tree, projectRoot = state.projectRoot }) {
+function runAdvisors({ runnable, config, spent, session, deps, env, secrets, credDir, ignoredPaths, turnContext, observations, deadline, tree, projectRoot }) {
   const { limits } = config;
   return pool(
     runnable.map((advisor) => async () => {
       const provider = config.providers[advisor.provider];
       const base = { name: advisor.name, provider: advisor.provider, model: advisor.model, findings: [] };
-      const stats = state.advisors[advisor.name] ??= { reviews: 0, usage: null, lastError: null };
+      const stats = spent[advisor.name] ??= { reviews: 0, usage: null, lastError: null };
       const remaining = deadline - deps.now();
       if (remaining <= 0) {
         stats.lastError = "timeout: the review's time ran out before this advisor started";
@@ -1117,7 +1149,96 @@ var defaultDeps = {
   reviewBaseTree,
   now: () => Date.now()
 };
-async function runStop(payload, { env = process.env, deps: overrides = {} } = {}) {
+async function reviewMeasured({ config, session, deps, env, projectRoot, totals, base, head, key, request, final, round, previous, deadline, spent, reviewed }) {
+  const { gate, limits } = config;
+  const secrets = resolveSecrets(secretNamesFromSnapshot(config), env);
+  const credDir = credentialDir(env);
+  const diagnosed = await diagnoseAdvisors(config, env, deps);
+  const runnable = config.advisors.filter((advisor) => {
+    const row = diagnosed.find((item) => item.name === advisor.name);
+    const used = totals[advisor.name]?.reviews ?? 0;
+    return row?.available && used < limits.maxReviewsPerAdvisorPerSession;
+  });
+  if (runnable.length === 0) {
+    const enabled = diagnosed.filter((row) => row.enabled);
+    const why = enabled.length ? enabled.map((row) => `${row.name}: ${row.available ? "session review limit reached" : row.error}`).join("; ") : "no advisor is enabled";
+    return { outcome: "skipped", reason: "no available advisors", notice: why };
+  }
+  let ignoredPaths;
+  try {
+    ignoredPaths = await deps.gitIgnoredPaths(projectRoot, { env });
+  } catch {
+    return { outcome: "failed", reason: "could not list the paths git ignores", notice: "could not list the paths git ignores" };
+  }
+  let diff;
+  try {
+    const probe = await deps.createReviewTools({
+      root: projectRoot,
+      exclude: config.exclude,
+      observations: [],
+      pluginData: session.pluginData,
+      credentialDir: credDir,
+      secrets,
+      ignoredPaths
+    });
+    diff = await deps.turnDiff(projectRoot, base, head, { env, isExcluded: probe.excluded });
+  } catch {
+    return { outcome: "failed", reason: "could not compute the diff", notice: "could not compute the diff" };
+  }
+  const changed = [...diff.files.map((file) => file.path), ...diff.omitted, ...diff.unshown];
+  if (gate.skipWhenOnly?.length && changed.length) {
+    const skip = (typeof import_ignore.default === "function" ? import_ignore.default : import_ignore.default.default)().add(gate.skipWhenOnly);
+    if (changed.every((file) => skip.ignores(file))) {
+      reviewed.push(key);
+      return { outcome: "skipped", reason: "only files matching gate.skipWhenOnly changed" };
+    }
+  }
+  if (diff.files.length === 0) {
+    reviewed.push(key);
+    return { outcome: "skipped", reason: "only excluded files changed" };
+  }
+  const files = diff.files.map((file) => ({ ...file, eventId: `diff:${file.path}`, text: sanitizeText(file.text, secrets) }));
+  const turnContext = {
+    request: truncateLabeled(sanitizeText(request, secrets), USER_TEXT_CAP),
+    final: truncateLabeled(sanitizeText(String(final ?? ""), secrets), USER_TEXT_CAP),
+    round,
+    previous,
+    diff: { files, omitted: diff.omitted, unshown: diff.unshown }
+  };
+  const observations = [{ eventId: "request" }, { eventId: "final" }, ...files.map((file) => ({ eventId: file.eventId }))];
+  const results = await runAdvisors({
+    runnable,
+    config,
+    spent,
+    session,
+    deps,
+    env,
+    secrets,
+    credDir,
+    ignoredPaths,
+    turnContext,
+    observations,
+    deadline,
+    tree: head,
+    projectRoot
+  });
+  reviewed.push(key);
+  const findings = collectFindings(results);
+  const advisors = results.map((result) => ({
+    name: result.name,
+    provider: result.provider,
+    model: result.model,
+    ok: result.ok,
+    findings: result.findings.length,
+    error: result.error
+  }));
+  return { outcome: "reviewed", findings, advisors, failed: results.filter((result) => !result.ok), results };
+}
+async function runStop(payload, options = {}) {
+  const out = await stopTurn(payload, options);
+  return afterStop(payload, out, options);
+}
+async function stopTurn(payload, { env = process.env, deps: overrides = {} } = {}) {
   const deps = { ...defaultDeps, ...overrides };
   const deadline = deps.now() + STOP_REVIEW_BUDGET_MS;
   if (!payload || typeof payload !== "object" || payload.agent_id) return "";
@@ -1125,11 +1246,18 @@ async function runStop(payload, { env = process.env, deps: overrides = {} } = {}
   const state = await loadState(session.dir);
   if (!state.enabled || !state.projectRoot) return "";
   const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
+  const spent = {};
   const record = async (outcome, reason, extra = {}) => {
     const entry = { at: deps.now(), promptId, outcome, reason, ...extra };
-    if (outcome === "skipped") state.lastSkip = entry;
-    else state.last = entry;
-    await saveState(session.dir, state);
+    await updateState(session.dir, (fresh) => {
+      fresh.turn = state.turn;
+      fresh.rounds = state.rounds;
+      fresh.reviewed = [.../* @__PURE__ */ new Set([...fresh.reviewed, ...state.reviewed])];
+      addUsage(fresh, spent);
+      if (outcome === "skipped") fresh.lastSkip = entry;
+      else fresh.last = entry;
+    });
+    for (const name of Object.keys(spent)) delete spent[name];
   };
   const turn = state.turn;
   const stale = Boolean(turn?.stopped) && payload.stop_hook_active !== true;
@@ -1159,7 +1287,7 @@ async function runStop(payload, { env = process.env, deps: overrides = {} } = {}
     return `${JSON.stringify({ systemMessage: `cross-model-advisor: review skipped, configuration is invalid (${message})` })}
 `;
   }
-  const { gate, limits } = config;
+  const { gate } = config;
   let head;
   try {
     head = await deps.snapshotTree(state.projectRoot, session.dir, { env });
@@ -1176,6 +1304,20 @@ async function runStop(payload, { env = process.env, deps: overrides = {} } = {}
     await record("skipped", "these changes were already reviewed");
     return "";
   }
+  if (gate.mode === "advise") {
+    state.reviewed.push(key);
+    const stopKey = stopKeyOf(payload);
+    const job = { base: turn.baseTree, head, key, request: turn.request ?? "", status: "queued", wake: Boolean(turn.wake) };
+    await updateState(session.dir, (fresh) => {
+      fresh.turn = state.turn;
+      fresh.rounds = state.rounds;
+      fresh.reviewed = [.../* @__PURE__ */ new Set([...fresh.reviewed, ...state.reviewed])];
+      fresh.advise.stops = [...fresh.advise.stops.filter((stop) => stop.stopKey !== stopKey), { stopKey, at: deps.now(), job }].slice(
+        -MAX_ADVISE_STOPS
+      );
+    });
+    return "";
+  }
   if (state.rounds.promptId !== promptId) state.rounds = { promptId, count: 0 };
   if (gate.mode === "block" && state.rounds.count >= gate.maxRounds) {
     await record("skipped", `round limit (${gate.maxRounds}) reached for this prompt`);
@@ -1184,94 +1326,31 @@ async function runStop(payload, { env = process.env, deps: overrides = {} } = {}
     })}
 `;
   }
-  const secrets = resolveSecrets(secretNamesFromSnapshot(config), env);
-  const credDir = credentialDir(env);
-  const diagnosed = await diagnoseAdvisors(config, env, deps);
-  const runnable = config.advisors.filter((advisor) => {
-    const row = diagnosed.find((item) => item.name === advisor.name);
-    const used = state.advisors[advisor.name]?.reviews ?? 0;
-    return row?.available && used < limits.maxReviewsPerAdvisorPerSession;
-  });
-  if (runnable.length === 0) {
-    await record("skipped", "no available advisors");
-    const enabled = diagnosed.filter((row) => row.enabled);
-    const why = enabled.length ? enabled.map((row) => `${row.name}: ${row.available ? "session review limit reached" : row.error}`).join("; ") : "no advisor is enabled";
-    return formatNotReviewed(why);
-  }
-  let ignoredPaths;
-  try {
-    ignoredPaths = await deps.gitIgnoredPaths(state.projectRoot, { env });
-  } catch {
-    await record("failed", "could not list the paths git ignores");
-    return formatNotReviewed("could not list the paths git ignores");
-  }
-  let diff;
-  try {
-    const probe = await deps.createReviewTools({
-      root: state.projectRoot,
-      exclude: config.exclude,
-      observations: [],
-      pluginData: session.pluginData,
-      credentialDir: credDir,
-      secrets,
-      ignoredPaths
-    });
-    diff = await deps.turnDiff(state.projectRoot, turn.baseTree, head, { env, isExcluded: probe.excluded });
-  } catch {
-    await record("failed", "could not compute the diff");
-    return formatNotReviewed("could not compute the diff");
-  }
-  const changed = [...diff.files.map((file) => file.path), ...diff.omitted, ...diff.unshown];
-  if (gate.skipWhenOnly?.length && changed.length) {
-    const skip = (typeof import_ignore.default === "function" ? import_ignore.default : import_ignore.default.default)().add(gate.skipWhenOnly);
-    if (changed.every((file) => skip.ignores(file))) {
-      state.reviewed.push(key);
-      await record("skipped", "only files matching gate.skipWhenOnly changed");
-      return "";
-    }
-  }
-  if (diff.files.length === 0) {
-    state.reviewed.push(key);
-    await record("skipped", "only excluded files changed");
-    return "";
-  }
-  const files = diff.files.map((file) => ({ ...file, eventId: `diff:${file.path}`, text: sanitizeText(file.text, secrets) }));
   const round = state.rounds.count + 1;
   const previous = round > 1 && state.last?.promptId === promptId && Array.isArray(state.last?.findings) ? state.last.findings.map(({ severity, advisor, note }) => ({ severity, advisor, note })) : [];
-  const turnContext = {
-    request: truncateLabeled(sanitizeText(turn.request ?? "", secrets), USER_TEXT_CAP),
-    final: truncateLabeled(sanitizeText(String(payload.last_assistant_message ?? ""), secrets), USER_TEXT_CAP),
-    round,
-    previous,
-    diff: { files, omitted: diff.omitted, unshown: diff.unshown }
-  };
-  const observations = [{ eventId: "request" }, { eventId: "final" }, ...files.map((file) => ({ eventId: file.eventId }))];
-  const results = await runAdvisors({
-    runnable,
+  const review = await reviewMeasured({
     config,
-    state,
     session,
     deps,
     env,
-    secrets,
-    credDir,
-    ignoredPaths,
-    turnContext,
-    observations,
+    projectRoot: state.projectRoot,
+    totals: state.advisors,
+    base: turn.baseTree,
+    head,
+    key,
+    request: turn.request ?? "",
+    final: payload.last_assistant_message,
+    round,
+    previous,
     deadline,
-    tree: head
+    spent,
+    reviewed: state.reviewed
   });
-  state.reviewed.push(key);
-  const findings = collectFindings(results);
-  const advisors = results.map((result) => ({
-    name: result.name,
-    provider: result.provider,
-    model: result.model,
-    ok: result.ok,
-    findings: result.findings.length,
-    error: result.error
-  }));
-  const failed = results.filter((result) => !result.ok);
+  if (review.outcome !== "reviewed") {
+    await record(review.outcome, review.reason);
+    return review.notice ? formatNotReviewed(review.notice) : "";
+  }
+  const { findings, advisors, failed, results } = review;
   if (gate.mode === "block" && findings.some((item) => item.severity !== "nit")) {
     turn.stopped = false;
     state.rounds.count = round;
@@ -1304,6 +1383,157 @@ async function runStop(payload, { env = process.env, deps: overrides = {} } = {}
   const names = results.map((result) => result.name).join(", ");
   return `${JSON.stringify({ systemMessage: truncateLabeled(sanitizeText(`cross-model-advisor: no findings from ${names}`), USER_SUMMARY_CHARS) })}
 `;
+}
+function stopKeyOf(payload) {
+  return createHash("sha256").update(JSON.stringify([payload?.prompt_id ?? null, payload?.stop_hook_active === true, String(payload?.last_assistant_message ?? "")])).digest("hex").slice(0, 32);
+}
+function pushNotice(state, user, context = null) {
+  state.advise.notices = [...state.advise.notices, { id: randomUUID(), at: Date.now(), user, context }].slice(-MAX_NOTICES);
+}
+function joinHookOutput(first, second) {
+  if (!second) return first;
+  if (!first) return second;
+  const a = JSON.parse(first);
+  const b = JSON.parse(second);
+  const systemMessage = [a.systemMessage, b.systemMessage].filter(Boolean).join("\n");
+  return `${JSON.stringify({ ...a, ...systemMessage ? { systemMessage } : {} })}
+`;
+}
+async function afterStop(payload, out, { env = process.env, deps: overrides = {} } = {}) {
+  if (!payload || typeof payload !== "object" || payload.agent_id) return out;
+  const deps = { ...defaultDeps, ...overrides };
+  const session = sessionFrom(env, payload);
+  const seen = await loadState(session.dir);
+  if (!seen.enabled) return out;
+  const advise = await deps.loadConfig({ env }).then(
+    (config) => config.gate.mode === "advise",
+    () => false
+  );
+  if (!advise && !seen.advise.notices.some((notice) => notice.user)) return out;
+  const stopKey = stopKeyOf(payload);
+  const notices = await updateState(session.dir, (state) => {
+    if (advise && !state.advise.stops.some((stop) => stop.stopKey === stopKey)) {
+      state.advise.stops = [...state.advise.stops, { stopKey, at: deps.now(), job: null }].slice(-MAX_ADVISE_STOPS);
+    }
+    return takeNotices(state, { context: false });
+  });
+  return joinHookOutput(out, notices);
+}
+async function runAdvise(payload, { env = process.env, deps: overrides = {}, pollMs = 100, waitMs = ADVISE_WAIT_MS } = {}) {
+  const deps = { ...defaultDeps, ...overrides };
+  const started = deps.now();
+  const deadline = started + STOP_REVIEW_BUDGET_MS;
+  if (!payload || typeof payload !== "object" || payload.agent_id) return null;
+  const session = sessionFrom(env, payload);
+  let state = await loadState(session.dir);
+  if (!state.enabled || !state.projectRoot) return null;
+  let config;
+  try {
+    config = await deps.loadConfig({ env });
+  } catch {
+    return null;
+  }
+  if (config.gate.mode !== "advise") return null;
+  const stopKey = stopKeyOf(payload);
+  for (; ; ) {
+    if (state.advise.stops.some((stop) => stop.stopKey === stopKey) || deps.now() - started > waitMs) break;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    state = await loadState(session.dir);
+  }
+  const claimed = await updateState(session.dir, (fresh) => {
+    const stop = fresh.advise.stops.find((item) => item.stopKey === stopKey);
+    if (!stop) return null;
+    if (!stop.job || stop.job.status !== "queued") {
+      if (!stop.job) fresh.advise.stops = fresh.advise.stops.filter((item) => item !== stop);
+      return null;
+    }
+    stop.job.status = "running";
+    return { job: { ...stop.job }, totals: structuredClone(fresh.advisors), wakes: fresh.advise.wakes, last: fresh.last };
+  });
+  if (!claimed) return null;
+  const { job } = claimed;
+  const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
+  const maxWakes = config.gate.maxRounds;
+  const round = Math.min(claimed.wakes + 1, maxWakes);
+  const previous = job.wake && Array.isArray(claimed.last?.findings) ? claimed.last.findings.map(({ severity, advisor, note }) => ({ severity, advisor, note })) : [];
+  const spent = {};
+  const reviewed = [];
+  let review;
+  try {
+    review = await reviewMeasured({
+      config,
+      session,
+      deps,
+      env,
+      projectRoot: state.projectRoot,
+      totals: claimed.totals,
+      base: job.base,
+      head: job.head,
+      key: job.key,
+      request: job.request,
+      final: payload.last_assistant_message,
+      round,
+      previous,
+      deadline,
+      spent,
+      reviewed
+    });
+  } catch (error) {
+    await createErrorLog(session.dir).record(error).catch(() => {
+    });
+    review = { outcome: "failed", reason: "the background review failed", notice: "the background review failed" };
+  }
+  return updateState(session.dir, (fresh) => {
+    fresh.advise.stops = fresh.advise.stops.filter((item) => item.stopKey !== stopKey);
+    fresh.reviewed = [.../* @__PURE__ */ new Set([...fresh.reviewed, ...reviewed])];
+    addUsage(fresh, spent);
+    const at = deps.now();
+    if (review.outcome !== "reviewed") {
+      const entry = { at, promptId, outcome: review.outcome, reason: `background: ${review.reason}` };
+      if (review.outcome === "skipped") fresh.lastSkip = entry;
+      else fresh.last = entry;
+      if (review.notice) pushNotice(fresh, `cross-model-advisor: an earlier turn was not reviewed in the background (${review.notice})`);
+      return null;
+    }
+    const { findings, advisors, failed, results } = review;
+    const blocker = findings.some((item) => item.severity === "blocker");
+    const record = (outcome, reason) => {
+      fresh.last = { at, promptId, outcome, reason, round, findings, advisors };
+    };
+    if (blocker && fresh.enabled && fresh.advise.wakes < maxWakes) {
+      fresh.advise.wakes += 1;
+      const rounds = { round: fresh.advise.wakes, maxRounds: maxWakes };
+      record("woke", "a blocker found in the background woke Claude");
+      pushNotice(
+        fresh,
+        formatBackgroundCard(`a background review woke Claude with ${findings.length} finding${findings.length === 1 ? "" : "s"} on an earlier turn (wake ${rounds.round} of at most ${rounds.maxRounds})`, findings, failed)
+      );
+      return formatWakeReason(findings, rounds);
+    }
+    if (findings.length) {
+      const limited = blocker ? `; not waking Claude again before your next prompt (limit ${maxWakes})` : "";
+      record("reported", blocker ? "the wake limit was reached" : "findings shown with the next prompt");
+      pushNotice(
+        fresh,
+        formatBackgroundCard(`${findings.length} finding${findings.length === 1 ? "" : "s"} from the background review of an earlier turn${limited}`, findings, failed),
+        formatNoticeContext(findings)
+      );
+      return null;
+    }
+    if (failed.length === results.length) {
+      const detail = failed.map((result) => `${result.name}: ${result.error}`).join("; ");
+      record("failed", "every advisor failed");
+      pushNotice(fresh, truncateLabeled(sanitizeText(`cross-model-advisor: the background review failed, so an earlier turn was not reviewed (${detail})`), USER_SUMMARY_CHARS));
+      return null;
+    }
+    record("passed", failed.length ? "no findings from the advisors that completed" : "no findings");
+    const names = results.filter((result) => result.ok).map((result) => result.name).join(", ");
+    pushNotice(
+      fresh,
+      failed.length ? formatBackgroundCard(`no findings on an earlier turn, but ${notReviewedBy(failed)}`, [], []) : truncateLabeled(sanitizeText(`cross-model-advisor: no findings from ${names} on an earlier turn`), USER_SUMMARY_CHARS)
+    );
+    return null;
+  });
 }
 async function runReview(env, { base = null } = {}, overrides = {}) {
   const deps = { ...defaultDeps, ...overrides };
@@ -1375,10 +1605,11 @@ async function runReview(env, { base = null } = {}, overrides = {}) {
     diff: { files, omitted: diff.omitted, unshown: diff.unshown }
   };
   const observations = [{ eventId: "request" }, ...files.map((file) => ({ eventId: file.eventId }))];
+  const spent = {};
   const results = await runAdvisors({
     runnable,
     config,
-    state,
+    spent,
     session,
     deps,
     env,
@@ -1391,7 +1622,7 @@ async function runReview(env, { base = null } = {}, overrides = {}) {
     tree: head,
     projectRoot
   });
-  await saveState(session.dir, state);
+  await updateState(session.dir, (fresh) => addUsage(fresh, spent));
   return {
     ...report,
     files: files.map((file) => file.path),
@@ -1423,14 +1654,13 @@ async function runOn(env, overrides = {}) {
   }
   const advisors = await diagnoseAdvisors(config, env, deps);
   const enabled = advisors.some((row) => row.available);
-  await ensurePrivateDir(session.dir);
-  const state = await loadState(session.dir);
-  state.enabled = enabled;
-  state.optedOut = false;
-  state.projectRoot = projectRoot;
-  state.turn = { promptId: null, control: true };
-  state.rounds = { promptId: null, count: 0 };
-  await saveState(session.dir, state);
+  await updateState(session.dir, (state) => {
+    state.enabled = enabled;
+    state.optedOut = false;
+    state.projectRoot = projectRoot;
+    state.turn = { promptId: null, control: true };
+    state.rounds = { promptId: null, count: 0 };
+  });
   await pruneSessions(session.pluginData, session.sessionId, deps.now());
   return { ok: true, enabled, projectRoot, gate: config.gate, limits: config.limits, advisors, disclosure: DISCLOSURE };
 }
@@ -1493,6 +1723,25 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     process.exitCode = 0;
     return;
   }
+  if (op === "advise" && argv.length === 1) {
+    let payload = null;
+    let wake = null;
+    try {
+      const raw = await readStdin(process.stdin);
+      payload = raw.trim() ? JSON.parse(raw) : null;
+      wake = await runAdvise(payload, { env });
+    } catch (error) {
+      try {
+        const session = sessionFrom(env, payload ?? {});
+        await ensurePrivateDir(session.dir);
+        await createErrorLog(session.dir).record(error);
+      } catch {
+      }
+    }
+    if (wake) process.stderr.write(wake, () => process.exit(2));
+    else process.exit(0);
+    return;
+  }
   const reviewArgs = op === "review" && argv[1] === "--plugin-data" && (argv.length === 3 || argv.length === 5 && argv[3] === "--base");
   if ((op === "on" || op === "doctor") && argv.length === 3 && argv[1] === "--plugin-data" || reviewArgs) {
     let pluginData;
@@ -1541,9 +1790,12 @@ export {
   formatNotReviewed,
   formatPartialFailure,
   formatUserSummary,
+  formatWakeReason,
   main,
+  runAdvise,
   runDoctor,
   runOn,
   runReview,
-  runStop
+  runStop,
+  stopKeyOf
 };

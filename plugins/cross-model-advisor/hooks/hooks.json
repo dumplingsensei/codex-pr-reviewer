@@ -1,5 +1,5 @@
 {
-  "description": "Turn the gate on at session start for projects listed in your own gate.autoOn, snapshot the working tree when a prompt is submitted, and review what changed when Claude finishes the turn. Fail-open: errors let Claude stop and are recorded for /cross-model-advisor:status.",
+  "description": "Turn the gate on at session start for projects listed in your own gate.autoOn, snapshot the working tree when a prompt is submitted, and review what changed when Claude finishes the turn, in the background in advise mode. Fail-open: errors let Claude stop and are recorded for /cross-model-advisor:status.",
   "hooks": {
     "SessionStart": [
       {
@@ -31,6 +31,16 @@
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/gate.mjs\" stop",
             "timeout": 300,
             "statusMessage": "Cross-model advisors are reviewing this turn"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/gate.mjs\" advise",
+            "timeout": 300,
+            "asyncRewake": true
           }
         ]
       }

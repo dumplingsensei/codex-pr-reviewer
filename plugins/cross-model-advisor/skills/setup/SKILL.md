@@ -17,7 +17,7 @@ Change cross-model-advisor settings with the user through **AskUserQuestion**, o
      - Model: ask for a search word (Other; only `^[A-Za-z0-9._-]{1,40}$`), run `H models <provider> --q "<word>" --limit 3`, and offer only the returned ids plus **Search again**. Always `set: {"model":…,"reasoningEffort":…}` together, keeping the effort only if the new model's `choices` include it.
      - Instructions: `correctness` · `security` · `tests-and-claims` → `set: {"instructionsPreset":<role>}`, or Other → `set: {"instructions":<text>}`.
      - On/off: `set: {"enabled":true|false}`. Remove: `{"op":"remove-advisor","name":…}`.
-   - **Gate settings**: **Mode** (block/report) · **Max rounds** (1–5) · **Auto-on projects** · **Skip patterns**. Auto-on: offer adding or removing this session's absolute git root; other absolute paths via Other. Skip: `*.md`, `docs/**`, or Other, never starting with `!`. The change is `{"op":"set-gate","gate":{…}}`; lists replace whole, and an empty list removes the setting.
+   - **Gate settings**: **Mode** (block/report/advise) · **Max rounds** (1–5) · **Auto-on projects** · **Skip patterns**. Auto-on: offer adding or removing this session's absolute git root; other absolute paths via Other. Skip: `*.md`, `docs/**`, or Other, never starting with `!`. The change is `{"op":"set-gate","gate":{…}}`; lists replace whole, and an empty list removes the setting.
    - **Terminal menu**: run `H menu-command`, show its output verbatim, and tell the user to run it in their own terminal (custom endpoints, anything else). Never run the menu.
 3. Preview on one line of valid JSON:
 

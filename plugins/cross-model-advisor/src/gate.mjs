@@ -3,16 +3,20 @@
  * The review gate. When Claude finishes a turn that changed files, enabled
  * advisors from other model families review what git measured, and concerns
  * or blockers send Claude back to address them (`gate.mode: "block"`) or are
- * shown to the user (`"report"`). Also `on` and `doctor`, which need the
- * provider SDK that the lightweight control helper does not load.
+ * shown to the user (`"report"`). In `"advise"` mode Claude stops at once and
+ * a background review wakes it only for blockers. Also `on` and `doctor`,
+ * which need the provider SDK that the lightweight control helper does not
+ * load.
  *
  *   gate.mjs stop                        Stop hook; payload on stdin
+ *   gate.mjs advise                      asyncRewake Stop hook; exits 2 to wake Claude
  *   gate.mjs on|doctor --plugin-data <p> session skills
  *
  * The Stop hook fails open: errors let Claude stop, are recorded for
  * /status, and are never reported as a successful review.
  */
 
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
@@ -30,7 +34,9 @@ import {
   SESSION_RETENTION_MS,
   SEVERITY_ORDER,
   STOP_REVIEW_BUDGET_MS,
-  USER_TEXT_CAP
+  USER_SUMMARY_CHARS,
+  USER_TEXT_CAP,
+  WAKE_MARKER
 } from "./session/constants.mjs";
 import { createErrorLog } from "./session/errors.mjs";
 import {
@@ -42,10 +48,15 @@ import {
   validateSessionId
 } from "./session/paths.mjs";
 import { resolveSecrets, sanitizeText, secretNamesFromSnapshot, truncateLabeled } from "./session/sanitize.mjs";
-import { loadState, saveState } from "./session/state.mjs";
+import { loadState, takeNotices, updateState } from "./session/state.mjs";
 
-const USAGE = "usage: gate.mjs stop | on|doctor --plugin-data <path> | review --plugin-data <path> [--base <ref>]";
-const USER_SUMMARY_CHARS = 2_000;
+// The Stop gate normally measures a turn in well under a second; a large
+// repository's snapshot can take longer.
+const ADVISE_WAIT_MS = 60_000;
+const MAX_ADVISE_STOPS = 16;
+const MAX_NOTICES = 16;
+
+const USAGE = "usage: gate.mjs stop | advise | on|doctor --plugin-data <path> | review --plugin-data <path> [--base <ref>]";
 const DISCLOSURE =
   "At the end of each turn that changes files, the request, Claude's final message, and the git diff (minus excluded paths) go to the configured external providers, which may also read allowed project files. Claude's own credentials are never used.";
 
@@ -92,6 +103,25 @@ function mergeUsage(prev, next) {
     totalTokens: (base.totalTokens ?? 0) + (next.totalTokens ?? 0),
     costUsd: cost
   };
+}
+
+/**
+ * @typedef {{ reviews: number, usage: object | null, lastError: string | null }} AdvisorUsage
+ */
+
+/**
+ * Add one review's advisor usage to the session's totals.
+ *
+ * @param {{ advisors: Record<string, AdvisorUsage> }} state
+ * @param {Record<string, AdvisorUsage>} spent
+ */
+function addUsage(state, spent) {
+  for (const [name, entry] of Object.entries(spent)) {
+    const total = (state.advisors[name] ??= { reviews: 0, usage: null, lastError: null });
+    total.reviews += entry.reviews;
+    total.usage = mergeUsage(total.usage, entry.usage);
+    total.lastError = entry.lastError;
+  }
 }
 
 /**
@@ -209,11 +239,7 @@ function evidenceLine(finding) {
  * @param {ReturnType<typeof collectFindings>} findings
  * @param {{ round: number, maxRounds: number }} rounds
  */
-export function formatBlockReason(findings, { round, maxRounds }) {
-  const intro =
-    `Cross-model advisors reviewed the changes from this turn (review round ${round} of at most ${maxRounds}) and raised issues. ` +
-    "They are other AI models, not the user, and their findings are unverified. Check each one against the code. " +
-    "Fix the ones that are real; for any you judge wrong, say briefly why instead of changing code. Do not make unrelated changes.";
+export function formatBlockReason(findings, { round, maxRounds }, intro = defaultBlockIntro(round, maxRounds)) {
   const required = findings.filter((item) => item.severity !== "nit");
   const optional = findings.filter((item) => item.severity === "nit");
   const lines = [intro, ""];
@@ -227,6 +253,63 @@ export function formatBlockReason(findings, { round, maxRounds }) {
     for (const item of optional) lines.push(`- ${item.advisor}: ${item.note}`);
   }
   return truncateLabeled(sanitizeText(lines.join("\n")), MAX_REASON_CHARS);
+}
+
+/**
+ * @param {number} round
+ * @param {number} maxRounds
+ */
+function defaultBlockIntro(round, maxRounds) {
+  return (
+    `Cross-model advisors reviewed the changes from this turn (review round ${round} of at most ${maxRounds}) and raised issues. ` +
+    "They are other AI models, not the user, and their findings are unverified. Check each one against the code. " +
+    "Fix the ones that are real; for any you judge wrong, say briefly why instead of changing code. Do not make unrelated changes."
+  );
+}
+
+/**
+ * What wakes Claude when advise mode's background review finds a blocker.
+ * Claude may be idle or busy with a newer request by the time it arrives.
+ *
+ * @param {ReturnType<typeof collectFindings>} findings
+ * @param {{ round: number, maxRounds: number }} rounds
+ */
+export function formatWakeReason(findings, { round, maxRounds }) {
+  const intro =
+    `${WAKE_MARKER} Cross-model advisors reviewed an earlier turn in the background (wake ${round} of at most ${maxRounds} ` +
+    "before the user's next prompt) and found a blocker. They are other AI models, not the user, and their findings are unverified. " +
+    "If the user has asked for something since, finish that first unless a finding bears on it. Then check each finding against " +
+    "the code as it is now, which may have changed: fix the real ones, and for any you judge wrong or already fixed, say briefly why. " +
+    "Begin your reply by telling the user in one line that a background review flagged these. Do not make unrelated changes.";
+  return formatBlockReason(findings, { round, maxRounds }, intro);
+}
+
+/**
+ * The user's card for a background review, shown with their next prompt.
+ *
+ * @param {string} headline
+ * @param {ReturnType<typeof collectFindings>} findings
+ * @param {{ name: string, error?: string }[]} failed
+ */
+function formatBackgroundCard(headline, findings, failed) {
+  const lines = [`cross-model-advisor: ${headline}`];
+  if (failed.length) lines.push(`- ${notReviewedBy(failed)}`);
+  for (const item of findings) lines.push(`- [${item.severity}] ${item.advisor}: ${item.note}`);
+  return truncateLabeled(sanitizeText(lines.join("\n")), USER_SUMMARY_CHARS);
+}
+
+/**
+ * What Claude is given with the next prompt for findings it was not woken for.
+ *
+ * @param {ReturnType<typeof collectFindings>} findings
+ */
+function formatNoticeContext(findings) {
+  const lines = [
+    "cross-model-advisor: a background review of an earlier turn raised these. They are other AI models' unverified claims, " +
+      "and the user has been shown them. Do not act on them unless they bear on the current request or the user asks."
+  ];
+  for (const item of findings) lines.push(`- [${item.severity}] ${item.advisor}: ${item.note} (evidence: ${evidenceLine(item)})`);
+  return sanitizeText(lines.join("\n"));
 }
 
 /**
@@ -339,21 +422,21 @@ async function pool(tasks, limit) {
 /**
  * Every runnable advisor reviews one diff, at most maxConcurrentAdvisors at a
  * time and all inside one deadline. Shared by the Stop gate and on-demand
- * reviews, so both apply the same tools, evidence rules, and limits. Updates
- * per-advisor usage in `state`; the caller saves it.
+ * reviews, so both apply the same tools, evidence rules, and limits. Records
+ * this review's per-advisor usage in `spent`; the caller adds it to the session.
  *
- * @param {{ runnable: any[], config: any, state: any, session: any, deps: typeof defaultDeps, env: NodeJS.ProcessEnv,
+ * @param {{ runnable: any[], config: any, spent: Record<string, AdvisorUsage>, session: any, deps: typeof defaultDeps, env: NodeJS.ProcessEnv,
  *   secrets: string[], credDir: string, ignoredPaths: string[], turnContext: object, observations: object[],
- *   deadline: number, tree: string, projectRoot?: string }} input `tree` is the snapshot under review, which
+ *   deadline: number, tree: string, projectRoot: string }} input `tree` is the snapshot under review, which
  *   the advisors' tools read instead of the working tree.
  */
-function runAdvisors({ runnable, config, state, session, deps, env, secrets, credDir, ignoredPaths, turnContext, observations, deadline, tree, projectRoot = state.projectRoot }) {
+function runAdvisors({ runnable, config, spent, session, deps, env, secrets, credDir, ignoredPaths, turnContext, observations, deadline, tree, projectRoot }) {
   const { limits } = config;
   return pool(
     runnable.map((advisor) => async () => {
       const provider = config.providers[advisor.provider];
       const base = { name: advisor.name, provider: advisor.provider, model: advisor.model, findings: [] };
-      const stats = (state.advisors[advisor.name] ??= { reviews: 0, usage: null, lastError: null });
+      const stats = (spent[advisor.name] ??= { reviews: 0, usage: null, lastError: null });
       // Advisors queued behind maxConcurrentAdvisors share one budget, so their
       // timeouts cannot add up past the point where Claude Code kills the hook.
       const remaining = deadline - deps.now();
@@ -424,14 +507,132 @@ const defaultDeps = {
 };
 
 /**
+ * Review one measured turn: choose the advisors that can run, compute the
+ * diff, and collect their findings. Shared by the Stop gate and advise mode's
+ * background review so both apply the same checks. Adds `key` to `reviewed`
+ * once the turn needs no further review, and this review's usage to `spent`.
+ *
+ * @param {{ config: any, session: any, deps: typeof defaultDeps, env: NodeJS.ProcessEnv, projectRoot: string,
+ *   totals: Record<string, AdvisorUsage>, base: string, head: string, key: string, request: string, final: unknown,
+ *   round: number, previous: object[], deadline: number, spent: Record<string, AdvisorUsage>, reviewed: string[] }} input
+ * @returns {Promise<
+ *   | { outcome: "skipped" | "failed", reason: string, notice?: string }
+ *   | { outcome: "reviewed", findings: ReturnType<typeof collectFindings>, advisors: object[], failed: any[], results: any[] }>}
+ */
+async function reviewMeasured({ config, session, deps, env, projectRoot, totals, base, head, key, request, final, round, previous, deadline, spent, reviewed }) {
+  const { gate, limits } = config;
+  const secrets = resolveSecrets(secretNamesFromSnapshot(config), env);
+  const credDir = credentialDir(env);
+  const diagnosed = await diagnoseAdvisors(config, env, deps);
+  const runnable = config.advisors.filter((advisor) => {
+    const row = diagnosed.find((item) => item.name === advisor.name);
+    const used = totals[advisor.name]?.reviews ?? 0;
+    return row?.available && used < limits.maxReviewsPerAdvisorPerSession;
+  });
+  if (runnable.length === 0) {
+    const enabled = diagnosed.filter((row) => row.enabled);
+    const why = enabled.length
+      ? enabled.map((row) => `${row.name}: ${row.available ? "session review limit reached" : row.error}`).join("; ")
+      : "no advisor is enabled";
+    return { outcome: "skipped", reason: "no available advisors", notice: why };
+  }
+
+  let ignoredPaths;
+  try {
+    ignoredPaths = await deps.gitIgnoredPaths(projectRoot, { env });
+  } catch {
+    return { outcome: "failed", reason: "could not list the paths git ignores", notice: "could not list the paths git ignores" };
+  }
+
+  let diff;
+  try {
+    const probe = await deps.createReviewTools({
+      root: projectRoot,
+      exclude: config.exclude,
+      observations: [],
+      pluginData: session.pluginData,
+      credentialDir: credDir,
+      secrets,
+      ignoredPaths
+    });
+    diff = await deps.turnDiff(projectRoot, base, head, { env, isExcluded: probe.excluded });
+  } catch {
+    return { outcome: "failed", reason: "could not compute the diff", notice: "could not compute the diff" };
+  }
+  // Every changed path, shown or not, must match for a turn to be skipped.
+  const changed = [...diff.files.map((file) => file.path), ...diff.omitted, ...diff.unshown];
+  if (gate.skipWhenOnly?.length && changed.length) {
+    const skip = (typeof ignoreFactory === "function" ? ignoreFactory : ignoreFactory.default)().add(gate.skipWhenOnly);
+    if (changed.every((file) => skip.ignores(file))) {
+      reviewed.push(key);
+      return { outcome: "skipped", reason: "only files matching gate.skipWhenOnly changed" };
+    }
+  }
+  if (diff.files.length === 0) {
+    reviewed.push(key);
+    return { outcome: "skipped", reason: "only excluded files changed" };
+  }
+  const files = diff.files.map((file) => ({ ...file, eventId: `diff:${file.path}`, text: sanitizeText(file.text, secrets) }));
+  const turnContext = {
+    request: truncateLabeled(sanitizeText(request, secrets), USER_TEXT_CAP),
+    final: truncateLabeled(sanitizeText(String(final ?? ""), secrets), USER_TEXT_CAP),
+    round,
+    previous,
+    diff: { files, omitted: diff.omitted, unshown: diff.unshown }
+  };
+  const observations = [{ eventId: "request" }, { eventId: "final" }, ...files.map((file) => ({ eventId: file.eventId }))];
+
+  const results = await runAdvisors({
+    runnable,
+    config,
+    spent,
+    session,
+    deps,
+    env,
+    secrets,
+    credDir,
+    ignoredPaths,
+    turnContext,
+    observations,
+    deadline,
+    tree: head,
+    projectRoot
+  });
+
+  reviewed.push(key);
+  const findings = collectFindings(results);
+  const advisors = results.map((result) => ({
+    name: result.name,
+    provider: result.provider,
+    model: result.model,
+    ok: result.ok,
+    findings: result.findings.length,
+    error: result.error
+  }));
+  return { outcome: "reviewed", findings, advisors, failed: results.filter((result) => !result.ok), results };
+}
+
+/**
  * Stop hook. Returns hook stdout: "" to let Claude stop silently, a block
- * decision, or a user-visible systemMessage.
+ * decision, or a user-visible systemMessage. In advise mode it only measures
+ * the turn and queues it for the background review (`runAdvise`); it also
+ * shows the user what earlier background reviews left.
  *
  * @param {any} payload
  * @param {{ env?: NodeJS.ProcessEnv, deps?: Partial<typeof defaultDeps> }} [options]
  * @returns {Promise<string>}
  */
-export async function runStop(payload, { env = process.env, deps: overrides = {} } = {}) {
+export async function runStop(payload, options = {}) {
+  const out = await stopTurn(payload, options);
+  return afterStop(payload, out, options);
+}
+
+/**
+ * @param {any} payload
+ * @param {{ env?: NodeJS.ProcessEnv, deps?: Partial<typeof defaultDeps> }} [options]
+ * @returns {Promise<string>}
+ */
+async function stopTurn(payload, { env = process.env, deps: overrides = {} } = {}) {
   const deps = { ...defaultDeps, ...overrides };
   const deadline = deps.now() + STOP_REVIEW_BUDGET_MS;
   if (!payload || typeof payload !== "object" || payload.agent_id) return "";
@@ -440,6 +641,8 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
   if (!state.enabled || !state.projectRoot) return "";
 
   const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
+  /** This Stop's advisor usage, added to the session when it records. */
+  const spent = {};
   /**
    * @param {string} outcome
    * @param {string} reason
@@ -447,11 +650,19 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
    */
   const record = async (outcome, reason, extra = {}) => {
     const entry = { at: deps.now(), promptId, outcome, reason, ...extra };
-    // A skip must not erase the last real review: /status and the round-limit
-    // message point at its findings.
-    if (outcome === "skipped") state.lastSkip = entry;
-    else state.last = entry;
-    await saveState(session.dir, state);
+    // Applied to the state as it is now: a background review may have saved
+    // since this Stop loaded it. Only the Stop gate changes the turn and rounds.
+    await updateState(session.dir, (fresh) => {
+      fresh.turn = state.turn;
+      fresh.rounds = state.rounds;
+      fresh.reviewed = [...new Set([...fresh.reviewed, ...state.reviewed])];
+      addUsage(fresh, spent);
+      // A skip must not erase the last real review: /status and the
+      // round-limit message point at its findings.
+      if (outcome === "skipped") fresh.lastSkip = entry;
+      else fresh.last = entry;
+    });
+    for (const name of Object.keys(spent)) delete spent[name];
   };
 
   const turn = state.turn;
@@ -487,7 +698,7 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
     await record("failed", `config: ${message}`);
     return `${JSON.stringify({ systemMessage: `cross-model-advisor: review skipped, configuration is invalid (${message})` })}\n`;
   }
-  const { gate, limits } = config;
+  const { gate } = config;
 
   let head;
   try {
@@ -506,6 +717,22 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
     return "";
   }
 
+  if (gate.mode === "advise") {
+    // Claude stops now; the background review picks this job up by its Stop.
+    state.reviewed.push(key);
+    const stopKey = stopKeyOf(payload);
+    const job = { base: turn.baseTree, head, key, request: turn.request ?? "", status: "queued", wake: Boolean(turn.wake) };
+    await updateState(session.dir, (fresh) => {
+      fresh.turn = state.turn;
+      fresh.rounds = state.rounds;
+      fresh.reviewed = [...new Set([...fresh.reviewed, ...state.reviewed])];
+      fresh.advise.stops = [...fresh.advise.stops.filter((stop) => stop.stopKey !== stopKey), { stopKey, at: deps.now(), job }].slice(
+        -MAX_ADVISE_STOPS
+      );
+    });
+    return "";
+  }
+
   if (state.rounds.promptId !== promptId) state.rounds = { promptId, count: 0 };
   if (gate.mode === "block" && state.rounds.count >= gate.maxRounds) {
     await record("skipped", `round limit (${gate.maxRounds}) reached for this prompt`);
@@ -514,104 +741,34 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
     })}\n`;
   }
 
-  const secrets = resolveSecrets(secretNamesFromSnapshot(config), env);
-  const credDir = credentialDir(env);
-  const diagnosed = await diagnoseAdvisors(config, env, deps);
-  const runnable = config.advisors.filter((advisor) => {
-    const row = diagnosed.find((item) => item.name === advisor.name);
-    const used = state.advisors[advisor.name]?.reviews ?? 0;
-    return row?.available && used < limits.maxReviewsPerAdvisorPerSession;
-  });
-  if (runnable.length === 0) {
-    await record("skipped", "no available advisors");
-    const enabled = diagnosed.filter((row) => row.enabled);
-    const why = enabled.length
-      ? enabled.map((row) => `${row.name}: ${row.available ? "session review limit reached" : row.error}`).join("; ")
-      : "no advisor is enabled";
-    return formatNotReviewed(why);
-  }
-
-  let ignoredPaths;
-  try {
-    ignoredPaths = await deps.gitIgnoredPaths(state.projectRoot, { env });
-  } catch {
-    await record("failed", "could not list the paths git ignores");
-    return formatNotReviewed("could not list the paths git ignores");
-  }
-
-  let diff;
-  try {
-    const probe = await deps.createReviewTools({
-      root: state.projectRoot,
-      exclude: config.exclude,
-      observations: [],
-      pluginData: session.pluginData,
-      credentialDir: credDir,
-      secrets,
-      ignoredPaths
-    });
-    diff = await deps.turnDiff(state.projectRoot, turn.baseTree, head, { env, isExcluded: probe.excluded });
-  } catch {
-    await record("failed", "could not compute the diff");
-    return formatNotReviewed("could not compute the diff");
-  }
-  // Every changed path, shown or not, must match for a turn to be skipped.
-  const changed = [...diff.files.map((file) => file.path), ...diff.omitted, ...diff.unshown];
-  if (gate.skipWhenOnly?.length && changed.length) {
-    const skip = (typeof ignoreFactory === "function" ? ignoreFactory : ignoreFactory.default)().add(gate.skipWhenOnly);
-    if (changed.every((file) => skip.ignores(file))) {
-      state.reviewed.push(key);
-      await record("skipped", "only files matching gate.skipWhenOnly changed");
-      return "";
-    }
-  }
-  if (diff.files.length === 0) {
-    state.reviewed.push(key);
-    await record("skipped", "only excluded files changed");
-    return "";
-  }
-  const files = diff.files.map((file) => ({ ...file, eventId: `diff:${file.path}`, text: sanitizeText(file.text, secrets) }));
   const round = state.rounds.count + 1;
   const previous =
     round > 1 && state.last?.promptId === promptId && Array.isArray(state.last?.findings)
       ? state.last.findings.map(({ severity, advisor, note }) => ({ severity, advisor, note }))
       : [];
-  const turnContext = {
-    request: truncateLabeled(sanitizeText(turn.request ?? "", secrets), USER_TEXT_CAP),
-    final: truncateLabeled(sanitizeText(String(payload.last_assistant_message ?? ""), secrets), USER_TEXT_CAP),
-    round,
-    previous,
-    diff: { files, omitted: diff.omitted, unshown: diff.unshown }
-  };
-  const observations = [{ eventId: "request" }, { eventId: "final" }, ...files.map((file) => ({ eventId: file.eventId }))];
-
-  const results = await runAdvisors({
-    runnable,
+  const review = await reviewMeasured({
     config,
-    state,
     session,
     deps,
     env,
-    secrets,
-    credDir,
-    ignoredPaths,
-    turnContext,
-    observations,
+    projectRoot: state.projectRoot,
+    totals: state.advisors,
+    base: turn.baseTree,
+    head,
+    key,
+    request: turn.request ?? "",
+    final: payload.last_assistant_message,
+    round,
+    previous,
     deadline,
-    tree: head
+    spent,
+    reviewed: state.reviewed
   });
-
-  state.reviewed.push(key);
-  const findings = collectFindings(results);
-  const advisors = results.map((result) => ({
-    name: result.name,
-    provider: result.provider,
-    model: result.model,
-    ok: result.ok,
-    findings: result.findings.length,
-    error: result.error
-  }));
-  const failed = results.filter((result) => !result.ok);
+  if (review.outcome !== "reviewed") {
+    await record(review.outcome, review.reason);
+    return review.notice ? formatNotReviewed(review.notice) : "";
+  }
+  const { findings, advisors, failed, results } = review;
 
   if (gate.mode === "block" && findings.some((item) => item.severity !== "nit")) {
     // Claude keeps working on this prompt, so the turn is not over.
@@ -641,6 +798,212 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
   if (failed.length) return `${JSON.stringify({ systemMessage: formatPartialFailure(failed) })}\n`;
   const names = results.map((result) => result.name).join(", ");
   return `${JSON.stringify({ systemMessage: truncateLabeled(sanitizeText(`cross-model-advisor: no findings from ${names}`), USER_SUMMARY_CHARS) })}\n`;
+}
+
+/**
+ * Identifies one Stop to both Stop hooks, which start together with the same
+ * payload.
+ *
+ * @param {any} payload
+ */
+export function stopKeyOf(payload) {
+  return createHash("sha256")
+    .update(JSON.stringify([payload?.prompt_id ?? null, payload?.stop_hook_active === true, String(payload?.last_assistant_message ?? "")]))
+    .digest("hex")
+    .slice(0, 32);
+}
+
+/**
+ * @param {ReturnType<typeof loadState> extends Promise<infer T> ? T : never} state
+ * @param {string | null} user
+ * @param {string | null} [context]
+ */
+function pushNotice(state, user, context = null) {
+  state.advise.notices = [...state.advise.notices, { id: randomUUID(), at: Date.now(), user, context }].slice(-MAX_NOTICES);
+}
+
+/**
+ * Both outputs' user messages, one after the other; the first output's
+ * decision, if any, stands.
+ *
+ * @param {string} first
+ * @param {string} second
+ */
+function joinHookOutput(first, second) {
+  if (!second) return first;
+  if (!first) return second;
+  const a = JSON.parse(first);
+  const b = JSON.parse(second);
+  const systemMessage = [a.systemMessage, b.systemMessage].filter(Boolean).join("\n");
+  return `${JSON.stringify({ ...a, ...(systemMessage ? { systemMessage } : {}) })}\n`;
+}
+
+/**
+ * After every Stop: in advise mode, record it so its background review stops
+ * waiting even when there is nothing to review, and show the user what
+ * earlier background reviews left (Claude gets its part with the next prompt).
+ *
+ * @param {any} payload
+ * @param {string} out
+ * @param {{ env?: NodeJS.ProcessEnv, deps?: Partial<typeof defaultDeps> }} [options]
+ */
+async function afterStop(payload, out, { env = process.env, deps: overrides = {} } = {}) {
+  if (!payload || typeof payload !== "object" || payload.agent_id) return out;
+  const deps = { ...defaultDeps, ...overrides };
+  const session = sessionFrom(env, payload);
+  const seen = await loadState(session.dir);
+  if (!seen.enabled) return out;
+  const advise = await deps.loadConfig({ env }).then(
+    (config) => config.gate.mode === "advise",
+    () => false
+  );
+  if (!advise && !seen.advise.notices.some((notice) => notice.user)) return out;
+  const stopKey = stopKeyOf(payload);
+  const notices = await updateState(session.dir, (state) => {
+    if (advise && !state.advise.stops.some((stop) => stop.stopKey === stopKey)) {
+      state.advise.stops = [...state.advise.stops, { stopKey, at: deps.now(), job: null }].slice(-MAX_ADVISE_STOPS);
+    }
+    return takeNotices(state, { context: false });
+  });
+  return joinHookOutput(out, notices);
+}
+
+/**
+ * Advise mode's background review: the asyncRewake Stop hook. Starts with the
+ * Stop gate, waits for it to measure the turn, reviews it with the same checks
+ * as the gate, and returns the text that wakes Claude when a blocker is found
+ * (the hook exits 2 with it) or null. Everything else becomes a notice for the
+ * user's next prompt, since Claude Code discards this hook's own output.
+ *
+ * @param {any} payload
+ * @param {{ env?: NodeJS.ProcessEnv, deps?: Partial<typeof defaultDeps>, pollMs?: number, waitMs?: number }} [options]
+ * @returns {Promise<string | null>}
+ */
+export async function runAdvise(payload, { env = process.env, deps: overrides = {}, pollMs = 100, waitMs = ADVISE_WAIT_MS } = {}) {
+  const deps = { ...defaultDeps, ...overrides };
+  const started = deps.now();
+  const deadline = started + STOP_REVIEW_BUDGET_MS;
+  if (!payload || typeof payload !== "object" || payload.agent_id) return null;
+  const session = sessionFrom(env, payload);
+  let state = await loadState(session.dir);
+  if (!state.enabled || !state.projectRoot) return null;
+  let config;
+  try {
+    config = await deps.loadConfig({ env });
+  } catch {
+    return null; // The Stop gate reports an invalid configuration.
+  }
+  if (config.gate.mode !== "advise") return null;
+
+  const stopKey = stopKeyOf(payload);
+  for (;;) {
+    if (state.advise.stops.some((stop) => stop.stopKey === stopKey) || deps.now() - started > waitMs) break;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    state = await loadState(session.dir);
+  }
+  const claimed = await updateState(session.dir, (fresh) => {
+    const stop = fresh.advise.stops.find((item) => item.stopKey === stopKey);
+    if (!stop) return null;
+    if (!stop.job || stop.job.status !== "queued") {
+      if (!stop.job) fresh.advise.stops = fresh.advise.stops.filter((item) => item !== stop);
+      return null;
+    }
+    stop.job.status = "running";
+    return { job: { ...stop.job }, totals: structuredClone(fresh.advisors), wakes: fresh.advise.wakes, last: fresh.last };
+  });
+  if (!claimed) return null;
+
+  const { job } = claimed;
+  const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
+  const maxWakes = config.gate.maxRounds;
+  const round = Math.min(claimed.wakes + 1, maxWakes);
+  // A turn Claude was woken for is reviewed with the findings that woke it.
+  const previous =
+    job.wake && Array.isArray(claimed.last?.findings)
+      ? claimed.last.findings.map(({ severity, advisor, note }) => ({ severity, advisor, note }))
+      : [];
+  /** @type {Record<string, AdvisorUsage>} */
+  const spent = {};
+  /** @type {string[]} */
+  const reviewed = [];
+  let review;
+  try {
+    review = await reviewMeasured({
+      config,
+      session,
+      deps,
+      env,
+      projectRoot: state.projectRoot,
+      totals: claimed.totals,
+      base: job.base,
+      head: job.head,
+      key: job.key,
+      request: job.request,
+      final: payload.last_assistant_message,
+      round,
+      previous,
+      deadline,
+      spent,
+      reviewed
+    });
+  } catch (error) {
+    await createErrorLog(session.dir).record(error).catch(() => {});
+    review = { outcome: "failed", reason: "the background review failed", notice: "the background review failed" };
+  }
+
+  return updateState(session.dir, (fresh) => {
+    fresh.advise.stops = fresh.advise.stops.filter((item) => item.stopKey !== stopKey);
+    fresh.reviewed = [...new Set([...fresh.reviewed, ...reviewed])];
+    addUsage(fresh, spent);
+    const at = deps.now();
+    if (review.outcome !== "reviewed") {
+      const entry = { at, promptId, outcome: review.outcome, reason: `background: ${review.reason}` };
+      if (review.outcome === "skipped") fresh.lastSkip = entry;
+      else fresh.last = entry;
+      if (review.notice) pushNotice(fresh, `cross-model-advisor: an earlier turn was not reviewed in the background (${review.notice})`);
+      return null;
+    }
+    const { findings, advisors, failed, results } = review;
+    const blocker = findings.some((item) => item.severity === "blocker");
+    const record = (outcome, reason) => {
+      fresh.last = { at, promptId, outcome, reason, round, findings, advisors };
+    };
+    if (blocker && fresh.enabled && fresh.advise.wakes < maxWakes) {
+      fresh.advise.wakes += 1;
+      const rounds = { round: fresh.advise.wakes, maxRounds: maxWakes };
+      record("woke", "a blocker found in the background woke Claude");
+      pushNotice(
+        fresh,
+        formatBackgroundCard(`a background review woke Claude with ${findings.length} finding${findings.length === 1 ? "" : "s"} on an earlier turn (wake ${rounds.round} of at most ${rounds.maxRounds})`, findings, failed)
+      );
+      return formatWakeReason(findings, rounds);
+    }
+    if (findings.length) {
+      const limited = blocker ? `; not waking Claude again before your next prompt (limit ${maxWakes})` : "";
+      record("reported", blocker ? "the wake limit was reached" : "findings shown with the next prompt");
+      pushNotice(
+        fresh,
+        formatBackgroundCard(`${findings.length} finding${findings.length === 1 ? "" : "s"} from the background review of an earlier turn${limited}`, findings, failed),
+        formatNoticeContext(findings)
+      );
+      return null;
+    }
+    if (failed.length === results.length) {
+      const detail = failed.map((result) => `${result.name}: ${result.error}`).join("; ");
+      record("failed", "every advisor failed");
+      pushNotice(fresh, truncateLabeled(sanitizeText(`cross-model-advisor: the background review failed, so an earlier turn was not reviewed (${detail})`), USER_SUMMARY_CHARS));
+      return null;
+    }
+    record("passed", failed.length ? "no findings from the advisors that completed" : "no findings");
+    const names = results.filter((result) => result.ok).map((result) => result.name).join(", ");
+    pushNotice(
+      fresh,
+      failed.length
+        ? formatBackgroundCard(`no findings on an earlier turn, but ${notReviewedBy(failed)}`, [], [])
+        : truncateLabeled(sanitizeText(`cross-model-advisor: no findings from ${names} on an earlier turn`), USER_SUMMARY_CHARS)
+    );
+    return null;
+  });
 }
 
 /**
@@ -730,10 +1093,12 @@ export async function runReview(env, { base = null } = {}, overrides = {}) {
     diff: { files, omitted: diff.omitted, unshown: diff.unshown }
   };
   const observations = [{ eventId: "request" }, ...files.map((file) => ({ eventId: file.eventId }))];
+  /** @type {Record<string, AdvisorUsage>} */
+  const spent = {};
   const results = await runAdvisors({
     runnable,
     config,
-    state,
+    spent,
     session,
     deps,
     env,
@@ -746,7 +1111,7 @@ export async function runReview(env, { base = null } = {}, overrides = {}) {
     tree: head,
     projectRoot
   });
-  await saveState(session.dir, state);
+  await updateState(session.dir, (fresh) => addUsage(fresh, spent));
   return {
     ...report,
     files: files.map((file) => file.path),
@@ -783,15 +1148,14 @@ export async function runOn(env, overrides = {}) {
   }
   const advisors = await diagnoseAdvisors(config, env, deps);
   const enabled = advisors.some((row) => row.available);
-  await ensurePrivateDir(session.dir);
-  const state = await loadState(session.dir);
-  state.enabled = enabled;
-  state.optedOut = false;
-  state.projectRoot = projectRoot;
-  // The prompt that ran /on was submitted while the gate was off.
-  state.turn = { promptId: null, control: true };
-  state.rounds = { promptId: null, count: 0 };
-  await saveState(session.dir, state);
+  await updateState(session.dir, (state) => {
+    state.enabled = enabled;
+    state.optedOut = false;
+    state.projectRoot = projectRoot;
+    // The prompt that ran /on was submitted while the gate was off.
+    state.turn = { promptId: null, control: true };
+    state.rounds = { promptId: null, count: 0 };
+  });
   await pruneSessions(session.pluginData, session.sessionId, deps.now());
   return { ok: true, enabled, projectRoot, gate: config.gate, limits: config.limits, advisors, disclosure: DISCLOSURE };
 }
@@ -872,6 +1236,30 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       }
     }
     process.exitCode = 0;
+    return;
+  }
+  if (op === "advise" && argv.length === 1) {
+    let payload = null;
+    let wake = null;
+    try {
+      const raw = await readStdin(process.stdin);
+      payload = raw.trim() ? JSON.parse(raw) : null;
+      wake = await runAdvise(payload, { env });
+    } catch (error) {
+      try {
+        const session = sessionFrom(env, payload ?? {});
+        await ensurePrivateDir(session.dir);
+        await createErrorLog(session.dir).record(error);
+      } catch {
+        // nothing more to do without a session
+      }
+    }
+    // Exit 2 is how an asyncRewake hook wakes Claude; its stderr is the
+    // message. Exit explicitly once stderr has flushed: a lingering handle,
+    // such as an HTTP keep-alive socket, must not hold the wake back until
+    // Claude Code's timeout kills this hook.
+    if (wake) process.stderr.write(wake, () => process.exit(2));
+    else process.exit(0);
     return;
   }
   const reviewArgs =

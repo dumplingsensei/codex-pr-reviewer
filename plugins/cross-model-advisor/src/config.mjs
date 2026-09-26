@@ -68,7 +68,7 @@ export const DEFAULT_LIMITS = Object.freeze({
  * blockers; `report` only shows findings to the user. `maxRounds` bounds how
  * many times one prompt can be sent back.
  */
-export const GATE_MODES = Object.freeze(["block", "report"]);
+export const GATE_MODES = Object.freeze(["block", "report", "advise"]);
 export const DEFAULT_GATE = Object.freeze({ mode: "block", maxRounds: 2 });
 const GATE_KEYS = Object.freeze(["mode", "maxRounds", "autoOn", "skipWhenOnly"]);
 const MAX_GATE_LIST = 64;
@@ -522,7 +522,7 @@ function assertStringList(value, label, check) {
  *   advisors: object[],
  *   exclude: string[],
  *   limits: typeof DEFAULT_LIMITS,
- *   gate: { mode: "block" | "report", maxRounds: number, autoOn?: string[], skipWhenOnly?: string[] }
+ *   gate: { mode: "block" | "report" | "advise", maxRounds: number, autoOn?: string[], skipWhenOnly?: string[] }
  * }}
  */
 export function validateConfig(value) {

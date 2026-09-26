@@ -6,6 +6,24 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.23
+
+- New `gate.mode: "advise"`, modelled on Oh My Pi's advisor: Claude stops at
+  once and the advisors review the turn in the background, through a second,
+  `asyncRewake` Stop hook. A `blocker` wakes Claude to check and fix it (at
+  most `gate.maxRounds` times before your next prompt), telling it to finish
+  anything you asked since and to tell you in one line what was flagged; you
+  also get a card with the findings. Other findings, failures, and clean
+  results reach you with your next prompt (or at the end of the turn in
+  progress), and Claude gets the findings as context it should not act on
+  unless they bear on your request. The Stop gate still measures each turn at
+  Stop and hands it over, so the background review sees exactly that turn and
+  reads its snapshot. Verified in a real Claude Code host (a new
+  `advise-wake` phase of the host smoke test).
+- Session state is now changed under a lock (load, change, save), because the
+  background review writes beside the other hooks; a test with eight
+  processes loses no update, where unlocked writes kept 13 of 80.
+
 ## 2.1.22
 
 - The advisors' read, list, and search tools now read the reviewed snapshot's

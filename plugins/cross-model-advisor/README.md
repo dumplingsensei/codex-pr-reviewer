@@ -78,14 +78,18 @@ network bootstrap at install time. From a local checkout,
      stop and you are told so. A rebuttal without further edits is accepted.
    - Only `nit`s, or `gate.mode: "report"`: Claude stops, and the findings are
      shown to you.
+   - `gate.mode: "advise"`, like Oh My Pi's advisor: Claude stops at once and
+     the advisors review in the background. A `blocker` wakes Claude to fix it
+     (at most `gate.maxRounds` times per prompt of yours); other findings reach
+     you, and Claude, with your next prompt.
    - Nothing found: Claude stops, and you are told which advisors found nothing.
 5. **Failures fail open.** A timeout, provider error, failed login, or no usable
    advisor lets Claude stop, tells you what was not reviewed and why, and records
    the error for `status`. A failed review is never reported as a pass.
 
-You wait for the review: a turn that changed files ends 10 to 120 seconds later
-than it otherwise would, and sometimes with another round of fixes. A turn that
-changed nothing costs nothing.
+Outside advise mode you wait for the review: a turn that changed files ends 10
+to 120 seconds later than otherwise, sometimes with another round of fixes. A
+turn that changed nothing costs nothing.
 
 The project must be a git work tree. The gate needs git to measure what
 changed, so `on` refuses a project outside one. Snapshots of untracked files
@@ -228,8 +232,8 @@ default. Choose real model IDs. An example and schema also ship under
 }
 ```
 
-`gate.mode` is `block` or `report`; `gate.maxRounds` (1 to 5) bounds how many
-times one prompt can be sent back. `limits.reviewTimeoutSeconds` (at most 240)
+`gate.mode` is `block`, `report`, or `advise`; `gate.maxRounds` (1 to 5) bounds
+how often one prompt can be sent back, or woken. `limits.reviewTimeoutSeconds` (at most 240)
 is each advisor's deadline; all advisors share 270 of the hook's 300 seconds.
 `gate.autoOn` lists absolute project roots where the gate turns on at session
 start (`off` still wins); `gate.skipWhenOnly` (gitignore patterns, e.g. `*.md`)

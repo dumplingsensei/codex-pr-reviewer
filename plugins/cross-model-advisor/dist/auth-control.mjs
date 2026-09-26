@@ -98619,7 +98619,7 @@ var DEFAULT_LIMITS = Object.freeze({
   maxOutputTokens: 1500,
   maxReviewsPerAdvisorPerSession: 40
 });
-var GATE_MODES = Object.freeze(["block", "report"]);
+var GATE_MODES = Object.freeze(["block", "report", "advise"]);
 var DEFAULT_GATE = Object.freeze({ mode: "block", maxRounds: 2 });
 var GATE_KEYS = Object.freeze(["mode", "maxRounds", "autoOn", "skipWhenOnly"]);
 var MAX_GATE_LIST = 64;

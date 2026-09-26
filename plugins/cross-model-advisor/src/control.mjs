@@ -18,16 +18,15 @@ import { fileURLToPath } from "node:url";
 import { loadConfig, validateRoot } from "./config.mjs";
 import { gitTopLevel, snapshotTree } from "./snapshot.mjs";
 import { classifyPrompt } from "./session/classifier.mjs";
-import { MAX_STDIN_BYTES, USER_TEXT_CAP } from "./session/constants.mjs";
+import { MAX_STDIN_BYTES, USER_TEXT_CAP, WAKE_MARKER } from "./session/constants.mjs";
 import {
-  ensurePrivateDir,
   explicitPluginData,
   readIdentity,
   sessionDir,
   validateSessionId
 } from "./session/paths.mjs";
 import { sanitizeText, truncateLabeled } from "./session/sanitize.mjs";
-import { loadState, saveState } from "./session/state.mjs";
+import { loadState, takeNotices, updateState } from "./session/state.mjs";
 
 const USAGE = "usage: control.mjs hook | session-start | off|status --plugin-data <path>";
 
@@ -46,49 +45,61 @@ function sessionFrom(env, payload = {}) {
 }
 
 /**
- * UserPromptSubmit. Returns nothing: this hook never adds context.
+ * UserPromptSubmit. Records this prompt's turn, and hands over what advise
+ * mode's background review left: a card for the user and, for findings it did
+ * not wake Claude for, context for Claude. Returns hook stdout.
  *
  * @param {any} payload
  * @param {{ env?: NodeJS.ProcessEnv, snapshot?: typeof snapshotTree, now?: () => number }} [options]
+ * @returns {Promise<string>}
  */
 export async function recordPrompt(payload, { env = process.env, snapshot = snapshotTree, now = Date.now } = {}) {
-  if (!payload || typeof payload !== "object" || payload.agent_id) return;
+  if (!payload || typeof payload !== "object" || payload.agent_id) return "";
   const session = sessionFrom(env, payload);
-  const state = await loadState(session.dir);
-  if (!state.enabled || !state.projectRoot) return;
+  // Only this hook and the Stop gate change the turn, and Claude Code never
+  // runs them at once, so the turn can be decided before taking the lock.
+  const seen = await loadState(session.dir);
+  if (!seen.enabled || !seen.projectRoot) return "";
   const prompt = typeof payload.prompt === "string" ? payload.prompt : "";
   const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
-  const current = state.turn;
+  const wake = prompt.includes(WAKE_MARKER);
+  const current = seen.turn;
+  let turn;
   // A message that arrives before the turn's Stop (typed mid-turn, a
   // notification injected at a step boundary, or a prompt after an interrupted
   // turn) extends the turn: re-snapshotting here would drop the edits made
   // before it from the review.
   if (current && !current.control && !current.stopped) {
     const addition = `\n\n[Also sent during this turn]\n${truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP / 2)}`;
-    current.request = truncateLabeled(current.request ?? "", USER_TEXT_CAP - addition.length) + addition;
-    current.promptId = promptId ?? current.promptId;
-    await saveState(session.dir, state);
-    return;
-  }
-  if (classifyPrompt(prompt).kind === "control") {
+    turn = {
+      ...current,
+      request: truncateLabeled(current.request ?? "", USER_TEXT_CAP - addition.length) + addition,
+      promptId: promptId ?? current.promptId
+    };
+  } else if (classifyPrompt(prompt).kind === "control") {
     // Recorded, so the gate can tell a control prompt from one this hook missed.
-    state.turn = { promptId, control: true };
-    await saveState(session.dir, state);
-    return;
+    turn = { promptId, control: true };
+  } else {
+    turn = {
+      promptId,
+      baseTree: /** @type {string | null} */ (null),
+      request: truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP),
+      at: now(),
+      ...(wake ? { wake: true } : {})
+    };
+    try {
+      turn.baseTree = await snapshot(seen.projectRoot, session.dir, { env });
+    } catch (error) {
+      turn.error = error instanceof Error ? error.message : "snapshot failed";
+    }
   }
-  const turn = {
-    promptId,
-    baseTree: /** @type {string | null} */ (null),
-    request: truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP),
-    at: now()
-  };
-  try {
-    turn.baseTree = await snapshot(state.projectRoot, session.dir, { env });
-  } catch (error) {
-    turn.error = error instanceof Error ? error.message : "snapshot failed";
-  }
-  state.turn = turn;
-  await saveState(session.dir, state);
+  return updateState(session.dir, (state) => {
+    if (!state.enabled) return "";
+    state.turn = turn;
+    // The user's own prompt, not a wake, lets the background review wake Claude again.
+    if (!wake) state.advise.wakes = 0;
+    return takeNotices(state, { context: true });
+  });
 }
 
 /**
@@ -96,12 +107,11 @@ export async function recordPrompt(payload, { env = process.env, snapshot = snap
  */
 export async function runOff(env) {
   const session = sessionFrom(env);
-  await ensurePrivateDir(session.dir);
-  const state = await loadState(session.dir);
-  state.enabled = false;
-  state.optedOut = true;
-  state.turn = null;
-  await saveState(session.dir, state);
+  await updateState(session.dir, (state) => {
+    state.enabled = false;
+    state.optedOut = true;
+    state.turn = null;
+  });
   return { ok: true, enabled: false };
 }
 
@@ -132,12 +142,15 @@ export async function runSessionStart(payload, { env = process.env } = {}) {
     if (resolved === projectRoot) match = true;
   }
   if (!match) return "";
-  await ensurePrivateDir(session.dir);
-  state.enabled = true;
-  state.projectRoot = projectRoot;
-  state.turn = null;
-  state.rounds = { promptId: null, count: 0 };
-  await saveState(session.dir, state);
+  const turnedOn = await updateState(session.dir, (fresh) => {
+    if (fresh.enabled || fresh.optedOut) return false;
+    fresh.enabled = true;
+    fresh.projectRoot = projectRoot;
+    fresh.turn = null;
+    fresh.rounds = { promptId: null, count: 0 };
+    return true;
+  });
+  if (!turnedOn) return "";
   const notice = `cross-model-advisor: review gate on for ${projectRoot} (gate.autoOn). Changed turns go to your configured advisors; /cross-model-advisor:off stops it for this session.`;
   return `${JSON.stringify({ systemMessage: notice })}\n`;
 }
@@ -182,7 +195,8 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   if (op === "hook" && argv.length === 1) {
     try {
       const raw = await readStdin(process.stdin);
-      if (raw.trim()) await recordPrompt(JSON.parse(raw), { env });
+      const out = raw.trim() ? await recordPrompt(JSON.parse(raw), { env }) : "";
+      if (out) process.stdout.write(out);
     } catch {
       // Fail open: the gate lets an unsnapshotted turn stop and says it was not reviewed.
     }

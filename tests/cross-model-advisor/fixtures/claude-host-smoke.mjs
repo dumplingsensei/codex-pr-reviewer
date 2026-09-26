@@ -11,6 +11,9 @@
  *                        keeps working instead of stopping
  *   no-change            a turn that edits nothing makes no advisor request
  *   off                  after /cross-model-advisor:off, edits are not reviewed
+ *   advise-wake          in advise mode Claude stops without waiting, the
+ *                        background review finds a blocker, and the
+ *                        asyncRewake hook wakes Claude into a new turn
  *
  * Every phase runs with a decoy CLAUDE_PLUGIN_DATA in Claude's environment, the
  * way openai/codex-plugin-cc exports its own into every Bash command, and
@@ -23,7 +26,8 @@
  *   CROSS_MODEL_ADVISOR_HOST_SMOKE=1 node tests/cross-model-advisor/fixtures/claude-host-smoke.mjs --run
  *
  * Optional:
- *   --phase <all|block-then-continue|no-change|off>
+ *   --phase <all|block-then-continue|no-change|off|advise-wake>
+ *   --model <id>             host model, default: the host's default
  *   --claude <path>          default: claude on PATH
  *   --plugin-dir <path>      default: <repo>/plugins/cross-model-advisor
  *   --timeout-ms <n>         per host process, default 240000
@@ -48,7 +52,7 @@ const DEFAULT_TIMEOUT_MS = 240_000;
 const API_KEY_ENV = "CMA_SMOKE_ADVISOR_KEY";
 const API_KEY_VALUE = "sk-cma-smoke-loopback-not-a-secret";
 const MODEL_ID = "cma-smoke";
-const PHASES = ["block-then-continue", "no-change", "off"];
+const PHASES = ["block-then-continue", "no-change", "off", "advise-wake"];
 const ALPHA = "export function last(items) {\n  return items[items.length - 1];\n}\n";
 const EDIT_PROMPT =
   "Add an exported function first(items) to src/alpha.js that returns items[0]. Edit the file directly with the Edit or Write tool. Do not run commands or tests. Then reply in one sentence.";
@@ -97,7 +101,8 @@ function parseArgs(argv) {
     phase: "all",
     claude: process.env.CLAUDE_HOST_BIN || "claude",
     pluginDir: path.join(repoRoot, "plugins", "cross-model-advisor"),
-    timeoutMs: DEFAULT_TIMEOUT_MS
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    model: null
   };
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
@@ -111,6 +116,7 @@ function parseArgs(argv) {
     else if (token === "--phase") out.phase = value();
     else if (token === "--claude") out.claude = value();
     else if (token === "--plugin-dir") out.pluginDir = path.resolve(value());
+    else if (token === "--model") out.model = value();
     else if (token === "--timeout-ms") {
       out.timeoutMs = Number(value());
       if (!Number.isInteger(out.timeoutMs) || out.timeoutMs <= 0) {
@@ -158,6 +164,7 @@ async function main(options) {
       hostEnv,
       loopback,
       timeoutMs: options.timeoutMs,
+      model: options.model,
       capturesDir: path.join(root, "captures"),
       root
     };
@@ -208,7 +215,7 @@ async function runPhase(phase, ctx, sourcePlugin) {
   git("init", "-q");
   git("add", "-A");
   git("commit", "-qm", "init");
-  writeAdvisorConfig(configDir, ctx.loopback.baseUrl);
+  writeAdvisorConfig(configDir, ctx.loopback.baseUrl, phase === "advise-wake" ? "advise" : "block");
   clonePlugin(sourcePlugin, pluginDir, { configDir, pluginData });
   const settingsFile = path.join(dir, "settings.json");
   fs.writeFileSync(settingsFile, `${JSON.stringify({ hasTrustDialogAccepted: true })}\n`);
@@ -217,12 +224,13 @@ async function runPhase(phase, ctx, sourcePlugin) {
   // Another plugin exporting its CLAUDE_PLUGIN_DATA into every Bash command.
   const env = { ...ctx.hostEnv, CLAUDE_PLUGIN_DATA: decoyData };
   const run = { ...ctx, projectDir, pluginDir, settingsFile, mcpFile, env, name: phase };
-  ctx.loopback.reset();
+  ctx.loopback.reset(phase === "advise-wake" ? "blocker" : "concern");
 
   try {
     if (phase === "block-then-continue") await phaseBlockThenContinue(run, pluginData);
     else if (phase === "no-change") await phaseNoChange(run, pluginData);
     else if (phase === "off") await phaseOff(run);
+    else if (phase === "advise-wake") await phaseAdviseWake(run, pluginData);
     if (fs.existsSync(path.join(decoyData, "sessions"))) {
       throw new AssertionError("session state landed in another plugin's exported CLAUDE_PLUGIN_DATA");
     }
@@ -281,6 +289,26 @@ async function phaseOff(ctx) {
   if (ctx.loopback.requests.length !== 0) {
     throw new AssertionError(`the gate reviewed ${ctx.loopback.requests.length} time(s) after off`);
   }
+}
+
+async function phaseAdviseWake(ctx, pluginData) {
+  // Two prompts, then one more turn that nobody sent: the wake.
+  const host = await runHost(ctx, ["/cross-model-advisor:on", EDIT_PROMPT], { extraResults: 1 });
+  const stops = hookResponses(host, "Stop");
+  if (stops.some((event) => parseHookOutput(event)?.decision === "block")) {
+    throw new AssertionError("a Stop hook blocked in advise mode");
+  }
+  const reviews = ctx.loopback.reviews();
+  if (reviews.length < 1) throw new AssertionError("the background review never reached the advisor");
+  if (!reviews[0].includes("Add an exported function first(items)")) throw new AssertionError("the advisor did not receive the request");
+  const cards = hookResponses(host, "UserPromptSubmit").map((event) => parseHookOutput(event)?.systemMessage ?? "");
+  if (!cards.some((text) => /background review woke Claude/.test(text) && text.includes(FINDING_NOTE))) {
+    throw new AssertionError(`the wake was not shown to the user; prompt hook output: ${cards.join(" | ")}`);
+  }
+  const results = host.events.filter((event) => event.type === "result");
+  if (results.length < 3) throw new AssertionError(`expected a woken third turn, saw ${results.length} result(s)`);
+  const state = readState(pluginData, host.sessionId);
+  if (state?.advise?.wakes !== 1) throw new AssertionError(`expected one wake, state has ${JSON.stringify(state?.advise)}`);
 }
 
 function resolveClaude(bin) {
@@ -342,7 +370,7 @@ function clonePlugin(source, dest, { configDir, pluginData }) {
   }
 }
 
-function writeAdvisorConfig(configDir, baseUrl) {
+function writeAdvisorConfig(configDir, baseUrl, mode) {
   const config = {
     version: 2,
     providers: {
@@ -372,7 +400,7 @@ function writeAdvisorConfig(configDir, baseUrl) {
       maxOutputTokens: 400,
       maxReviewsPerAdvisorPerSession: 40
     },
-    gate: { mode: "block", maxRounds: 2 }
+    gate: { mode, maxRounds: 2 }
   };
   fs.writeFileSync(path.join(configDir, "cross-model-advisor.json"), `${JSON.stringify(config, null, 2)}\n`);
 }
@@ -384,6 +412,7 @@ function writeAdvisorConfig(configDir, baseUrl) {
  */
 function startLoopback() {
   const requests = [];
+  let severity = "concern";
   const server = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -411,7 +440,7 @@ function startLoopback() {
       reply = {
         tool: "advise",
         args: {
-          severity: "concern",
+          severity,
           note: FINDING_NOTE,
           evidence: [{ kind: "observation", eventId: "diff:src/alpha.js", detail: "first() added without an empty-array case" }]
         }
@@ -427,8 +456,10 @@ function startLoopback() {
         requests,
         /** User messages of distinct reviews (each review's first request). */
         reviews: () => [...new Set(requests.map((item) => item.user))],
-        reset() {
+        /** @param {"concern" | "blocker"} next the first review's finding */
+        reset(next) {
           requests.length = 0;
+          severity = next;
         },
         close: () =>
           new Promise((done) => {
@@ -461,9 +492,9 @@ function writeSse(res, reply) {
 
 /**
  * Send `prompts` one at a time on one stream-json session, waiting for each
- * turn's result.
+ * turn's result, then for `extraResults` more turns the host starts itself.
  */
-async function runHost(ctx, prompts) {
+async function runHost(ctx, prompts, { extraResults = 0 } = {}) {
   const sessionId = crypto.randomUUID();
   const streamFile = path.join(ctx.capturesDir, `${ctx.name}.ndjson`);
   const child = spawn(
@@ -490,7 +521,8 @@ async function runHost(ctx, prompts) {
       "--mcp-config",
       ctx.mcpFile,
       "--session-id",
-      sessionId
+      sessionId,
+      ...(ctx.model ? ["--model", ctx.model] : [])
     ],
     { cwd: ctx.projectDir, env: ctx.env, stdio: ["pipe", "pipe", "pipe"], detached: true }
   );
@@ -520,6 +552,14 @@ async function runHost(ctx, prompts) {
       await waitFor(
         () => host.events.filter((event) => event.type === "result").length >= i + 1,
         `result for prompt ${i + 1} (${prompts[i].slice(0, 40)})`,
+        ctx.timeoutMs,
+        () => child.exitCode !== null
+      );
+    }
+    if (extraResults) {
+      await waitFor(
+        () => host.events.filter((event) => event.type === "result").length >= prompts.length + extraResults,
+        `${extraResults} turn(s) the host started itself`,
         ctx.timeoutMs,
         () => child.exitCode !== null
       );

@@ -8,16 +8,15 @@ import { fileURLToPath } from "node:url";
 import { loadConfig, validateRoot } from "./config.mjs";
 import { gitTopLevel, snapshotTree } from "./snapshot.mjs";
 import { classifyPrompt } from "./session/classifier.mjs";
-import { MAX_STDIN_BYTES, USER_TEXT_CAP } from "./session/constants.mjs";
+import { MAX_STDIN_BYTES, USER_TEXT_CAP, WAKE_MARKER } from "./session/constants.mjs";
 import {
-  ensurePrivateDir,
   explicitPluginData,
   readIdentity,
   sessionDir,
   validateSessionId
 } from "./session/paths.mjs";
 import { sanitizeText, truncateLabeled } from "./session/sanitize.mjs";
-import { loadState, saveState } from "./session/state.mjs";
+import { loadState, takeNotices, updateState } from "./session/state.mjs";
 var USAGE = "usage: control.mjs hook | session-start | off|status --plugin-data <path>";
 function sessionFrom(env, payload = {}) {
   const identity = readIdentity(env, payload);
@@ -29,53 +28,58 @@ function sessionFrom(env, payload = {}) {
   return { ...identity, sessionId, dir: sessionDir(identity.pluginData, sessionId) };
 }
 async function recordPrompt(payload, { env = process.env, snapshot = snapshotTree, now = Date.now } = {}) {
-  if (!payload || typeof payload !== "object" || payload.agent_id) return;
+  if (!payload || typeof payload !== "object" || payload.agent_id) return "";
   const session = sessionFrom(env, payload);
-  const state = await loadState(session.dir);
-  if (!state.enabled || !state.projectRoot) return;
+  const seen = await loadState(session.dir);
+  if (!seen.enabled || !seen.projectRoot) return "";
   const prompt = typeof payload.prompt === "string" ? payload.prompt : "";
   const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
-  const current = state.turn;
+  const wake = prompt.includes(WAKE_MARKER);
+  const current = seen.turn;
+  let turn;
   if (current && !current.control && !current.stopped) {
     const addition = `
 
 [Also sent during this turn]
 ${truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP / 2)}`;
-    current.request = truncateLabeled(current.request ?? "", USER_TEXT_CAP - addition.length) + addition;
-    current.promptId = promptId ?? current.promptId;
-    await saveState(session.dir, state);
-    return;
+    turn = {
+      ...current,
+      request: truncateLabeled(current.request ?? "", USER_TEXT_CAP - addition.length) + addition,
+      promptId: promptId ?? current.promptId
+    };
+  } else if (classifyPrompt(prompt).kind === "control") {
+    turn = { promptId, control: true };
+  } else {
+    turn = {
+      promptId,
+      baseTree: (
+        /** @type {string | null} */
+        null
+      ),
+      request: truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP),
+      at: now(),
+      ...wake ? { wake: true } : {}
+    };
+    try {
+      turn.baseTree = await snapshot(seen.projectRoot, session.dir, { env });
+    } catch (error) {
+      turn.error = error instanceof Error ? error.message : "snapshot failed";
+    }
   }
-  if (classifyPrompt(prompt).kind === "control") {
-    state.turn = { promptId, control: true };
-    await saveState(session.dir, state);
-    return;
-  }
-  const turn = {
-    promptId,
-    baseTree: (
-      /** @type {string | null} */
-      null
-    ),
-    request: truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP),
-    at: now()
-  };
-  try {
-    turn.baseTree = await snapshot(state.projectRoot, session.dir, { env });
-  } catch (error) {
-    turn.error = error instanceof Error ? error.message : "snapshot failed";
-  }
-  state.turn = turn;
-  await saveState(session.dir, state);
+  return updateState(session.dir, (state) => {
+    if (!state.enabled) return "";
+    state.turn = turn;
+    if (!wake) state.advise.wakes = 0;
+    return takeNotices(state, { context: true });
+  });
 }
 async function runOff(env) {
   const session = sessionFrom(env);
-  await ensurePrivateDir(session.dir);
-  const state = await loadState(session.dir);
-  state.enabled = false;
-  state.optedOut = true;
-  state.turn = null;
-  await saveState(session.dir, state);
+  await updateState(session.dir, (state) => {
+    state.enabled = false;
+    state.optedOut = true;
+    state.turn = null;
+  });
   return { ok: true, enabled: false };
 }
 async function runSessionStart(payload, { env = process.env } = {}) {
@@ -96,12 +100,15 @@ async function runSessionStart(payload, { env = process.env } = {}) {
     if (resolved === projectRoot) match = true;
   }
   if (!match) return "";
-  await ensurePrivateDir(session.dir);
-  state.enabled = true;
-  state.projectRoot = projectRoot;
-  state.turn = null;
-  state.rounds = { promptId: null, count: 0 };
-  await saveState(session.dir, state);
+  const turnedOn = await updateState(session.dir, (fresh) => {
+    if (fresh.enabled || fresh.optedOut) return false;
+    fresh.enabled = true;
+    fresh.projectRoot = projectRoot;
+    fresh.turn = null;
+    fresh.rounds = { promptId: null, count: 0 };
+    return true;
+  });
+  if (!turnedOn) return "";
   const notice = `cross-model-advisor: review gate on for ${projectRoot} (gate.autoOn). Changed turns go to your configured advisors; /cross-model-advisor:off stops it for this session.`;
   return `${JSON.stringify({ systemMessage: notice })}
 `;
@@ -134,7 +141,8 @@ async function main(argv = process.argv.slice(2), env = process.env) {
   if (op === "hook" && argv.length === 1) {
     try {
       const raw = await readStdin(process.stdin);
-      if (raw.trim()) await recordPrompt(JSON.parse(raw), { env });
+      const out = raw.trim() ? await recordPrompt(JSON.parse(raw), { env }) : "";
+      if (out) process.stdout.write(out);
     } catch {
     }
     process.exitCode = 0;

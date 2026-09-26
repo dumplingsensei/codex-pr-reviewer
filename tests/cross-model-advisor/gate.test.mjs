@@ -17,10 +17,11 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const modules = path.join(here, "..", "..", "plugins", "cross-model-advisor", "dist", "modules");
 const load = (rel) => import(pathToFileURL(path.join(modules, rel)).href);
 
-const { runStop, runOn, runReview } = await load("gate.mjs");
+const { runStop, runOn, runReview, runAdvise } = await load("gate.mjs");
 const { recordPrompt, runOff, runStatus, runSessionStart } = await load("control.mjs");
 const { reviewBaseTree, snapshotTree, turnDiff } = await load("snapshot.mjs");
 const { validateConfig } = await load("config.mjs");
+const { loadState, updateState } = await load("session/state.mjs");
 
 const scratchDirs = [];
 after(async () => {
@@ -97,9 +98,17 @@ async function world({ gate, advisors, limits } = {}) {
       script = fn;
     },
     async prompt(text, promptId = `p${++seq}`) {
-      await recordPrompt({ session_id: sessionId, prompt: text, prompt_id: promptId }, { env });
+      const out = await recordPrompt({ session_id: sessionId, prompt: text, prompt_id: promptId }, { env });
+      w.promptOut = out ? JSON.parse(out) : null;
       w.promptId = promptId;
       return promptId;
+    },
+    /** advise mode's background hook, with the payload the Stop gate got */
+    advise(extra = {}, options = {}) {
+      return runAdvise(
+        { session_id: sessionId, prompt_id: w.promptId, last_assistant_message: "Done.", hook_event_name: "Stop", ...extra },
+        { env, deps, pollMs: 5, waitMs: 2_000, ...options }
+      );
     },
     async stop(extra = {}) {
       const out = await runStop(
@@ -113,6 +122,19 @@ async function world({ gate, advisors, limits } = {}) {
   return w;
 }
 
+const finding = (severity, note) => async ({ tools }) => {
+  const result = await tools.call("advise", {
+    severity,
+    note,
+    evidence: [{ kind: "observation", eventId: "diff:src/a.js", detail: "seen in the diff" }]
+  });
+  assert.equal(result, "staged");
+};
+
+/** The prompt Claude Code submits when an asyncRewake hook wakes Claude. */
+const wakePrompt = (stderr) =>
+  `<task-notification>\n<summary>Stop hook feedback</summary>\n</task-notification>\n<system-reminder>\nStop hook blocking error from command "Stop": ${stderr}\n</system-reminder>`;
+
 const concern = (note, eventId = "diff:src/a.js") => async ({ tools }) => {
   const result = await tools.call("advise", {
     severity: "concern",
@@ -121,6 +143,38 @@ const concern = (note, eventId = "diff:src/a.js") => async ({ tools }) => {
   });
   assert.equal(result, "staged");
 };
+
+test("state updates from overlapping processes all land, and a dead holder's lock clears", async () => {
+  const dir = await scratch("cma-state-lock-");
+  const worker = `
+    const { updateState } = await import(${JSON.stringify(pathToFileURL(path.join(modules, "session", "state.mjs")).href)});
+    for (let i = 0; i < 10; i += 1) {
+      await updateState(process.argv[1], (state) => {
+        const entry = (state.advisors.counter ??= { reviews: 0, usage: null, lastError: null });
+        entry.reviews += 1;
+      });
+    }`;
+  const { spawn } = await import("node:child_process");
+  await Promise.all(
+    Array.from({ length: 8 }, () =>
+      new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, ["--input-type=module", "-e", worker, dir], { stdio: "inherit" });
+        child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`worker exited ${code}`))));
+      })
+    )
+  );
+  assert.equal((await loadState(dir)).advisors.counter.reviews, 80);
+
+  // A holder that died without releasing: its pid is gone.
+  await fs.writeFile(path.join(dir, "state.lock"), JSON.stringify({ pid: 2 ** 22 + 12345, token: "dead" }));
+  const started = Date.now();
+  await updateState(dir, (state) => {
+    state.enabled = true;
+  });
+  assert.ok(Date.now() - started < 2_000);
+  assert.equal((await loadState(dir)).enabled, true);
+  await assert.rejects(fs.access(path.join(dir, "state.lock")));
+});
 
 test("a turn without file changes is not reviewed", async () => {
   const w = await world();
@@ -372,6 +426,133 @@ test("advisors read the reviewed snapshot even when files change during the revi
   });
   await w.stop();
   assert.equal(seen, "1|REVIEWED");
+});
+
+test("advise mode: Claude stops at once, and a blocker found in the background wakes it and is shown to the user", async () => {
+  const w = await world({ gate: { mode: "advise", maxRounds: 2 } });
+  await w.prompt("make last() safe");
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+  w.setScript(finding("blocker", "last() now reads past the end"));
+  assert.equal(await w.stop(), null);
+  assert.equal(w.reviews.length, 0);
+  const wake = await w.advise();
+  assert.equal(w.reviews.length, 1);
+  assert.match(wake, /^\[cross-model-advisor background review\] /);
+  assert.match(wake, /reads past the end/);
+  assert.match(wake, /finish that first/);
+  assert.match(wake, /Begin your reply by telling the user/);
+  assert.equal((await w.status()).lastReview.outcome, "woke");
+  // Claude Code submits the wake as a prompt: the user gets the card; Claude already has the findings.
+  await w.prompt(wakePrompt(wake));
+  assert.match(w.promptOut.systemMessage, /a background review woke Claude with 1 finding on an earlier turn \(wake 1 of at most 2\)\n- \[blocker\] correctness: last\(\) now reads past the end/);
+  assert.equal(w.promptOut.hookSpecificOutput, undefined);
+});
+
+test("advise mode: other findings reach the user and Claude once, with the next prompt", async () => {
+  const w = await world({ gate: { mode: "advise", maxRounds: 2 } });
+  await w.prompt("change");
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+  w.setScript(finding("concern", "real bug"));
+  assert.equal(await w.stop(), null);
+  assert.equal(await w.advise(), null);
+  await w.prompt("next task");
+  assert.match(w.promptOut.systemMessage, /1 finding from the background review of an earlier turn\n- \[concern\] correctness: real bug/);
+  const context = w.promptOut.hookSpecificOutput.additionalContext;
+  assert.match(context, /unverified claims/);
+  assert.match(context, /- \[concern\] correctness: real bug \(evidence: diff:src\/a\.js/);
+  assert.equal(w.promptOut.hookSpecificOutput.hookEventName, "UserPromptSubmit");
+  await w.stop();
+  await w.prompt("another");
+  assert.equal(w.promptOut, null);
+});
+
+test("advise mode: a result that lands mid-turn is shown at that turn's Stop, and Claude gets it with the next prompt", async () => {
+  const w = await world({ gate: { mode: "advise", maxRounds: 2 } });
+  await w.prompt("first");
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+  w.setScript(finding("nit", "comment wording"));
+  await w.stop();
+  await w.prompt("second");
+  assert.equal(w.promptOut, null);
+  assert.equal(await w.advise({ prompt_id: "p1" }), null);
+  const shown = await w.stop();
+  assert.match(shown.systemMessage, /1 finding from the background review of an earlier turn/);
+  await w.prompt("third");
+  assert.equal(w.promptOut.systemMessage, undefined);
+  assert.match(w.promptOut.hookSpecificOutput.additionalContext, /comment wording/);
+});
+
+test("advise mode: the background review wakes Claude at most maxRounds times before the user's next prompt", async () => {
+  const w = await world({ gate: { mode: "advise", maxRounds: 1 } });
+  const file = path.join(w.root, "src", "a.js");
+  await w.prompt("change");
+  await fs.appendFile(file, "// one\n");
+  w.setScript(finding("blocker", "first blocker"));
+  await w.stop();
+  const wake = await w.advise();
+  assert.ok(wake);
+
+  // The turn Claude was woken for is reviewed with the findings that woke it, but cannot wake it again.
+  await w.prompt(wakePrompt(wake));
+  await fs.appendFile(file, "// two\n");
+  w.setScript(finding("blocker", "second blocker"));
+  await w.stop({ stop_hook_active: true });
+  assert.equal(await w.advise({ stop_hook_active: true }), null);
+  assert.deepEqual(w.reviews[1].turn.previous.map((item) => item.note), ["first blocker"]);
+  assert.equal((await w.status()).lastReview.reason, "the wake limit was reached");
+
+  // The user's own prompt shows what was held back and allows a wake again.
+  await w.prompt("carry on");
+  assert.match(w.promptOut.systemMessage, /not waking Claude again before your next prompt \(limit 1\)/);
+  await fs.appendFile(file, "// three\n");
+  w.setScript(finding("blocker", "third blocker"));
+  await w.stop();
+  assert.match(await w.advise(), /third blocker/);
+});
+
+test("advise mode: the background review waits for the Stop gate, and ends at once when there is nothing to review", async () => {
+  const w = await world({ gate: { mode: "advise", maxRounds: 2 } });
+  await w.prompt("change");
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+  w.setScript(finding("concern", "found after waiting"));
+  // Both Stop hooks start together; the background one must not run first.
+  const pending = w.advise({}, { waitMs: 10_000 });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(w.reviews.length, 0);
+  await w.stop();
+  assert.equal(await pending, null);
+  assert.equal(w.reviews.length, 1);
+
+  await w.prompt("explain it");
+  await w.stop();
+  let started = Date.now();
+  assert.equal(await w.advise({}, { waitMs: 10_000 }), null);
+  assert.ok(Date.now() - started < 2_000);
+  assert.equal(w.reviews.length, 1);
+
+  const blocking = await world();
+  await blocking.prompt("change");
+  await fs.appendFile(path.join(blocking.root, "src", "a.js"), "// x\n");
+  started = Date.now();
+  assert.equal(await blocking.advise({}, { waitMs: 10_000 }), null);
+  assert.ok(Date.now() - started < 2_000);
+  assert.equal(blocking.reviews.length, 0);
+});
+
+test("advise mode: a background review that fails is reported as not reviewed with the next prompt", async () => {
+  const w = await world({ gate: { mode: "advise", maxRounds: 2 } });
+  await w.prompt("change");
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+  w.deps.reviewApi = async () => {
+    const error = new Error("OAuth authentication failed");
+    error.code = "auth";
+    throw error;
+  };
+  await w.stop();
+  assert.equal(await w.advise(), null);
+  await w.prompt("next");
+  assert.match(w.promptOut.systemMessage, /the background review failed, so an earlier turn was not reviewed \(correctness: auth:/);
+  assert.equal((await w.status()).lastReview.outcome, "failed");
 });
 
 test("a partial failure with no findings is not reported as a silent pass", async () => {

@@ -20,7 +20,7 @@ Run it exactly as written. Claude Code substitutes the plugin-data path; do not 
 Show the result without dropping fields:
 
 - whether the gate is `enabled`, and its `projectRoot`
-- `lastReview`: when it ran, its `outcome` (`blocked` sent Claude back, `reported` showed findings to the user, `passed` found nothing, `failed` could not review), the review round, every finding with its advisor, severity, note, and evidence, and each advisor's result or error
+- `lastReview`: when it ran, its `outcome` (`blocked` sent Claude back, `woke` woke Claude from a background review, `reported` showed findings to the user, `passed` found nothing, `failed` could not review), the review round, every finding with its advisor, severity, note, and evidence, and each advisor's result or error
 - `lastSkip`, when present: the most recent turn that was not reviewed, and why (for example no file changes, or the round limit)
 - per-advisor review counts, token usage, and last error. A cost of `unknown` means the provider did not report one, not zero.
 
