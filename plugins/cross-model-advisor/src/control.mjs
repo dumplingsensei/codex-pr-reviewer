@@ -58,6 +58,18 @@ export async function recordPrompt(payload, { env = process.env, snapshot = snap
   if (!state.enabled || !state.projectRoot) return;
   const prompt = typeof payload.prompt === "string" ? payload.prompt : "";
   const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
+  const current = state.turn;
+  // A message that arrives before the turn's Stop (typed mid-turn, a
+  // notification injected at a step boundary, or a prompt after an interrupted
+  // turn) extends the turn: re-snapshotting here would drop the edits made
+  // before it from the review.
+  if (current && !current.control && !current.stopped) {
+    const addition = `\n\n[Also sent during this turn]\n${truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP / 2)}`;
+    current.request = truncateLabeled(current.request ?? "", USER_TEXT_CAP - addition.length) + addition;
+    current.promptId = promptId ?? current.promptId;
+    await saveState(session.dir, state);
+    return;
+  }
   if (classifyPrompt(prompt).kind === "control") {
     // Recorded, so the gate can tell a control prompt from one this hook missed.
     state.turn = { promptId, control: true };

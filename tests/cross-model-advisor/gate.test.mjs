@@ -319,6 +319,48 @@ test("a missed snapshot is reported without prompt ids, and on the first prompt 
   }
 });
 
+test("a message sent before the turn's Stop extends the turn instead of moving its baseline", async () => {
+  const paths = (review) => review.turn.diff.files.map((file) => file.path).sort();
+
+  // Typed mid-turn: Claude Code submits it with the same prompt id.
+  const typed = await world();
+  await typed.prompt("make last() safe", "p1");
+  await fs.appendFile(path.join(typed.root, "src", "a.js"), "// first edit\n");
+  await typed.prompt("also add b.js", "p1");
+  await fs.writeFile(path.join(typed.root, "src", "b.js"), "export const b = 1;\n");
+  await typed.stop();
+  assert.deepEqual(paths(typed.reviews[0]), ["src/a.js", "src/b.js"]);
+  assert.match(typed.reviews[0].turn.request, /^make last\(\) safe\n\n\[Also sent during this turn\]\nalso add b\.js$/);
+
+  // An interrupted turn gets no Stop, so its edits are reviewed with the next prompt's.
+  const interrupted = await world();
+  await interrupted.prompt("first task", "p1");
+  await fs.appendFile(path.join(interrupted.root, "src", "a.js"), "// interrupted\n");
+  await interrupted.prompt("second task", "p2");
+  await fs.writeFile(path.join(interrupted.root, "src", "b.js"), "export const b = 1;\n");
+  assert.equal((await interrupted.stop()).systemMessage, "cross-model-advisor: no findings from correctness");
+  assert.deepEqual(paths(interrupted.reviews[0]), ["src/a.js", "src/b.js"]);
+
+  // A message sent while Claude works on findings keeps the blocked turn open.
+  const blocked = await world();
+  await blocked.prompt("change a.js", "p1");
+  await fs.appendFile(path.join(blocked.root, "src", "a.js"), "// needs work\n");
+  blocked.setScript(concern("real bug"));
+  assert.equal((await blocked.stop()).decision, "block");
+  await blocked.prompt("also add b.js", "p1");
+  await fs.writeFile(path.join(blocked.root, "src", "b.js"), "export const b = 1;\n");
+  blocked.setScript(async () => {});
+  await blocked.stop({ stop_hook_active: true });
+  assert.deepEqual(paths(blocked.reviews[1]), ["src/a.js", "src/b.js"]);
+
+  // Once a Stop lets Claude stop, the next prompt starts a new turn.
+  await blocked.prompt("next task", "p2");
+  await fs.writeFile(path.join(blocked.root, "src", "c.js"), "export const c = 1;\n");
+  await blocked.stop();
+  assert.deepEqual(paths(blocked.reviews[2]), ["src/c.js"]);
+  assert.equal(blocked.reviews[2].turn.request, "next task");
+});
+
 test("a partial failure with no findings is not reported as a silent pass", async () => {
   const advisor = (name) => ({ name, provider: "local", model: "gpt-test", instructions: name, enabled: true, reasoningEffort: "default" });
   const w = await world({ advisors: [advisor("alpha"), advisor("beta")] });

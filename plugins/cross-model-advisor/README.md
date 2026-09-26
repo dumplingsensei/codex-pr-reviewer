@@ -56,8 +56,8 @@ network bootstrap at install time. From a local checkout,
 1. **When you submit a prompt**, a lightweight hook records a git snapshot of
    the whole working tree: a tree object of tracked and untracked files, with
    `.gitignore` honoured, written through a private temporary index. Your
-   index, branch, HEAD, and stash are never touched. No model is called, and
-   no SDK is loaded.
+   index, branch, HEAD, and stash are never touched; no model or SDK is used.
+   A message sent before the turn ends joins it, keeping the first snapshot.
 2. **When Claude finishes the turn**, the Stop hook snapshots again. If nothing
    changed, or this exact change was already reviewed, Claude stops as usual.
    Plugin commands like this page's are never reviewed, and subagents are not

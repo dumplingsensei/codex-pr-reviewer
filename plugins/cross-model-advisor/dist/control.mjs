@@ -752,6 +752,17 @@ async function recordPrompt(payload, { env = process.env, snapshot = snapshotTre
   if (!state.enabled || !state.projectRoot) return;
   const prompt = typeof payload.prompt === "string" ? payload.prompt : "";
   const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
+  const current = state.turn;
+  if (current && !current.control && !current.stopped) {
+    const addition = `
+
+[Also sent during this turn]
+${truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP / 2)}`;
+    current.request = truncateLabeled(current.request ?? "", USER_TEXT_CAP - addition.length) + addition;
+    current.promptId = promptId ?? current.promptId;
+    await saveState(session.dir, state);
+    return;
+  }
   if (classifyPrompt(prompt).kind === "control") {
     state.turn = { promptId, control: true };
     await saveState(session.dir, state);

@@ -6,6 +6,18 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.20
+
+- A message sent while Claude is still working (typed mid-turn, or a
+  notification Claude Code injects at a step boundary) fires the prompt hook
+  again with the same prompt id. The hook re-snapshotted, so edits made before
+  that message escaped review, and the advisors saw only the follow-up as the
+  request. It now joins the turn: the first snapshot stays and the message is
+  appended to the request. A prompt after an interrupted turn (which gets no
+  Stop) joins it the same way, so the interrupted edits are reviewed too, and a
+  turn sent back with findings stays open until a Stop lets Claude stop. Found
+  by a live test of Claude Code's hook order.
+
 ## 2.1.19
 
 - 2.1.18's missed-snapshot notice relied on prompt ids and a recorded earlier

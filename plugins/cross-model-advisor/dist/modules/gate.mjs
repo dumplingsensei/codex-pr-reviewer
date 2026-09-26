@@ -1269,6 +1269,7 @@ async function runStop(payload, { env = process.env, deps: overrides = {} } = {}
   }));
   const failed = results.filter((result) => !result.ok);
   if (gate.mode === "block" && findings.some((item) => item.severity !== "nit")) {
+    turn.stopped = false;
     state.rounds.count = round;
     await record("blocked", "concerns or blockers found", { round, findings, advisors });
     return `${JSON.stringify({

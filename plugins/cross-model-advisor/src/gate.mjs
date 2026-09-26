@@ -451,9 +451,10 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
   };
 
   const turn = state.turn;
-  // Every prompt leaves a turn, and a Stop marks it used, so a Stop that is not
-  // a continuation and finds no fresh turn belongs to a prompt the prompt hook
-  // missed. Prompt ids catch the same when both hooks have them.
+  // Every prompt leaves a turn, and a Stop that lets Claude stop marks it used,
+  // so a Stop that is not a continuation and finds no fresh turn belongs to a
+  // prompt the prompt hook missed. Prompt ids catch the same when both hooks
+  // have them.
   const stale = Boolean(turn?.stopped) && payload.stop_hook_active !== true;
   const mismatched = Boolean(promptId && turn?.promptId && turn.promptId !== promptId);
   if (!turn || stale || mismatched) {
@@ -608,6 +609,8 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
   const failed = results.filter((result) => !result.ok);
 
   if (gate.mode === "block" && findings.some((item) => item.severity !== "nit")) {
+    // Claude keeps working on this prompt, so the turn is not over.
+    turn.stopped = false;
     state.rounds.count = round;
     await record("blocked", "concerns or blockers found", { round, findings, advisors });
     return `${JSON.stringify({
