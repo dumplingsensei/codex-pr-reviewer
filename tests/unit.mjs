@@ -1046,6 +1046,18 @@ for (const [index, line] of fs.readFileSync(path.join(pluginDir, "scripts", "pr-
   eq(`line ${index + 1} diffs without textconv or external drivers`, line.includes('"--no-textconv"') && line.includes('"--no-ext-diff"'), true);
 }
 
+describe("skills that page choices");
+// AskUserQuestion takes 2 to 4 options. A skill that pages a list with More
+// must say so and add Cancel when a last page would hold a single item, or
+// seven slots end on a one-option question. 2.1.15 dropped this from login.
+for (const skill of fs.readdirSync(path.join(root, "plugins", "cross-model-advisor", "skills"))) {
+  const file = path.join(root, "plugins", "cross-model-advisor", "skills", skill, "SKILL.md");
+  const text = fs.readFileSync(file, "utf8");
+  if (!text.includes("**More**")) continue;
+  eq(`${skill} states that a question needs 2–4 options`, /needs 2–4 options/.test(text), true);
+  eq(`${skill} adds Cancel to a single-item last page`, /\*\*Cancel\*\* when a last page holds a single/.test(text), true);
+}
+
 describe("advisor review budget");
 // Advisors share STOP_REVIEW_BUDGET_MS; the rest of the Stop hook's timeout is
 // for snapshots, the diff, and saving state. Moving one must move the other.
