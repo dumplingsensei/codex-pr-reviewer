@@ -2,8 +2,9 @@
  * What Claude has said and done so far in a turn, for watch mode's step
  * reviews, read from the session transcript. Only Claude's own text and one
  * line per tool call get through: tool results (file contents, command
- * output), thinking, command lines, and search patterns never do; paths the
- * review may not read are masked, and credentials are redacted.
+ * output), thinking, command lines and their descriptions, and search
+ * patterns never do; paths the review may not read are masked, and
+ * credentials are redacted.
  */
 
 import { constants } from "node:fs";
@@ -15,7 +16,6 @@ import { sanitizeText } from "./session/sanitize.mjs";
 const MAX_TAIL_BYTES = 4 * 1024 * 1024;
 const MAX_PROGRESS_CHARS = 6_000;
 const MAX_TEXT_CHARS = 600;
-const MAX_DESCRIPTION_CHARS = 200;
 const OMITTED = "[earlier steps omitted]";
 const MASKED = "[a path outside the review]";
 const FILE_TOOLS = new Set(["Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "NotebookRead"]);
@@ -64,9 +64,9 @@ async function shownPath(value, { projectRoot, isExcluded }) {
 
 /**
  * One line for a tool call: which tool, and on what, never what came back. A
- * command line or search pattern can name excluded files or hold a secret, so
- * a Bash call shows only Claude's own description of it (or the program it
- * runs), and a search only where it looked.
+ * command line, its description, or a search pattern can name excluded files
+ * or hold a secret, so a Bash call shows at most the program it runs, and a
+ * search only where it looked.
  *
  * @param {string} name
  * @param {any} input
@@ -76,9 +76,9 @@ async function describeCall(name, input, filters) {
   const args = input && typeof input === "object" ? input : {};
   if (FILE_TOOLS.has(name)) return `${name} ${await shownPath(args.file_path ?? args.notebook_path, filters)}`;
   if (name === "Bash") {
-    if (typeof args.description === "string" && args.description.trim()) return `Bash: ${oneLine(args.description, MAX_DESCRIPTION_CHARS)}`;
-    const program = /^\s*([A-Za-z0-9._-]{1,40})(?:\s|$)/.exec(String(args.command ?? ""))?.[1];
-    return program ? `Bash: runs ${program}` : "Bash";
+    // Only a plain command name: not a path, not a dotfile, not itself excluded.
+    const program = /^\s*([A-Za-z][A-Za-z0-9_+-]{0,39})(?:\s|$)/.exec(String(args.command ?? ""))?.[1];
+    return program && !(await filters.isExcluded(program)) ? `Bash: runs ${program}` : "Bash";
   }
   if (name === "Grep" || name === "Glob") return args.path ? `${name} in ${await shownPath(args.path, filters)}` : name;
   return oneLine(name, 60);

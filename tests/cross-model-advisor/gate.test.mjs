@@ -724,7 +724,10 @@ test("step reviews see Claude's messages and tool calls, never tool results, exc
     { type: "assistant", timestamp: at(13), message: { content: [{ type: "tool_use", name: "Edit", input: { file_path: path.join(root, "src", "a.js"), old_string: "OLD_TEXT", new_string: "NEW_TEXT" } }] } },
     { type: "assistant", timestamp: at(14), message: { content: [{ type: "tool_use", name: "Read", input: { file_path: "/etc/hosts" } }] } },
     { type: "assistant", timestamp: at(15), message: { content: [{ type: "tool_use", name: "Bash", input: { command: "curl -H 'Authorization: Bearer sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789' https://x" } }] } },
-    { type: "assistant", timestamp: at(15), message: { content: [{ type: "tool_use", name: "Bash", input: { command: "cat .env | grep PASSWORD_LITERAL", description: "Run the unit tests" } }] } },
+    { type: "assistant", timestamp: at(15), message: { content: [{ type: "tool_use", name: "Bash", input: { command: "cat .env | grep PASSWORD_LITERAL", description: "Inspect .env for DESCRIPTION_LITERAL" } }] } },
+    { type: "assistant", timestamp: at(15), message: { content: [{ type: "tool_use", name: "Bash", input: { command: ".env-loader --run" } }] } },
+    { type: "assistant", timestamp: at(15), message: { content: [{ type: "tool_use", name: "Bash", input: { command: "./deploy.sh" } }] } },
+    { type: "assistant", timestamp: at(15), message: { content: [{ type: "tool_use", name: "Bash", input: { command: "vaulttool dump" } }] } },
     { type: "assistant", timestamp: at(15), message: { content: [{ type: "tool_use", name: "Grep", input: { pattern: "PATTERN_LITERAL", path: path.join(root, "src") } }] } },
     { type: "assistant", timestamp: at(16), isSidechain: true, message: { content: [{ type: "text", text: "SUBAGENT_TEXT" }] } },
     { type: "assistant", timestamp: at(17), message: { content: [{ type: "text", text: "The token is sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789 and CONFIGURED_SECRET" }] } }
@@ -733,19 +736,20 @@ test("step reviews see Claude's messages and tool calls, never tool results, exc
   const progress = await readProgress(file, {
     since: Date.parse(at(5)),
     projectRoot: root,
-    isExcluded: async (rel) => rel === ".env",
+    isExcluded: async (rel) => rel === ".env" || rel === "vaulttool",
     secrets: ["CONFIGURED_SECRET"]
   });
   assert.equal(
     progress.split("\n").slice(0, 4).join("\n"),
     ["Claude: I will guard empty arrays.", "- Read [a path outside the review]", "- Edit src/a.js", "- Read [a path outside the review]"].join("\n")
   );
-  // Command lines and search patterns can name excluded files or carry secrets.
+  // Command lines, their descriptions, and search patterns can name excluded
+  // files or carry secrets: at most a plain, allowed program name remains.
   assert.equal(
-    progress.split("\n").slice(4, 7).join("\n"),
-    ["- Bash: runs curl", "- Bash: Run the unit tests", "- Grep in src"].join("\n")
+    progress.split("\n").slice(4, 10).join("\n"),
+    ["- Bash: runs curl", "- Bash: runs cat", "- Bash", "- Bash", "- Bash", "- Grep in src"].join("\n")
   );
-  for (const hidden of ["EARLIER_TURN_TEXT", "THINKING_TEXT", "SECRET_FILE_CONTENT", "OLD_TEXT", "NEW_TEXT", "SUBAGENT_TEXT", "sk-ant-api03", "CONFIGURED_SECRET", ".env", "PASSWORD_LITERAL", "PATTERN_LITERAL"]) {
+  for (const hidden of ["EARLIER_TURN_TEXT", "THINKING_TEXT", "SECRET_FILE_CONTENT", "OLD_TEXT", "NEW_TEXT", "SUBAGENT_TEXT", "sk-ant-api03", "CONFIGURED_SECRET", ".env", "PASSWORD_LITERAL", "DESCRIPTION_LITERAL", "deploy", "vaulttool", "PATTERN_LITERAL"]) {
     assert.ok(!progress.includes(hidden), hidden);
   }
   assert.equal(await readProgress("relative.jsonl", { since: 0, projectRoot: root, isExcluded: async () => false }), "");

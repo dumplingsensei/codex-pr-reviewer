@@ -95806,7 +95806,6 @@ import path11 from "node:path";
 var MAX_TAIL_BYTES = 4 * 1024 * 1024;
 var MAX_PROGRESS_CHARS = 6e3;
 var MAX_TEXT_CHARS = 600;
-var MAX_DESCRIPTION_CHARS = 200;
 var OMITTED = "[earlier steps omitted]";
 var MASKED = "[a path outside the review]";
 var FILE_TOOLS = /* @__PURE__ */ new Set(["Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "NotebookRead"]);
@@ -95840,9 +95839,8 @@ async function describeCall(name, input, filters) {
   const args = input && typeof input === "object" ? input : {};
   if (FILE_TOOLS.has(name)) return `${name} ${await shownPath(args.file_path ?? args.notebook_path, filters)}`;
   if (name === "Bash") {
-    if (typeof args.description === "string" && args.description.trim()) return `Bash: ${oneLine(args.description, MAX_DESCRIPTION_CHARS)}`;
-    const program = /^\s*([A-Za-z0-9._-]{1,40})(?:\s|$)/.exec(String(args.command ?? ""))?.[1];
-    return program ? `Bash: runs ${program}` : "Bash";
+    const program = /^\s*([A-Za-z][A-Za-z0-9_+-]{0,39})(?:\s|$)/.exec(String(args.command ?? ""))?.[1];
+    return program && !await filters.isExcluded(program) ? `Bash: runs ${program}` : "Bash";
   }
   if (name === "Grep" || name === "Glob") return args.path ? `${name} in ${await shownPath(args.path, filters)}` : name;
   return oneLine(name, 60);

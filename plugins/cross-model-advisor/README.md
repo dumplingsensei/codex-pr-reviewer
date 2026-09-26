@@ -379,7 +379,7 @@ every turn regardless of where Claude later `cd`s.
 For every reviewed turn, your request, Claude's final message, the diff, and
 source the advisor tools read are sent to the **external providers you
 configured**; in watch mode, also Claude's messages so far and one line per
-tool call (never its output, command line, or search pattern). That is intentional. Exclusions prevent
+tool call (never its output, command line or description, or search pattern). That is intentional. Exclusions prevent
 tool access to credential files (`.env*`, `*.pem`, `*.key`, `*.p12`, `.npmrc`,
 `.netrc`, `.envrc`, SSH keys, `.ssh`, `.aws`), `.git`, `.claude`, `.codex`,
 `.gemini`, `node_modules`, plugin state, anything git ignores (including

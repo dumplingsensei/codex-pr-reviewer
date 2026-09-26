@@ -6,6 +6,14 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.27
+
+- Security: watch mode's step reviews no longer see the description Claude
+  writes for a Bash call, which could name an excluded file ("Inspect .env
+  before running tests") or repeat a value from one. A Bash call now shows at
+  most the program it runs, and only a plain command name that is not a path,
+  a dotfile, or itself excluded. Found by the cross-model advisors on 2.1.26.
+
 ## 2.1.26
 
 - New `gate.mode: "watch"`, the mid-turn advisor: advise mode, plus a review
