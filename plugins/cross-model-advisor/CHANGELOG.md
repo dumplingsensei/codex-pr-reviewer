@@ -6,6 +6,13 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.18
+
+- A prompt the prompt hook failed to snapshot now ends with `this turn was not
+  reviewed` instead of silence. Control prompts are recorded as such, so they
+  stay quiet without hiding a missed snapshot. Found by the cross-model advisor
+  on 2.1.17.
+
 ## 2.1.17
 
 - You now see what the advisors found when the gate sends Claude back: a

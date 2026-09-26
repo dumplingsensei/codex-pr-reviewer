@@ -281,6 +281,21 @@ test("a changed turn the gate cannot review tells the user instead of passing si
   assert.equal(capped.reviews.length, 1);
 });
 
+test("a prompt the prompt hook failed to snapshot is reported as not reviewed, after work or a control prompt", async () => {
+  for (const before of ["earlier work", "/cross-model-advisor:status"]) {
+    const w = await world();
+    await w.prompt(before);
+    await w.stop();
+    // The hook failed for the next prompt, so it recorded nothing.
+    w.promptId = "unrecorded";
+    await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+    const out = await w.stop();
+    assert.equal(out.decision, undefined, before);
+    assert.equal(out.systemMessage, "cross-model-advisor: this turn was not reviewed (the prompt hook did not snapshot this prompt)", before);
+    assert.equal(w.reviews.length, 0, before);
+  }
+});
+
 test("a partial failure with no findings is not reported as a silent pass", async () => {
   const advisor = (name) => ({ name, provider: "local", model: "gpt-test", instructions: name, enabled: true, reasoningEffort: "default" });
   const w = await world({ advisors: [advisor("alpha"), advisor("beta")] });
@@ -541,12 +556,12 @@ test("control commands, subagents, other prompts, and off are never reviewed", a
   await w.prompt("/cross-model-advisor:status");
   await fs.appendFile(path.join(w.root, "src", "a.js"), "// during a control turn\n");
   assert.equal(await w.stop(), null);
-  assert.equal((await w.status()).lastSkip.reason, "no snapshot for this prompt");
+  assert.equal((await w.status()).lastSkip.reason, "control prompt");
 
   await w.prompt("real work");
   await fs.appendFile(path.join(w.root, "src", "a.js"), "// work\n");
   assert.equal(await w.stop({ agent_id: "sub-1" }), null);
-  assert.equal(await w.stop({ prompt_id: "someone-else" }), null);
+  assert.match((await w.stop({ prompt_id: "someone-else" })).systemMessage, /not reviewed \(the prompt hook did not snapshot this prompt\)/);
   assert.equal(w.reviews.length, 0);
 
   await runOff(w.env);

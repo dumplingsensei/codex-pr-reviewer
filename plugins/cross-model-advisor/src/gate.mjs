@@ -451,8 +451,18 @@ export async function runStop(payload, { env = process.env, deps: overrides = {}
   };
 
   const turn = state.turn;
-  if (!turn || (promptId && turn.promptId && turn.promptId !== promptId)) {
+  // No turn: the gate came on after this prompt was submitted.
+  if (!turn) {
     await record("skipped", "no snapshot for this prompt");
+    return "";
+  }
+  if (promptId && turn.promptId && turn.promptId !== promptId) {
+    const why = "the prompt hook did not snapshot this prompt";
+    await record("skipped", why);
+    return formatNotReviewed(why);
+  }
+  if (turn.control) {
+    await record("skipped", "control prompt");
     return "";
   }
   if (!turn.baseTree) {

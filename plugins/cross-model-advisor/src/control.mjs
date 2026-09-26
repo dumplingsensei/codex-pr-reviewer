@@ -57,13 +57,15 @@ export async function recordPrompt(payload, { env = process.env, snapshot = snap
   const state = await loadState(session.dir);
   if (!state.enabled || !state.projectRoot) return;
   const prompt = typeof payload.prompt === "string" ? payload.prompt : "";
+  const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
   if (classifyPrompt(prompt).kind === "control") {
-    state.turn = null;
+    // Recorded, so the gate can tell a control prompt from one this hook missed.
+    state.turn = { promptId, control: true };
     await saveState(session.dir, state);
     return;
   }
   const turn = {
-    promptId: typeof payload.prompt_id === "string" ? payload.prompt_id : null,
+    promptId,
     baseTree: /** @type {string | null} */ (null),
     request: truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP),
     at: now()
@@ -170,7 +172,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       const raw = await readStdin(process.stdin);
       if (raw.trim()) await recordPrompt(JSON.parse(raw), { env });
     } catch {
-      // Fail open: an unsnapshotted turn is skipped by the gate, not blocked.
+      // Fail open: the gate lets an unsnapshotted turn stop and says it was not reviewed.
     }
     process.exitCode = 0;
     return;

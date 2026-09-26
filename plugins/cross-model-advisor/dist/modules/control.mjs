@@ -34,13 +34,14 @@ async function recordPrompt(payload, { env = process.env, snapshot = snapshotTre
   const state = await loadState(session.dir);
   if (!state.enabled || !state.projectRoot) return;
   const prompt = typeof payload.prompt === "string" ? payload.prompt : "";
+  const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
   if (classifyPrompt(prompt).kind === "control") {
-    state.turn = null;
+    state.turn = { promptId, control: true };
     await saveState(session.dir, state);
     return;
   }
   const turn = {
-    promptId: typeof payload.prompt_id === "string" ? payload.prompt_id : null,
+    promptId,
     baseTree: (
       /** @type {string | null} */
       null
