@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { loadConfig, validateRoot } from "./config.mjs";
 import { gitTopLevel, snapshotTree } from "./snapshot.mjs";
 import { classifyPrompt } from "./session/classifier.mjs";
-import { MAX_STDIN_BYTES, USER_TEXT_CAP, WAKE_MARKER } from "./session/constants.mjs";
+import { MAX_STDIN_BYTES, STEER_MARKER, USER_TEXT_CAP, WAKE_MARKER } from "./session/constants.mjs";
 import {
   explicitPluginData,
   readIdentity,
@@ -17,7 +17,7 @@ import {
 } from "./session/paths.mjs";
 import { sanitizeText, truncateLabeled } from "./session/sanitize.mjs";
 import { loadState, sweepAdviseStops, takeNotices, updateState } from "./session/state.mjs";
-var USAGE = "usage: control.mjs hook | session-start | off|status --plugin-data <path>";
+var USAGE = "usage: control.mjs hook | watch | session-start | off|status --plugin-data <path>";
 function sessionFrom(env, payload = {}) {
   const identity = readIdentity(env, payload);
   if (typeof payload.session_id === "string" && identity.sessionId && payload.session_id !== identity.sessionId) {
@@ -34,17 +34,17 @@ async function recordPrompt(payload, { env = process.env, snapshot = snapshotTre
   if (!seen.enabled || !seen.projectRoot) return "";
   const prompt = typeof payload.prompt === "string" ? payload.prompt : "";
   const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
-  const wake = prompt.includes(WAKE_MARKER);
+  const wake = prompt.includes(WAKE_MARKER) || prompt.includes(STEER_MARKER);
   const current = seen.turn;
   let turn;
   if (current && !current.control && !current.stopped) {
-    const addition = `
+    const addition = wake ? "" : `
 
 [Also sent during this turn]
 ${truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP / 2)}`;
     turn = {
       ...current,
-      request: truncateLabeled(current.request ?? "", USER_TEXT_CAP - addition.length) + addition,
+      request: addition ? truncateLabeled(current.request ?? "", USER_TEXT_CAP - addition.length) + addition : current.request,
       promptId: promptId ?? current.promptId
     };
   } else if (classifyPrompt(prompt).kind === "control") {
@@ -73,6 +73,15 @@ ${truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP / 2)}`;
     sweepAdviseStops(state, now());
     return takeNotices(state, { context: true });
   });
+}
+async function watchWanted(payload, env) {
+  if (!payload || typeof payload !== "object" || payload.agent_id) return false;
+  const session = sessionFrom(env, payload);
+  const state = await loadState(session.dir);
+  const turn = state.turn;
+  if (!state.enabled || !state.projectRoot || !turn || turn.control || !turn.baseTree || turn.stopped) return false;
+  const config = await loadConfig({ env }).catch(() => null);
+  return config?.gate.mode === "watch";
 }
 async function runOff(env) {
   const session = sessionFrom(env);
@@ -149,6 +158,21 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     process.exitCode = 0;
     return;
   }
+  if (op === "watch" && argv.length === 1) {
+    let out = null;
+    try {
+      const raw = await readStdin(process.stdin);
+      const payload = raw.trim() ? JSON.parse(raw) : null;
+      if (await watchWanted(payload, env)) {
+        const gate = await import(new URL("./gate.mjs", import.meta.url).href);
+        out = await gate.runWatch(payload, { env, progressFrom: gate.progressFromTranscript });
+      }
+    } catch {
+    }
+    if (out) process.stderr.write(out, () => process.exit(2));
+    else process.exit(0);
+    return;
+  }
   if (op === "session-start" && argv.length === 1) {
     try {
       const raw = await readStdin(process.stdin);
@@ -201,5 +225,6 @@ export {
   recordPrompt,
   runOff,
   runSessionStart,
-  runStatus
+  runStatus,
+  watchWanted
 };

@@ -95301,7 +95301,7 @@ var DEFAULT_LIMITS = Object.freeze({
   maxOutputTokens: 1500,
   maxReviewsPerAdvisorPerSession: 40
 });
-var GATE_MODES = Object.freeze(["block", "report", "advise"]);
+var GATE_MODES = Object.freeze(["block", "report", "advise", "watch"]);
 var DEFAULT_GATE = Object.freeze({ mode: "block", maxRounds: 2 });
 var GATE_KEYS = Object.freeze(["mode", "maxRounds", "autoOn", "skipWhenOnly"]);
 var MAX_GATE_LIST = 64;
@@ -97512,7 +97512,8 @@ async function editGate(ctx) {
         items: [
           { value: "block", label: "block", description: "Concerns and blockers send Claude back to address them." },
           { value: "report", label: "report", description: "Findings are only shown to you." },
-          { value: "advise", label: "advise", description: "Claude stops at once; a background review wakes it for blockers." }
+          { value: "advise", label: "advise", description: "Claude stops at once; a background review wakes it for blockers." },
+          { value: "watch", label: "watch", description: "Advise, plus reviews while Claude works that interrupt it for concerns." }
         ]
       });
       if (mode?.action === "select") gate.mode = mode.value;

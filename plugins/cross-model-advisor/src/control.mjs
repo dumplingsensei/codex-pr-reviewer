@@ -3,13 +3,14 @@
  * Lightweight session helper; loads no provider SDK.
  *
  *   control.mjs hook                       UserPromptSubmit; payload on stdin
+ *   control.mjs watch                      PostToolUse (asyncRewake) in watch mode; exits 2 to interrupt Claude
  *   control.mjs off|status --plugin-data <path>
  *
  * On each real prompt of an enabled session, the hook snapshots the working
  * tree so the Stop gate can diff exactly what Claude changed during the turn.
- * Plugin control commands clear the snapshot so their turns are never
- * reviewed. The hook fails open: any error prints nothing and the turn simply
- * goes unreviewed.
+ * Plugin control commands are recorded as such so their turns are never
+ * reviewed. The hook fails open: on an error it prints nothing, and the Stop
+ * gate reports the turn as not reviewed.
  */
 
 import fs from "node:fs";
@@ -18,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { loadConfig, validateRoot } from "./config.mjs";
 import { gitTopLevel, snapshotTree } from "./snapshot.mjs";
 import { classifyPrompt } from "./session/classifier.mjs";
-import { MAX_STDIN_BYTES, USER_TEXT_CAP, WAKE_MARKER } from "./session/constants.mjs";
+import { MAX_STDIN_BYTES, STEER_MARKER, USER_TEXT_CAP, WAKE_MARKER } from "./session/constants.mjs";
 import {
   explicitPluginData,
   readIdentity,
@@ -28,7 +29,7 @@ import {
 import { sanitizeText, truncateLabeled } from "./session/sanitize.mjs";
 import { loadState, sweepAdviseStops, takeNotices, updateState } from "./session/state.mjs";
 
-const USAGE = "usage: control.mjs hook | session-start | off|status --plugin-data <path>";
+const USAGE = "usage: control.mjs hook | watch | session-start | off|status --plugin-data <path>";
 
 /**
  * @param {NodeJS.ProcessEnv} env
@@ -62,18 +63,21 @@ export async function recordPrompt(payload, { env = process.env, snapshot = snap
   if (!seen.enabled || !seen.projectRoot) return "";
   const prompt = typeof payload.prompt === "string" ? payload.prompt : "";
   const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
-  const wake = prompt.includes(WAKE_MARKER);
+  // A message this plugin sent: a background review's wake or a step
+  // review's interruption, not the user's prompt.
+  const wake = prompt.includes(WAKE_MARKER) || prompt.includes(STEER_MARKER);
   const current = seen.turn;
   let turn;
   // A message that arrives before the turn's Stop (typed mid-turn, a
   // notification injected at a step boundary, or a prompt after an interrupted
   // turn) extends the turn: re-snapshotting here would drop the edits made
-  // before it from the review.
+  // before it from the review. The advisors' own findings are not added to
+  // the request they review.
   if (current && !current.control && !current.stopped) {
-    const addition = `\n\n[Also sent during this turn]\n${truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP / 2)}`;
+    const addition = wake ? "" : `\n\n[Also sent during this turn]\n${truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP / 2)}`;
     turn = {
       ...current,
-      request: truncateLabeled(current.request ?? "", USER_TEXT_CAP - addition.length) + addition,
+      request: addition ? truncateLabeled(current.request ?? "", USER_TEXT_CAP - addition.length) + addition : current.request,
       promptId: promptId ?? current.promptId
     };
   } else if (classifyPrompt(prompt).kind === "control") {
@@ -101,6 +105,23 @@ export async function recordPrompt(payload, { env = process.env, snapshot = snap
     sweepAdviseStops(state, now());
     return takeNotices(state, { context: true });
   });
+}
+
+/**
+ * Whether a watch-mode step review could run for this tool call, checked
+ * without loading the provider SDK: it runs after every Edit, Write, and Bash.
+ *
+ * @param {any} payload
+ * @param {NodeJS.ProcessEnv} env
+ */
+export async function watchWanted(payload, env) {
+  if (!payload || typeof payload !== "object" || payload.agent_id) return false;
+  const session = sessionFrom(env, payload);
+  const state = await loadState(session.dir);
+  const turn = state.turn;
+  if (!state.enabled || !state.projectRoot || !turn || turn.control || !turn.baseTree || turn.stopped) return false;
+  const config = await loadConfig({ env }).catch(() => null);
+  return config?.gate.mode === "watch";
 }
 
 /**
@@ -202,6 +223,25 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       // Fail open: the gate lets an unsnapshotted turn stop and says it was not reviewed.
     }
     process.exitCode = 0;
+    return;
+  }
+  if (op === "watch" && argv.length === 1) {
+    let out = null;
+    try {
+      const raw = await readStdin(process.stdin);
+      const payload = raw.trim() ? JSON.parse(raw) : null;
+      if (await watchWanted(payload, env)) {
+        // The review needs the provider SDK, which only the gate bundle loads;
+        // a computed path keeps the bundler from inlining it here.
+        const gate = await import(new URL("./gate.mjs", import.meta.url).href);
+        out = await gate.runWatch(payload, { env, progressFrom: gate.progressFromTranscript });
+      }
+    } catch {
+      // Fail open: the review at Stop still covers the turn.
+    }
+    // Exit 2 interrupts Claude at its next step with stderr; exit once it has flushed.
+    if (out) process.stderr.write(out, () => process.exit(2));
+    else process.exit(0);
     return;
   }
   if (op === "session-start" && argv.length === 1) {

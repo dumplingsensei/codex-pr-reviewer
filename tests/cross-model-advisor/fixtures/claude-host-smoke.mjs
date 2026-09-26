@@ -14,6 +14,9 @@
  *   advise-wake          in advise mode Claude stops without waiting, the
  *                        background review finds a blocker, and the
  *                        asyncRewake hook wakes Claude into a new turn
+ *   watch-steer          in watch mode a step review after Claude's edit
+ *                        raises a concern that reaches Claude mid-turn, before
+ *                        its final answer, without starting another turn
  *
  * Every phase runs with a decoy CLAUDE_PLUGIN_DATA in Claude's environment, the
  * way openai/codex-plugin-cc exports its own into every Bash command, and
@@ -26,7 +29,7 @@
  *   CROSS_MODEL_ADVISOR_HOST_SMOKE=1 node tests/cross-model-advisor/fixtures/claude-host-smoke.mjs --run
  *
  * Optional:
- *   --phase <all|block-then-continue|no-change|off|advise-wake>
+ *   --phase <all|block-then-continue|no-change|off|advise-wake|watch-steer>
  *   --model <id>             host model, default: the host's default
  *   --claude <path>          default: claude on PATH
  *   --plugin-dir <path>      default: <repo>/plugins/cross-model-advisor
@@ -52,7 +55,9 @@ const DEFAULT_TIMEOUT_MS = 240_000;
 const API_KEY_ENV = "CMA_SMOKE_ADVISOR_KEY";
 const API_KEY_VALUE = "sk-cma-smoke-loopback-not-a-secret";
 const MODEL_ID = "cma-smoke";
-const PHASES = ["block-then-continue", "no-change", "off", "advise-wake"];
+const PHASES = ["block-then-continue", "no-change", "off", "advise-wake", "watch-steer"];
+const WATCH_PROMPT =
+  "Add an exported function first(items) to src/alpha.js that returns items[0]. Edit the file directly with the Edit or Write tool. After the edit, run the Bash command `sleep 8` in the foreground. Then reply in one sentence.";
 const ALPHA = "export function last(items) {\n  return items[items.length - 1];\n}\n";
 const EDIT_PROMPT =
   "Add an exported function first(items) to src/alpha.js that returns items[0]. Edit the file directly with the Edit or Write tool. Do not run commands or tests. Then reply in one sentence.";
@@ -215,7 +220,8 @@ async function runPhase(phase, ctx, sourcePlugin) {
   git("init", "-q");
   git("add", "-A");
   git("commit", "-qm", "init");
-  writeAdvisorConfig(configDir, ctx.loopback.baseUrl, phase === "advise-wake" ? "advise" : "block");
+  const mode = phase === "advise-wake" ? "advise" : phase === "watch-steer" ? "watch" : "block";
+  writeAdvisorConfig(configDir, ctx.loopback.baseUrl, mode);
   clonePlugin(sourcePlugin, pluginDir, { configDir, pluginData });
   const settingsFile = path.join(dir, "settings.json");
   fs.writeFileSync(settingsFile, `${JSON.stringify({ hasTrustDialogAccepted: true })}\n`);
@@ -231,6 +237,7 @@ async function runPhase(phase, ctx, sourcePlugin) {
     else if (phase === "no-change") await phaseNoChange(run, pluginData);
     else if (phase === "off") await phaseOff(run);
     else if (phase === "advise-wake") await phaseAdviseWake(run, pluginData);
+    else if (phase === "watch-steer") await phaseWatchSteer(run, pluginData);
     if (fs.existsSync(path.join(decoyData, "sessions"))) {
       throw new AssertionError("session state landed in another plugin's exported CLAUDE_PLUGIN_DATA");
     }
@@ -309,6 +316,29 @@ async function phaseAdviseWake(ctx, pluginData) {
   if (results.length < 3) throw new AssertionError(`expected a woken third turn, saw ${results.length} result(s)`);
   const state = readState(pluginData, host.sessionId);
   if (state?.advise?.wakes !== 1) throw new AssertionError(`expected one wake, state has ${JSON.stringify(state?.advise)}`);
+}
+
+async function phaseWatchSteer(ctx, pluginData) {
+  const host = await runHost(ctx, ["/cross-model-advisor:on", WATCH_PROMPT]);
+  if (hookResponses(host, "Stop").some((event) => parseHookOutput(event)?.decision === "block")) {
+    throw new AssertionError("a Stop hook blocked in watch mode");
+  }
+  const reviews = ctx.loopback.reviews();
+  if (reviews.length < 1) throw new AssertionError("no step review reached the advisor");
+  if (!/Claude has not finished this turn/.test(reviews[0])) throw new AssertionError("the first review was not a step review");
+  const prompts = hookResponses(host, "UserPromptSubmit");
+  const card = prompts.find((event) => /a step review interrupted Claude/.test(parseHookOutput(event)?.systemMessage ?? ""));
+  if (!card) throw new AssertionError(`the interruption was not shown to the user: ${prompts.map((event) => hookText(event)).join(" | ")}`);
+  const results = host.events.filter((event) => event.type === "result");
+  if (results.length !== 2) throw new AssertionError(`expected the interruption inside the edit turn, saw ${results.length} results`);
+  const cardAt = host.events.indexOf(card);
+  const finalAt = host.events.indexOf(results[1]);
+  const acted = host.events.slice(cardAt + 1, finalAt).some((event) => event.type === "assistant" && !event.parent_tool_use_id);
+  if (!(cardAt > host.events.indexOf(results[0]) && cardAt < finalAt && acted)) {
+    throw new AssertionError("Claude did not see the interruption before its final answer");
+  }
+  const state = readState(pluginData, host.sessionId);
+  if (state?.watch?.steers !== 1) throw new AssertionError(`expected one interruption, state has ${JSON.stringify(state?.watch)}`);
 }
 
 function resolveClaude(bin) {
@@ -432,7 +462,7 @@ function startLoopback() {
     const user = messages.find((message) => message.role === "user");
     requests.push({ user: user ? text(user) : "" });
     const toolResults = messages.filter((message) => message.role === "tool");
-    const laterRound = user && /review round 2/.test(text(user));
+    const laterRound = user && /review round 2|already raised earlier in this turn/.test(text(user));
     let reply;
     if (laterRound) reply = { content: "The earlier finding is resolved." };
     else if (toolResults.length === 0) reply = { tool: "read", args: { path: "src/alpha.js" } };

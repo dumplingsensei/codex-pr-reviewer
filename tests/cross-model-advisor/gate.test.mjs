@@ -17,8 +17,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const modules = path.join(here, "..", "..", "plugins", "cross-model-advisor", "dist", "modules");
 const load = (rel) => import(pathToFileURL(path.join(modules, rel)).href);
 
-const { runStop, runOn, runReview, runAdvise } = await load("gate.mjs");
-const { recordPrompt, runOff, runStatus, runSessionStart } = await load("control.mjs");
+const { runStop, runOn, runReview, runAdvise, runWatch, turnIdOf } = await load("gate.mjs");
+const { readProgress } = await load("progress.mjs");
+const { recordPrompt, runOff, runStatus, runSessionStart, watchWanted } = await load("control.mjs");
 const { reviewBaseTree, snapshotTree, turnDiff } = await load("snapshot.mjs");
 const { validateConfig } = await load("config.mjs");
 const { loadState, updateState } = await load("session/state.mjs");
@@ -109,6 +110,13 @@ async function world({ gate, advisors, limits } = {}) {
       w.promptOut = out ? JSON.parse(out) : null;
       w.promptId = promptId;
       return promptId;
+    },
+    /** watch mode's step review after a tool call */
+    watch(extra = {}, options = {}) {
+      return runWatch(
+        { session_id: sessionId, prompt_id: w.promptId, hook_event_name: "PostToolUse", tool_name: "Edit", ...extra },
+        { env, deps, ...options }
+      );
     },
     /** advise mode's background hook, with the payload the Stop gate got */
     advise(extra = {}, options = {}) {
@@ -562,6 +570,185 @@ test("advise mode: a background review that fails is reported as not reviewed wi
   assert.equal((await w.status()).lastReview.outcome, "failed");
   // Not reviewed, so the diff is free to be reviewed again.
   assert.deepEqual((await loadState(w.stateDir)).reviewed, []);
+});
+
+test("watch mode: a concern in the work so far interrupts Claude at its next step, and is not raised twice", async () => {
+  const w = await world({ gate: { mode: "watch", maxRounds: 2 } });
+  const file = path.join(w.root, "src", "a.js");
+  await w.prompt("make last() safe", "p1");
+  await fs.appendFile(file, "// step one\n");
+  w.setScript(finding("concern", "last() now reads past the end"));
+  const steer = await w.watch();
+  assert.match(steer, /^\[cross-model-advisor step review\] /);
+  assert.match(steer, /interruption 1 of at most 2 this turn/);
+  assert.match(steer, /carry on with the request/);
+  assert.match(steer, /reads past the end/);
+  assert.equal(w.reviews[0].turn.inProgress, true);
+  assert.equal(w.reviews[0].turn.final, "");
+  assert.equal((await w.status()).lastReview.outcome, "steered");
+
+  // Claude Code injects it mid-turn with the same prompt id: the user sees a
+  // card, and the advisors' own findings are not added to the request.
+  await w.prompt(wakePrompt(steer), "p1");
+  assert.match(w.promptOut.systemMessage, /a step review interrupted Claude with 1 finding \(interruption 1 of at most 2 this turn\)/);
+  assert.equal((await loadState(w.stateDir)).turn.request, "make last() safe");
+
+  // The same finding on the next step is known already: no second interruption.
+  await fs.appendFile(file, "// step two\n");
+  assert.equal(await w.watch(), null);
+  assert.deepEqual(w.reviews[1].turn.previous.map((item) => item.note), ["last() now reads past the end"]);
+});
+
+test("watch mode: nits wait for the end of the turn, the per-turn limit holds, and one step review runs at a time", async () => {
+  const w = await world({ gate: { mode: "watch", maxRounds: 1 } });
+  const file = path.join(w.root, "src", "a.js");
+  await w.prompt("change", "p1");
+  await fs.appendFile(file, "// one\n");
+  w.setScript(finding("nit", "comment wording"));
+  assert.equal(await w.watch(), null);
+  await fs.appendFile(file, "// two\n");
+  w.setScript(finding("concern", "first concern"));
+  assert.ok(await w.watch());
+  await fs.appendFile(file, "// three\n");
+  w.setScript(finding("concern", "second concern"));
+  assert.equal(await w.watch(), null);
+  const shown = await w.stop();
+  assert.match(shown.systemMessage, /1 finding from a step review\n- \[nit\] correctness: comment wording/);
+  assert.match(shown.systemMessage, /1 finding from a step review; not interrupting Claude again this turn \(limit 1\)\n- \[concern\] correctness: second concern/);
+
+  // A step review already running: the next tool call leaves it alone.
+  await w.prompt("more", "p2");
+  await fs.appendFile(file, "// four\n");
+  const turn = (await loadState(w.stateDir)).turn;
+  await updateState(w.stateDir, (fresh) => {
+    fresh.watch = { turnId: turnIdOf(turn), running: { id: "busy", since: Date.now() }, findings: [], steers: 0, lastKey: null };
+  });
+  const before = w.reviews.length;
+  assert.equal(await w.watch({ prompt_id: "p2" }), null);
+  assert.equal(w.reviews.length, before);
+});
+
+test("watch mode: the review at Stop always runs, with the final message and what step reviews raised, after any running one", async () => {
+  const w = await world({ gate: { mode: "watch", maxRounds: 2 } });
+  const file = path.join(w.root, "src", "a.js");
+  // A step review saw the final files, but not Claude's final message.
+  await w.prompt("one", "p1");
+  await fs.appendFile(file, "// one\n");
+  w.setScript(finding("nit", "step nit"));
+  await w.watch();
+  w.setScript(async () => {});
+  await w.stop({ last_assistant_message: "Added tests for the empty case." });
+  assert.equal(await w.advise({ last_assistant_message: "Added tests for the empty case." }), null);
+  assert.equal(w.reviews.length, 2);
+  assert.equal(w.reviews[1].turn.final, "Added tests for the empty case.");
+  assert.deepEqual(w.reviews[1].turn.previous.map((item) => item.note), ["step nit"]);
+
+  // A step review still running at Stop: the Stop review waits for it and inherits what it raised.
+  await w.prompt("two", "p2");
+  await fs.appendFile(file, "// two\n");
+  await w.stop();
+  const job = (await loadState(w.stateDir)).advise.stops.find((stop) => stop.job).job;
+  await updateState(w.stateDir, (fresh) => {
+    fresh.watch = { turnId: job.turnId, running: { id: "step", since: Date.now() }, findings: [], steers: 0, lastKey: null };
+  });
+  const pending = w.advise({ prompt_id: "p2" });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(w.reviews.length, 2);
+  await updateState(w.stateDir, (fresh) => {
+    fresh.watch.running = null;
+    fresh.watch.findings = [{ severity: "concern", advisor: "correctness", note: "raised while running" }];
+    fresh.watch.lastKey = job.key;
+  });
+  assert.equal(await pending, null);
+  assert.equal(w.reviews.length, 3);
+  assert.deepEqual(w.reviews[2].turn.previous.map((item) => item.note), ["raised while running"]);
+});
+
+test("watch mode: a step review in which every advisor failed covers nothing and is retried", async () => {
+  const w = await world({ gate: { mode: "watch", maxRounds: 2 } });
+  await w.prompt("change", "p1");
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+  const reviewApi = w.deps.reviewApi;
+  w.deps.reviewApi = async () => {
+    const error = new Error("rate limited");
+    error.code = "rate_limit";
+    throw error;
+  };
+  assert.equal(await w.watch(), null);
+  let state = await loadState(w.stateDir);
+  assert.deepEqual([state.watch.lastKey, state.reviewed], [null, []]);
+  w.deps.reviewApi = reviewApi;
+  w.setScript(finding("concern", "found on retry"));
+  assert.match(await w.watch({ tool_name: "Bash" }), /found on retry/);
+  state = await loadState(w.stateDir);
+  assert.deepEqual(state.reviewed, [], "step reviews never mark the turn reviewed");
+});
+
+test("watch mode: step reviews run only in watch mode, mid-turn, and when files changed", async () => {
+  // watchWanted runs before the gate loads, so it reads the settings file itself.
+  const onDisk = (w) => fs.writeFile(path.join(w.env.CLAUDE_CONFIG_DIR, "cross-model-advisor.json"), JSON.stringify(w.config));
+  const wanted = (w) => watchWanted({ session_id: w.env.CLAUDE_CODE_SESSION_ID }, w.env);
+
+  const advising = await world({ gate: { mode: "advise", maxRounds: 2 } });
+  await onDisk(advising);
+  await advising.prompt("change");
+  await fs.appendFile(path.join(advising.root, "src", "a.js"), "// x\n");
+  assert.equal(await wanted(advising), false);
+  assert.equal(await advising.watch(), null);
+  assert.equal(advising.reviews.length, 0);
+
+  const w = await world({ gate: { mode: "watch", maxRounds: 2 } });
+  await onDisk(w);
+  await w.prompt("explain");
+  assert.equal(await wanted(w), true);
+  assert.equal(await w.watch({ tool_name: "Bash" }), null);
+  assert.equal(w.reviews.length, 0);
+  await fs.appendFile(path.join(w.root, "src", "a.js"), "// x\n");
+  await w.stop();
+  assert.equal(await wanted(w), false);
+  assert.equal(await w.watch(), null);
+  assert.equal(w.reviews.length, 0);
+});
+
+test("step reviews see Claude's messages and tool calls, never tool results, excluded paths, or credentials", async () => {
+  const dir = await scratch("cma-progress-");
+  const root = path.join(dir, "project");
+  await fs.mkdir(root);
+  const file = path.join(dir, "session.jsonl");
+  const at = (offset) => new Date(Date.UTC(2026, 0, 1, 0, 0, offset)).toISOString();
+  const entries = [
+    { type: "assistant", timestamp: at(0), message: { content: [{ type: "text", text: "EARLIER_TURN_TEXT" }] } },
+    { type: "assistant", timestamp: at(10), message: { content: [{ type: "thinking", thinking: "THINKING_TEXT" }, { type: "text", text: "I will guard empty arrays." }] } },
+    { type: "assistant", timestamp: at(11), message: { content: [{ type: "tool_use", name: "Read", input: { file_path: path.join(root, ".env") } }] } },
+    { type: "user", timestamp: at(12), message: { content: [{ type: "tool_result", content: "SECRET_FILE_CONTENT" }] } },
+    { type: "assistant", timestamp: at(13), message: { content: [{ type: "tool_use", name: "Edit", input: { file_path: path.join(root, "src", "a.js"), old_string: "OLD_TEXT", new_string: "NEW_TEXT" } }] } },
+    { type: "assistant", timestamp: at(14), message: { content: [{ type: "tool_use", name: "Read", input: { file_path: "/etc/hosts" } }] } },
+    { type: "assistant", timestamp: at(15), message: { content: [{ type: "tool_use", name: "Bash", input: { command: "curl -H 'Authorization: Bearer sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789' https://x" } }] } },
+    { type: "assistant", timestamp: at(15), message: { content: [{ type: "tool_use", name: "Bash", input: { command: "cat .env | grep PASSWORD_LITERAL", description: "Run the unit tests" } }] } },
+    { type: "assistant", timestamp: at(15), message: { content: [{ type: "tool_use", name: "Grep", input: { pattern: "PATTERN_LITERAL", path: path.join(root, "src") } }] } },
+    { type: "assistant", timestamp: at(16), isSidechain: true, message: { content: [{ type: "text", text: "SUBAGENT_TEXT" }] } },
+    { type: "assistant", timestamp: at(17), message: { content: [{ type: "text", text: "The token is sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789 and CONFIGURED_SECRET" }] } }
+  ];
+  await fs.writeFile(file, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+  const progress = await readProgress(file, {
+    since: Date.parse(at(5)),
+    projectRoot: root,
+    isExcluded: async (rel) => rel === ".env",
+    secrets: ["CONFIGURED_SECRET"]
+  });
+  assert.equal(
+    progress.split("\n").slice(0, 4).join("\n"),
+    ["Claude: I will guard empty arrays.", "- Read [a path outside the review]", "- Edit src/a.js", "- Read [a path outside the review]"].join("\n")
+  );
+  // Command lines and search patterns can name excluded files or carry secrets.
+  assert.equal(
+    progress.split("\n").slice(4, 7).join("\n"),
+    ["- Bash: runs curl", "- Bash: Run the unit tests", "- Grep in src"].join("\n")
+  );
+  for (const hidden of ["EARLIER_TURN_TEXT", "THINKING_TEXT", "SECRET_FILE_CONTENT", "OLD_TEXT", "NEW_TEXT", "SUBAGENT_TEXT", "sk-ant-api03", "CONFIGURED_SECRET", ".env", "PASSWORD_LITERAL", "PATTERN_LITERAL"]) {
+    assert.ok(!progress.includes(hidden), hidden);
+  }
+  assert.equal(await readProgress("relative.jsonl", { since: 0, projectRoot: root, isExcluded: async () => false }), "");
 });
 
 test("advise mode: two Stops that share a key are both reviewed", async () => {

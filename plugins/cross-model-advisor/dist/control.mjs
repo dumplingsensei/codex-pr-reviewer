@@ -58,7 +58,7 @@ var DEFAULT_LIMITS = Object.freeze({
   maxOutputTokens: 1500,
   maxReviewsPerAdvisorPerSession: 40
 });
-var GATE_MODES = Object.freeze(["block", "report", "advise"]);
+var GATE_MODES = Object.freeze(["block", "report", "advise", "watch"]);
 var DEFAULT_GATE = Object.freeze({ mode: "block", maxRounds: 2 });
 var GATE_KEYS = Object.freeze(["mode", "maxRounds", "autoOn", "skipWhenOnly"]);
 var MAX_GATE_LIST = 64;
@@ -601,6 +601,7 @@ var DIR_MODE = 448;
 var FILE_MODE = 384;
 var STATE_VERSION = 2;
 var WAKE_MARKER = "[cross-model-advisor background review]";
+var STEER_MARKER = "[cross-model-advisor step review]";
 var USER_SUMMARY_CHARS = 2e3;
 var NOTICE_CONTEXT_CHARS = 8e3;
 var ADVISE_WAIT_MS = 12e4;
@@ -730,6 +731,14 @@ function emptyState(overrides = {}) {
      * @type {{ stops: AdviseStop[], notices: { id: string, at: number, user: string | null, context: string | null }[], wakes: number }}
      */
     advise: { stops: [], notices: [], wakes: 0 },
+    /**
+     * Watch mode's step reviews for the turn in progress (`turnId`): the one
+     * running now, if any; findings raised so far this turn; how many times
+     * they interrupted Claude; and the last base..head a step review covered.
+     *
+     * @type {{ turnId: string | null, running: { id: string, since: number } | null, findings: object[], steers: number, lastKey: string | null }}
+     */
+    watch: { turnId: null, running: null, findings: [], steers: 0, lastKey: null },
     ...overrides
   };
 }
@@ -869,7 +878,7 @@ function sweepAdviseStops(state, now) {
 }
 
 // ../../plugins/cross-model-advisor/src/control.mjs
-var USAGE = "usage: control.mjs hook | session-start | off|status --plugin-data <path>";
+var USAGE = "usage: control.mjs hook | watch | session-start | off|status --plugin-data <path>";
 function sessionFrom(env, payload = {}) {
   const identity = readIdentity(env, payload);
   if (typeof payload.session_id === "string" && identity.sessionId && payload.session_id !== identity.sessionId) {
@@ -886,17 +895,17 @@ async function recordPrompt(payload, { env = process.env, snapshot = snapshotTre
   if (!seen.enabled || !seen.projectRoot) return "";
   const prompt = typeof payload.prompt === "string" ? payload.prompt : "";
   const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
-  const wake = prompt.includes(WAKE_MARKER);
+  const wake = prompt.includes(WAKE_MARKER) || prompt.includes(STEER_MARKER);
   const current = seen.turn;
   let turn;
   if (current && !current.control && !current.stopped) {
-    const addition = `
+    const addition = wake ? "" : `
 
 [Also sent during this turn]
 ${truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP / 2)}`;
     turn = {
       ...current,
-      request: truncateLabeled(current.request ?? "", USER_TEXT_CAP - addition.length) + addition,
+      request: addition ? truncateLabeled(current.request ?? "", USER_TEXT_CAP - addition.length) + addition : current.request,
       promptId: promptId ?? current.promptId
     };
   } else if (classifyPrompt(prompt).kind === "control") {
@@ -925,6 +934,15 @@ ${truncateLabeled(sanitizeText(prompt), USER_TEXT_CAP / 2)}`;
     sweepAdviseStops(state, now());
     return takeNotices(state, { context: true });
   });
+}
+async function watchWanted(payload, env) {
+  if (!payload || typeof payload !== "object" || payload.agent_id) return false;
+  const session = sessionFrom(env, payload);
+  const state = await loadState(session.dir);
+  const turn = state.turn;
+  if (!state.enabled || !state.projectRoot || !turn || turn.control || !turn.baseTree || turn.stopped) return false;
+  const config = await loadConfig({ env }).catch(() => null);
+  return config?.gate.mode === "watch";
 }
 async function runOff(env) {
   const session = sessionFrom(env);
@@ -1001,6 +1019,21 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     process.exitCode = 0;
     return;
   }
+  if (op === "watch" && argv.length === 1) {
+    let out = null;
+    try {
+      const raw = await readStdin(process.stdin);
+      const payload = raw.trim() ? JSON.parse(raw) : null;
+      if (await watchWanted(payload, env)) {
+        const gate = await import(new URL("./gate.mjs", import.meta.url).href);
+        out = await gate.runWatch(payload, { env, progressFrom: gate.progressFromTranscript });
+      }
+    } catch {
+    }
+    if (out) process.stderr.write(out, () => process.exit(2));
+    else process.exit(0);
+    return;
+  }
   if (op === "session-start" && argv.length === 1) {
     try {
       const raw = await readStdin(process.stdin);
@@ -1053,5 +1086,6 @@ export {
   recordPrompt,
   runOff,
   runSessionStart,
-  runStatus
+  runStatus,
+  watchWanted
 };

@@ -1,7 +1,7 @@
 # cross-model-advisor
 
 A review gate for Claude Code built from models of other families. When Claude
-finishes a turn that changed files, the advisors you configure (OpenAI or
+finishes a turn that changed files (in watch mode, also as it changes them), the advisors you configure (OpenAI or
 Codex, Gemini, xAI, OpenRouter, Kimi, Copilot, and others) review exactly what
 git measured, inspect the surrounding code themselves, and either send Claude
 back to address concerns or show their findings to you.
@@ -82,12 +82,16 @@ network bootstrap at install time. From a local checkout,
      the advisors review in the background. A `blocker` wakes Claude to fix it
      (at most `gate.maxRounds` times per prompt of yours); other findings reach
      you, and Claude, with your next prompt.
+   - `gate.mode: "watch"`: advise, plus a review after each file-changing tool
+     call while Claude works, which also sees Claude's messages and which tools
+     it used (never their output). A new `concern` or `blocker` interrupts
+     Claude at its next step (at most `gate.maxRounds` times per turn).
    - Nothing found: Claude stops, and you are told which advisors found nothing.
 5. **Failures fail open.** A timeout, provider error, failed login, or no usable
    advisor lets Claude stop, tells you what was not reviewed and why, and records
    the error for `status`. A failed review is never reported as a pass.
 
-Outside advise mode you wait for the review: a turn that changed files ends 10
+Outside advise and watch modes you wait for the review: a turn that changed files ends 10
 to 120 seconds later than otherwise, sometimes with another round of fixes. A
 turn that changed nothing costs nothing.
 
@@ -232,8 +236,8 @@ default. Choose real model IDs. An example and schema also ship under
 }
 ```
 
-`gate.mode` is `block`, `report`, or `advise`; `gate.maxRounds` (1 to 5) bounds
-how often one prompt can be sent back, or woken. `limits.reviewTimeoutSeconds` (at most 240)
+`gate.mode` is `block`, `report`, `advise`, or `watch`; `gate.maxRounds` (1 to 5)
+bounds how often one prompt can be sent back, woken, or interrupted. `limits.reviewTimeoutSeconds` (at most 240)
 is each advisor's deadline; all advisors share 270 of the hook's 300 seconds.
 `gate.autoOn` lists absolute project roots where the gate turns on at session
 start (`off` still wins); `gate.skipWhenOnly` (gitignore patterns, e.g. `*.md`)
@@ -374,7 +378,8 @@ every turn regardless of where Claude later `cd`s.
 
 For every reviewed turn, your request, Claude's final message, the diff, and
 source the advisor tools read are sent to the **external providers you
-configured**. That is intentional. Exclusions prevent
+configured**; in watch mode, also Claude's messages so far and one line per
+tool call (never its output, command line, or search pattern). That is intentional. Exclusions prevent
 tool access to credential files (`.env*`, `*.pem`, `*.key`, `*.p12`, `.npmrc`,
 `.netrc`, `.envrc`, SSH keys, `.ssh`, `.aws`), `.git`, `.claude`, `.codex`,
 `.gemini`, `node_modules`, plugin state, anything git ignores (including

@@ -48,6 +48,8 @@ export const PLUGIN_NAME = "cross-model-advisor";
 
 /** Starts every message the background review wakes Claude with. */
 export const WAKE_MARKER = "[cross-model-advisor background review]";
+/** Starts every message a watch-mode step review interrupts Claude with. */
+export const STEER_MARKER = "[cross-model-advisor step review]";
 /** Longest user-visible notice. */
 export const USER_SUMMARY_CHARS = 2_000;
 /** Longest context handed to Claude with a prompt. */

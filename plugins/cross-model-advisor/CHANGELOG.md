@@ -6,6 +6,27 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.26
+
+- New `gate.mode: "watch"`, the mid-turn advisor: advise mode, plus a review
+  after each file-changing tool call (Edit, Write, MultiEdit, NotebookEdit,
+  Bash) while Claude works, through an asyncRewake PostToolUse hook. A new
+  `concern` or `blocker` interrupts Claude at its next step (at most
+  `gate.maxRounds` times per turn); nits and anything past the limit reach
+  you with your next prompt. One step review runs at a time and each reviews
+  the whole turn so far, told Claude is still working and given what earlier
+  steps raised. The review at Stop still runs, to check Claude's final
+  message, and inherits the step findings. Verified in a real Claude Code
+  host (a new `watch-steer` smoke phase: the interruption lands before
+  Claude's final answer, in the same turn).
+- Step reviews also see what Claude has said and done so far this turn: its
+  messages and one line per tool call from the session transcript. Tool
+  output, thinking, Bash command lines (only Claude's description or the
+  program name), and search patterns are never included; excluded or outside
+  paths are masked and credentials redacted. `/on` and the README disclose it.
+- The hook runs through the lightweight `control.mjs`, which loads the
+  provider SDK only when a step review will actually run.
+
 ## 2.1.25
 
 - README: Claude Code's hooks can reach Claude mid-turn, between tool calls

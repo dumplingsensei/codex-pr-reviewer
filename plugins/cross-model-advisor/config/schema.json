@@ -184,16 +184,16 @@
       "description": "Review after Claude finishes a turn that changed files.",
       "properties": {
         "mode": {
-          "enum": ["block", "report", "advise"],
+          "enum": ["block", "report", "advise", "watch"],
           "default": "block",
-          "description": "block: concerns and blockers send Claude back to address them. report: findings are only shown to the user. advise: Claude stops at once and a background review wakes it for blockers; other findings reach the user and Claude with the next prompt."
+          "description": "block: concerns and blockers send Claude back to address them. report: findings are only shown to the user. advise: Claude stops at once and a background review wakes it for blockers; other findings reach the user and Claude with the next prompt. watch: advise, plus reviews while Claude works, after each file-changing tool call; concerns and blockers interrupt Claude at its next step."
         },
         "maxRounds": {
           "type": "integer",
           "minimum": 1,
           "maximum": 5,
           "default": 2,
-          "description": "How many times one prompt can be sent back before Claude is allowed to stop; in advise mode, how many times the background review can wake Claude before the user's next prompt."
+          "description": "How many times one prompt can be sent back before Claude is allowed to stop; in advise mode, how many times the background review can wake Claude before the user's next prompt; in watch mode, also how many times step reviews can interrupt one turn."
         },
         "autoOn": {
           "type": "array",

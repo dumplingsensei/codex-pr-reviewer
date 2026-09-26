@@ -1030,7 +1030,8 @@ async function editGate(ctx) {
         items: [
           { value: "block", label: "block", description: "Concerns and blockers send Claude back to address them." },
           { value: "report", label: "report", description: "Findings are only shown to you." },
-          { value: "advise", label: "advise", description: "Claude stops at once; a background review wakes it for blockers." }
+          { value: "advise", label: "advise", description: "Claude stops at once; a background review wakes it for blockers." },
+          { value: "watch", label: "watch", description: "Advise, plus reviews while Claude works that interrupt it for concerns." }
         ]
       });
       if (mode?.action === "select") gate.mode = mode.value;

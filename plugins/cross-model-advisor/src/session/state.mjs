@@ -73,6 +73,14 @@ export function emptyState(overrides = {}) {
      * @type {{ stops: AdviseStop[], notices: { id: string, at: number, user: string | null, context: string | null }[], wakes: number }}
      */
     advise: { stops: [], notices: [], wakes: 0 },
+    /**
+     * Watch mode's step reviews for the turn in progress (`turnId`): the one
+     * running now, if any; findings raised so far this turn; how many times
+     * they interrupted Claude; and the last base..head a step review covered.
+     *
+     * @type {{ turnId: string | null, running: { id: string, since: number } | null, findings: object[], steers: number, lastKey: string | null }}
+     */
+    watch: { turnId: null, running: null, findings: [], steers: 0, lastKey: null },
     ...overrides
   };
 }

@@ -26,6 +26,7 @@ var FILE_MODE = 384;
 var STATE_VERSION = 2;
 var PLUGIN_NAME = "cross-model-advisor";
 var WAKE_MARKER = "[cross-model-advisor background review]";
+var STEER_MARKER = "[cross-model-advisor step review]";
 var USER_SUMMARY_CHARS = 2e3;
 var NOTICE_CONTEXT_CHARS = 8e3;
 var ADVISE_WAIT_MS = 12e4;
@@ -48,6 +49,7 @@ export {
   SESSION_RETENTION_MS,
   SEVERITY_ORDER,
   STATE_VERSION,
+  STEER_MARKER,
   STOP_REVIEW_BUDGET_MS,
   USER_SUMMARY_CHARS,
   USER_TEXT_CAP,

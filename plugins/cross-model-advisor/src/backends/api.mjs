@@ -568,7 +568,9 @@ function renderObservations(observations, secret) {
  *   final?: string,
  *   round?: number,
  *   diff?: { files?: { eventId: string, path: string, status: string, oldPath?: string, text: string }[], omitted?: string[], unshown?: string[] },
- *   previous?: { severity: string, advisor: string, note: string }[]
+ *   previous?: { severity: string, advisor: string, note: string }[],
+ *   inProgress?: boolean,
+ *   progress?: string
  * }} turn
  * @param {string | undefined} secret
  */
@@ -577,17 +579,28 @@ function renderTurn(turn, secret) {
   if (typeof turn.request === "string" && turn.request.trim()) {
     parts.push(`[eventId: request] The user's request for this turn:\n${turn.request}`);
   }
+  if (turn.inProgress) {
+    parts.push(
+      "Claude has not finished this turn: it is still working, and the changes below are its work so far. " +
+        "Report only what is already wrong in them (a bug, a security problem, a wrong direction), not work it has yet to do."
+    );
+  }
+  if (typeof turn.progress === "string" && turn.progress.trim()) {
+    parts.push(`[eventId: progress] What Claude has said and done so far this turn (its tool calls, not their results):\n${turn.progress}`);
+  }
   if (typeof turn.final === "string" && turn.final.trim()) {
     parts.push(`[eventId: final] Claude's final message for this turn (its claim, not evidence):\n${turn.final}`);
   }
   if (Array.isArray(turn.previous) && turn.previous.length) {
     const lines = turn.previous.map((item) => `- [${item.severity}] ${item.advisor}: ${item.note}`);
     parts.push(
-      `This is review round ${turn.round ?? 2}. Findings from the previous round, which Claude was asked to address or rebut:\n${lines.join("\n")}`
+      turn.inProgress
+        ? `Findings already raised earlier in this turn; do not repeat them unless the new changes make them worse:\n${lines.join("\n")}`
+        : `This is review round ${turn.round ?? 2}. Findings from the previous round, which Claude was asked to address or rebut:\n${lines.join("\n")}`
     );
   }
   const files = Array.isArray(turn.diff?.files) ? turn.diff.files : [];
-  const header = `Changes made during this turn, measured by git (${files.length} file${files.length === 1 ? "" : "s"}):`;
+  const header = `Changes made ${turn.inProgress ? "so far" : "during"} this turn, measured by git (${files.length} file${files.length === 1 ? "" : "s"}):`;
   const bodies = files.map((file) => {
     const label = file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path;
     return `[eventId: ${file.eventId}] ${file.status} ${label}\n${file.text}`;

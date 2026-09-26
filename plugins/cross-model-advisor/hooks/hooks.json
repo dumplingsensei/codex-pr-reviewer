@@ -1,5 +1,5 @@
 {
-  "description": "Turn the gate on at session start for projects listed in your own gate.autoOn, snapshot the working tree when a prompt is submitted, and review what changed when Claude finishes the turn, in the background in advise mode. Fail-open: errors let Claude stop and are recorded for /cross-model-advisor:status.",
+  "description": "Turn the gate on at session start for projects listed in your own gate.autoOn, snapshot the working tree when a prompt is submitted, and review what changed when Claude finishes the turn, in the background in advise mode, and after each file-changing tool call in watch mode. Fail-open: errors let Claude stop and are recorded for /cross-model-advisor:status.",
   "hooks": {
     "SessionStart": [
       {
@@ -19,6 +19,19 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/control.mjs\" hook",
             "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/control.mjs\" watch",
+            "timeout": 300,
+            "asyncRewake": true
           }
         ]
       }

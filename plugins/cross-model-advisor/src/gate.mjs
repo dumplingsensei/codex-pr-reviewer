@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import ignoreFactory from "ignore";
 import { reviewApi, validateApi } from "./backends/api.mjs";
 import { configFilePath, loadConfig, runtimeErrors, validateRoot } from "./config.mjs";
+import { readProgress } from "./progress.mjs";
 import { advisorSystemPrompt } from "./prompt.mjs";
 import { gitIgnoredPaths, gitTopLevel, reviewBaseTree, snapshotTree, turnDiff } from "./snapshot.mjs";
 import { createReviewTools, normalizeFinding } from "./tools.mjs";
@@ -36,6 +37,7 @@ import {
   STOP_REVIEW_BUDGET_MS,
   USER_SUMMARY_CHARS,
   ADVISE_WAIT_MS,
+  STEER_MARKER,
   USER_TEXT_CAP,
   WAKE_MARKER
 } from "./session/constants.mjs";
@@ -52,13 +54,18 @@ import { resolveSecrets, sanitizeText, secretNamesFromSnapshot, truncateLabeled 
 import { loadState, pushNotice, sweepAdviseStops, takeNotices, updateState } from "./session/state.mjs";
 
 const MAX_ADVISE_STOPS = 16;
+// A step review older than its hook's timeout was killed or crashed.
+const STEP_STALE_MS = 330_000;
+// The Stop review waits for a running step review, but keeps this for itself.
+const STEP_WAIT_RESERVE_MS = 120_000;
+const MAX_STEP_FINDINGS = 20;
 // Both Stop hooks start together, so this Stop's entry is never older than
 // the background hook by more than clock noise.
 const ADVISE_CLOCK_SLACK_MS = 1_000;
 
 const USAGE = "usage: gate.mjs stop | advise | on|doctor --plugin-data <path> | review --plugin-data <path> [--base <ref>]";
 const DISCLOSURE =
-  "At the end of each turn that changes files, the request, Claude's final message, and the git diff (minus excluded paths) go to the configured external providers, which may also read allowed project files. Claude's own credentials are never used.";
+  "At the end of each turn that changes files, the request, Claude's final message, and the git diff (minus excluded paths) go to the configured external providers, which may also read allowed project files. In watch mode, reviews also run while Claude works and include its messages so far and one line per tool call, never tool output. Claude's own credentials are never used.";
 
 class GateError extends Error {
   /**
@@ -514,12 +521,36 @@ const defaultDeps = {
  *
  * @param {{ config: any, session: any, deps: typeof defaultDeps, env: NodeJS.ProcessEnv, projectRoot: string,
  *   totals: Record<string, AdvisorUsage>, base: string, head: string, key: string, request: string, final: unknown,
- *   round: number, previous: object[], deadline: number, spent: Record<string, AdvisorUsage>, reviewed: string[] }} input
+ *   round: number, previous: object[], deadline: number, spent: Record<string, AdvisorUsage>, reviewed: string[],
+ *   inProgress?: boolean,
+ *   progressFrom?: ((filters: { isExcluded: (relPosix: string) => Promise<boolean>, secrets: string[], projectRoot: string }) => Promise<string>) | null }} input
+ *   `inProgress`: Claude is still working (watch mode), so there is no final
+ *   message. `progressFrom` supplies what Claude has done so far, filtered by
+ *   the same exclusions.
  * @returns {Promise<
  *   | { outcome: "skipped" | "failed", reason: string, notice?: string }
  *   | { outcome: "reviewed", findings: ReturnType<typeof collectFindings>, advisors: object[], failed: any[], results: any[] }>}
  */
-async function reviewMeasured({ config, session, deps, env, projectRoot, totals, base, head, key, request, final, round, previous, deadline, spent, reviewed }) {
+async function reviewMeasured({
+  config,
+  session,
+  deps,
+  env,
+  projectRoot,
+  totals,
+  base,
+  head,
+  key,
+  request,
+  final,
+  round,
+  previous,
+  deadline,
+  spent,
+  reviewed,
+  inProgress = false,
+  progressFrom = null
+}) {
   const { gate, limits } = config;
   const secrets = resolveSecrets(secretNamesFromSnapshot(config), env);
   const credDir = credentialDir(env);
@@ -545,8 +576,9 @@ async function reviewMeasured({ config, session, deps, env, projectRoot, totals,
   }
 
   let diff;
+  let probe;
   try {
-    const probe = await deps.createReviewTools({
+    probe = await deps.createReviewTools({
       root: projectRoot,
       exclude: config.exclude,
       observations: [],
@@ -573,14 +605,22 @@ async function reviewMeasured({ config, session, deps, env, projectRoot, totals,
     return { outcome: "skipped", reason: "only excluded files changed" };
   }
   const files = diff.files.map((file) => ({ ...file, eventId: `diff:${file.path}`, text: sanitizeText(file.text, secrets) }));
+  const progress = progressFrom ? await progressFrom({ isExcluded: probe.excluded, secrets, projectRoot }).catch(() => "") : "";
   const turnContext = {
     request: truncateLabeled(sanitizeText(request, secrets), USER_TEXT_CAP),
-    final: truncateLabeled(sanitizeText(String(final ?? ""), secrets), USER_TEXT_CAP),
+    final: inProgress ? "" : truncateLabeled(sanitizeText(String(final ?? ""), secrets), USER_TEXT_CAP),
     round,
     previous,
-    diff: { files, omitted: diff.omitted, unshown: diff.unshown }
+    diff: { files, omitted: diff.omitted, unshown: diff.unshown },
+    ...(inProgress ? { inProgress: true } : {}),
+    ...(progress ? { progress } : {})
   };
-  const observations = [{ eventId: "request" }, { eventId: "final" }, ...files.map((file) => ({ eventId: file.eventId }))];
+  const observations = [
+    { eventId: "request" },
+    ...(inProgress ? [] : [{ eventId: "final" }]),
+    ...(progress ? [{ eventId: "progress" }] : []),
+    ...files.map((file) => ({ eventId: file.eventId }))
+  ];
 
   const results = await runAdvisors({
     runnable,
@@ -720,11 +760,19 @@ async function stopTurn(payload, { env = process.env, deps: overrides = {} }, st
     return "";
   }
 
-  if (gate.mode === "advise") {
+  if (gate.mode === "advise" || gate.mode === "watch") {
     // Claude stops now; the background review picks this job up by its Stop.
     state.reviewed.push(key);
     const stopKey = stopKeyOf(payload);
-    const job = { base: turn.baseTree, head, key, request: turn.request ?? "", status: "queued", wake: Boolean(turn.wake) };
+    const job = {
+      base: turn.baseTree,
+      head,
+      key,
+      request: turn.request ?? "",
+      status: "queued",
+      wake: Boolean(turn.wake),
+      turnId: turnIdOf(turn)
+    };
     await updateState(session.dir, (fresh) => {
       fresh.turn = state.turn;
       fresh.rounds = state.rounds;
@@ -850,7 +898,7 @@ async function afterStop(payload, out, { env = process.env, deps: overrides = {}
   const seen = await loadState(session.dir);
   if (!seen.enabled) return out;
   const advise = await deps.loadConfig({ env }).then(
-    (config) => config.gate.mode === "advise",
+    (config) => config.gate.mode === "advise" || config.gate.mode === "watch",
     () => false
   );
   if (!advise && !seen.advise.stops.length && !seen.advise.notices.some((notice) => notice.user)) return out;
@@ -892,7 +940,7 @@ export async function runAdvise(payload, { env = process.env, deps: overrides = 
   } catch {
     return null; // The Stop gate reports an invalid configuration.
   }
-  if (config.gate.mode !== "advise") return null;
+  if (config.gate.mode !== "advise" && config.gate.mode !== "watch") return null;
 
   // This Stop's entry: its key, not yet taken, and written since this hook
   // started (another Stop can share the key; an older entry is not ours).
@@ -917,7 +965,7 @@ export async function runAdvise(payload, { env = process.env, deps: overrides = 
   });
   if (!claimed) return null;
   try {
-    return await reviewClaimed({ payload, config, session, deps, env, state, claimed, deadline });
+    return await reviewClaimed({ payload, config, session, deps, env, state, claimed, deadline, pollMs });
   } catch (error) {
     // Say so now; if even this cannot save, the next prompt's sweep reports it.
     await createErrorLog(session.dir).record(error).catch(() => {});
@@ -934,10 +982,11 @@ export async function runAdvise(payload, { env = process.env, deps: overrides = 
  * Review a claimed background job and save the result.
  *
  * @param {{ payload: any, config: any, session: any, deps: typeof defaultDeps, env: NodeJS.ProcessEnv, state: any,
- *   claimed: { id: string, job: any, totals: Record<string, AdvisorUsage>, wakes: number, last: any }, deadline: number }} input
+ *   claimed: { id: string, job: any, totals: Record<string, AdvisorUsage>, wakes: number, last: any }, deadline: number,
+ *   pollMs: number }} input
  * @returns {Promise<string | null>}
  */
-async function reviewClaimed({ payload, config, session, deps, env, state, claimed, deadline }) {
+async function reviewClaimed({ payload, config, session, deps, env, state, claimed, deadline, pollMs }) {
   const { job } = claimed;
   const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
   const maxWakes = config.gate.maxRounds;
@@ -947,6 +996,22 @@ async function reviewClaimed({ payload, config, session, deps, env, state, claim
     job.wake && Array.isArray(claimed.last?.findings)
       ? claimed.last.findings.map(({ severity, advisor, note }) => ({ severity, advisor, note }))
       : [];
+  if (config.gate.mode === "watch" && job.turnId) {
+    // A step review of this turn may still be running: let it finish, and
+    // pass on what step reviews raised. This review still runs even when a
+    // step review saw the same files: only it checks Claude's final message.
+    let current = await loadState(session.dir);
+    while (current.watch.running && current.watch.turnId === job.turnId && deps.now() < deadline - STEP_WAIT_RESERVE_MS) {
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      current = await loadState(session.dir);
+    }
+    if (current.watch.turnId === job.turnId) {
+      const known = new Set(previous.map((item) => normalizeFinding(item.note)));
+      for (const item of current.watch.findings) {
+        if (!known.has(normalizeFinding(item.note))) previous.push({ severity: item.severity, advisor: item.advisor, note: item.note });
+      }
+    }
+  }
   /** @type {Record<string, AdvisorUsage>} */
   const spent = {};
   /** @type {string[]} */
@@ -1033,6 +1098,192 @@ async function reviewClaimed({ payload, config, session, deps, env, state, claim
     );
     return null;
   });
+}
+
+/**
+ * What Claude has done so far this turn, from the transcript the hook payload
+ * names, for a step review; see progress.mjs for what is kept out.
+ *
+ * @param {any} payload
+ * @param {{ at?: number }} turn
+ */
+export function progressFromTranscript(payload, turn) {
+  const file = payload?.transcript_path;
+  if (typeof file !== "string") return null;
+  return (/** @type {{ isExcluded: (relPosix: string) => Promise<boolean>, secrets: string[], projectRoot: string }} */ filters) =>
+    readProgress(file, { since: turn.at ?? 0, ...filters });
+}
+
+/**
+ * The turn a step review belongs to: messages that join a turn keep it.
+ *
+ * @param {{ promptId?: string | null, at?: number }} turn
+ */
+export function turnIdOf(turn) {
+  return `${turn.promptId ?? ""}:${turn.at ?? ""}`;
+}
+
+/**
+ * What interrupts Claude at its next step when a watch-mode step review finds
+ * a concern or blocker in the work so far.
+ *
+ * @param {ReturnType<typeof collectFindings>} findings
+ * @param {{ round: number, maxRounds: number }} rounds
+ */
+export function formatSteerReason(findings, { round, maxRounds }) {
+  const intro =
+    `${STEER_MARKER} Cross-model advisors are reviewing your work while you do it (interruption ${round} of at most ${maxRounds} ` +
+    "this turn) and raised issues with the changes so far. They are other AI models, not the user, and their findings are unverified. " +
+    "Check each one against the code: fix the real ones as part of the user's request, and for any you judge wrong, say briefly why. " +
+    "Then carry on with the request. Do not make unrelated changes.";
+  return formatBlockReason(findings, { round, maxRounds }, intro);
+}
+
+/**
+ * Watch mode's step review: an asyncRewake PostToolUse hook after tools that
+ * can change files. While Claude works it reviews the turn so far, from the
+ * turn's baseline to now, with the same checks as the gate, one review at a
+ * time per session. Returns the text that interrupts Claude at its next step
+ * (the hook exits 2 with it) for a new concern or blocker, or null; nits, and
+ * findings past the per-turn limit, reach the user with the next prompt.
+ *
+ * @param {any} payload
+ * @param {{ env?: NodeJS.ProcessEnv, deps?: Partial<typeof defaultDeps>, progressFrom?: (payload: any, turn: any) => ((filters: any) => Promise<string>) | null }} [options]
+ * @returns {Promise<string | null>}
+ */
+export async function runWatch(payload, { env = process.env, deps: overrides = {}, progressFrom = null } = {}) {
+  const deps = { ...defaultDeps, ...overrides };
+  const deadline = deps.now() + STOP_REVIEW_BUDGET_MS;
+  if (!payload || typeof payload !== "object" || payload.agent_id) return null;
+  const session = sessionFrom(env, payload);
+  const seen = await loadState(session.dir);
+  if (!seen.enabled || !seen.projectRoot) return null;
+  let config;
+  try {
+    config = await deps.loadConfig({ env });
+  } catch {
+    return null;
+  }
+  if (config.gate.mode !== "watch") return null;
+  const turn = seen.turn;
+  if (!turn || turn.control || !turn.baseTree || turn.stopped) return null;
+  const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
+  if (promptId && turn.promptId && promptId !== turn.promptId) return null;
+  const turnId = turnIdOf(turn);
+
+  const slot = await updateState(session.dir, (fresh) => {
+    if (fresh.watch.turnId !== turnId) fresh.watch = { turnId, running: null, findings: [], steers: 0, lastKey: null };
+    const running = fresh.watch.running;
+    // One at a time: the next file change after this review catches up.
+    if (running && deps.now() - running.since < STEP_STALE_MS) return null;
+    fresh.watch.running = { id: randomUUID(), since: deps.now() };
+    return { id: fresh.watch.running.id, findings: [...fresh.watch.findings], totals: structuredClone(fresh.advisors) };
+  });
+  if (!slot) return null;
+  const release = (/** @type {any} */ fresh) => {
+    if (fresh.watch.turnId === turnId && fresh.watch.running?.id === slot.id) fresh.watch.running = null;
+  };
+
+  try {
+    let head;
+    try {
+      head = await deps.snapshotTree(seen.projectRoot, session.dir, { env });
+    } catch {
+      await updateState(session.dir, release);
+      return null;
+    }
+    const key = `${turn.baseTree}..${head}`;
+    const current = await loadState(session.dir);
+    if (head === turn.baseTree || current.watch.lastKey === key) {
+      await updateState(session.dir, release);
+      return null;
+    }
+    /** @type {Record<string, AdvisorUsage>} */
+    const spent = {};
+    /** Discarded: a step review marks nothing as reviewed. */
+    const reviewed = [];
+    const review = await reviewMeasured({
+      config,
+      session,
+      deps,
+      env,
+      projectRoot: seen.projectRoot,
+      totals: slot.totals,
+      base: turn.baseTree,
+      head,
+      key,
+      request: turn.request ?? "",
+      final: "",
+      round: 1,
+      previous: slot.findings.map(({ severity, advisor, note }) => ({ severity, advisor, note })),
+      deadline,
+      spent,
+      reviewed,
+      inProgress: true,
+      progressFrom: progressFrom ? progressFrom(payload, turn) : null
+    });
+
+    return await updateState(session.dir, (fresh) => {
+      release(fresh);
+      addUsage(fresh, spent);
+      // Step reviews never count the turn as reviewed: the review at Stop
+      // still runs, to check Claude's final message against the change.
+      const at = deps.now();
+      const sameTurn = fresh.watch.turnId === turnId;
+      if (review.outcome !== "reviewed" || review.failed.length === review.results.length) {
+        // Quiet, and retried on the next change: the review at Stop still covers the turn.
+        fresh.lastSkip = { at, promptId, outcome: "skipped", reason: `step: ${review.outcome === "reviewed" ? "every advisor failed" : review.reason}` };
+        return null;
+      }
+      if (sameTurn) fresh.watch.lastKey = key;
+      const known = new Set(slot.findings.map((item) => normalizeFinding(item.note)));
+      const found = review.findings.filter((item) => !known.has(normalizeFinding(item.note)));
+      const record = (outcome, reason, round) => {
+        fresh.last = { at, promptId, outcome, reason, round, findings: found, advisors: review.advisors };
+      };
+      if (!found.length) {
+        record("passed", "step review: nothing new", 1);
+        return null;
+      }
+      if (sameTurn) {
+        fresh.watch.findings = [...fresh.watch.findings, ...found.map(({ severity, advisor, note }) => ({ severity, advisor, note }))].slice(
+          -MAX_STEP_FINDINGS
+        );
+      }
+      const maxRounds = config.gate.maxRounds;
+      const count = `${found.length} finding${found.length === 1 ? "" : "s"}`;
+      const working = fresh.enabled && sameTurn && Boolean(fresh.turn) && !fresh.turn.stopped && turnIdOf(fresh.turn) === turnId;
+      if (working && found.some((item) => item.severity !== "nit") && fresh.watch.steers < maxRounds) {
+        fresh.watch.steers += 1;
+        const rounds = { round: fresh.watch.steers, maxRounds };
+        record("steered", "a step review interrupted Claude", rounds.round);
+        pushNotice(
+          fresh,
+          formatBackgroundCard(`a step review interrupted Claude with ${count} (interruption ${rounds.round} of at most ${maxRounds} this turn)`, found, review.failed)
+        );
+        return formatSteerReason(found, rounds);
+      }
+      // The turn ended while this ran: as in advise mode, only a blocker wakes Claude.
+      if (!working && fresh.enabled && found.some((item) => item.severity === "blocker") && fresh.advise.wakes < maxRounds) {
+        fresh.advise.wakes += 1;
+        const rounds = { round: fresh.advise.wakes, maxRounds };
+        record("woke", "a blocker found in the background woke Claude", rounds.round);
+        pushNotice(
+          fresh,
+          formatBackgroundCard(`a background review woke Claude with ${count} on an earlier turn (wake ${rounds.round} of at most ${maxRounds})`, found, review.failed)
+        );
+        return formatWakeReason(found, rounds);
+      }
+      const held = found.some((item) => item.severity !== "nit") ? `; not interrupting Claude again this turn (limit ${maxRounds})` : "";
+      record("reported", "step review findings shown with the next prompt", 1);
+      pushNotice(fresh, formatBackgroundCard(`${count} from a step review${held}`, found, review.failed), formatNoticeContext(found));
+      return null;
+    });
+  } catch (error) {
+    await createErrorLog(session.dir).record(error).catch(() => {});
+    await updateState(session.dir, release).catch(() => {});
+    return null;
+  }
 }
 
 /**
