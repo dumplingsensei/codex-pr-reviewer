@@ -5,6 +5,18 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/` moves it — `tests/version-guard.sh` fails the build
 otherwise.
 
+## 0.9.20
+
+A review whose model the Codex CLI did not know failed with only "codex exited
+1" from the wrapper. The ChatGPT app ships a newer Codex and can set its newest
+model as the default in the shared `~/.codex/config.toml`; an older standalone
+CLI on PATH then reads that default, and the server refuses it "when using
+Codex with a ChatGPT account", which blames the account rather than the CLI.
+The wrapper now reads Codex's stderr as it passes it through, and when a failed
+run said `Model metadata for <model> not found`, it names the model, where it
+came from, and the update command for the copy on PATH. A regression case with
+the verbatim 0.149.1 output failed on the old script.
+
 ## 0.9.19
 
 0.9.18 left one checkout unprotected: `gh repo clone` checked out the default

@@ -2719,12 +2719,16 @@ async function commandReview(argv, cwd) {
 
   try {
     log(`Running: codex ${codexArgs.slice(0, 4).join(" ")} … review --base ${entry.baseBranch}`);
+    let unknownModel = null;
     // With --json the review text must not share stdout with the JSON payload.
     const { status, stdout, timedOut, truncated } = await streamCodex(codexArgs, {
       echo: options.json ? process.stderr : process.stdout,
       timeoutMs,
       maxOutputBytes,
-      onSpawn: (pid) => recordCodexPid(runMarker, pid)
+      onSpawn: (pid) => recordCodexPid(runMarker, pid),
+      onStderrLine: (line) => {
+        unknownModel ??= unknownModelIn(line);
+      }
     });
 
     // `body` is codex's output and nothing else, because it is what decides
@@ -2808,6 +2812,8 @@ async function commandReview(argv, cwd) {
     }
 
     if (status !== 0) log(`Note: codex exited ${status}.`);
+    // A deadline is its own explanation; an unknown model did not cause it.
+    if (status !== 0 && !timedOut && unknownModel) log(unknownModelHint(unknownModel, options));
     // Our exit status reports whether *this* wrapper did its job. A review that
     // ran and was saved is a success even if codex exited nonzero — callers like
     // `sweep` would otherwise mark healthy PRs as failed. Codex's own status is
@@ -2816,6 +2822,40 @@ async function commandReview(argv, cwd) {
   } finally {
     endRun(runMarker);
   }
+}
+
+/**
+ * The model a line of codex's stderr says this CLI has no metadata for, or null.
+ *
+ * Codex prints this warning when the model it was given is missing from its own
+ * catalogue — most often because the model is newer than the CLI. The usual
+ * shape: the ChatGPT app ships a newer codex, sets that model as the default in
+ * the shared `~/.codex/config.toml`, and the older standalone CLI on PATH reads
+ * the same config. The server then refuses the run with "not supported when
+ * using Codex with a ChatGPT account", which blames the account, not the CLI.
+ *
+ * Only a name shaped like a model id is taken. Codex's stderr also carries what
+ * it read while reviewing, so a pull request can put this sentence there with
+ * anything between the backticks — and the capture goes into a note Claude
+ * reads as the plugin's own remedy. A model id cannot carry an instruction.
+ */
+export function unknownModelIn(line) {
+  return /Model metadata for `([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})` not found/.exec(line)?.[1] ?? null;
+}
+
+/**
+ * What to say when a run failed after codex said it does not know its model.
+ *
+ * Hedged on purpose: the same warning follows a mistyped `--model`, and no
+ * update fixes that.
+ */
+function unknownModelHint(model, options) {
+  const version = run("codex", ["--version"]).stdout.trim() || "This Codex";
+  const source = options.model ? "from --model" : "from your Codex config";
+  return (
+    `Note: ${version} does not recognise the model \`${model}\` (${source}). ` +
+    `If that name is right, the model is newer than this CLI. ${codexUpgradeRemedy()}`
+  );
 }
 
 /**
@@ -2959,9 +2999,19 @@ function signalCodexTree(child, signal) {
   }
 }
 
+// The longest partial stderr line kept between chunks. Codex's diagnostics are
+// short; a run that never prints a newline must not grow the carry for ever.
+const CODEX_STDERR_LINE_CAP = 64 * 1024;
+
 function streamCodex(
   args,
-  { echo = process.stdout, timeoutMs = codexTimeoutMs(), maxOutputBytes = codexMaxOutputBytes(), onSpawn } = {}
+  {
+    echo = process.stdout,
+    timeoutMs = codexTimeoutMs(),
+    maxOutputBytes = codexMaxOutputBytes(),
+    onSpawn,
+    onStderrLine
+  } = {}
 ) {
   return new Promise((resolve, reject) => {
     let child = null;
@@ -3007,7 +3057,9 @@ function streamCodex(
 
     try {
       child = spawn("codex", args, {
-        stdio: ["ignore", "pipe", "inherit"],
+        // stderr is piped rather than inherited so it can be read on its way
+        // through: when a run fails, codex says why there and nowhere else.
+        stdio: ["ignore", "pipe", "pipe"],
         // Its own process group, so the deadline below and the forwarded signals
         // can end the whole tree. Deliberately not `unref`ed: this process still
         // waits for the review.
@@ -3146,6 +3198,23 @@ function streamCodex(
       stdout += decoder.write(chunk);
       keptBytes += chunk.length;
     });
+    // Passed through unchanged, exactly as `inherit` did, and handed to the
+    // caller a line at a time. A failed run leaves stdout empty and puts its
+    // cause here — an unknown model, a refused request — so this is the only
+    // place a cause can be recognised and turned into a remedy.
+    const stderrDecoder = new StringDecoder("utf8");
+    let stderrPartial = "";
+    child.stderr.on("data", (chunk) => {
+      process.stderr.write(chunk);
+      if (!onStderrLine) return;
+      const lines = (stderrPartial + stderrDecoder.write(chunk)).split("\n");
+      stderrPartial = lines.pop().slice(-CODEX_STDERR_LINE_CAP);
+      for (const line of lines) onStderrLine(line);
+    });
+    child.stderr.on("end", () => {
+      const last = stderrPartial + stderrDecoder.end();
+      if (onStderrLine && last) onStderrLine(last);
+    });
     child.on("error", (error) => {
       finish(() =>
         reject(
@@ -3188,12 +3257,13 @@ function streamCodex(
             } else {
               log("Note: whatever held the pipe is outside codex\'s process group and cannot be signalled from here.");
             }
-            // And letting go of the read end, which is the other half of not
+            // And letting go of the read ends, which is the other half of not
             // waiting. Settling the promise does not end this process while an
             // open pipe handle keeps the loop alive — the review would be
             // written and the command would still not return, which is the
             // same hang wearing a different hat.
             child.stdout.destroy();
+            child.stderr.destroy();
             resolve({ status: timedOut ? 124 : exitStatus, stdout, timedOut, truncated });
           });
         }, CODEX_PIPE_GRACE_MS);

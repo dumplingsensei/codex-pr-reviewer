@@ -380,6 +380,39 @@ out="$(hygiene_codex node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
 contains "a worktree that is gone is refused" "$out" "is gone"
 mv "$WT.moved" "$WT"
 
+note "a model the CLI does not know is named, with how to update"
+# Regression: the ChatGPT app shipped a newer codex and set its newest model as
+# the default in the shared config. The older standalone CLI on PATH read that
+# config, the server refused the model "when using Codex with a ChatGPT
+# account", and the wrapper added only "codex exited 1" — which read as the
+# plugin's fault or the account's. Codex said what was wrong, on stderr, which
+# the wrapper inherited without reading.
+UNKNOWN_MODEL_STDERR='warning: Model metadata for `gpt-6.1-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.
+ERROR: {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The '"'"'gpt-6.1-sol'"'"' model is not supported when using Codex with a ChatGPT account."}}'
+unknown_model_codex() {
+  env PATH="$STUBS:$PATH" CPR_STUB_RUN_STDERR="$UNKNOWN_MODEL_STDERR" "$@"
+}
+out="$(unknown_model_codex env CPR_STUB_RUN_BODY= CPR_STUB_RUN_EXIT=1 \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+check "a run refused for its model still fails" "$?" "1"
+contains "codex's own stderr still reaches the terminal" "$out" "is not supported when using Codex with a ChatGPT account"
+contains "the unknown model is named, with where it came from" "$out" \
+  'does not recognise the model `gpt-6.1-sol` (from your Codex config)'
+contains "and the update that reaches the CLI this plugin runs" "$out" "\`codex update\` — it updates $STUBS/codex"
+out="$(unknown_model_codex env CPR_STUB_RUN_BODY= CPR_STUB_RUN_EXIT=1 \
+  node "$SCRIPT" review o/r#7 --repo o/r --model gpt-6.1-sol --no-prepare 2>&1)"
+contains "a model passed with --model is said to be" "$out" "(from --model)"
+# The warning alone is not a failure: a run that finished needs no remedy.
+out="$(unknown_model_codex env CPR_STUB_RUN_BODY="P1 finding" CPR_STUB_RUN_EXIT=0 \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+check "a run that succeeded despite the warning gets no hint" \
+  "$(printf '%s' "$out" | grep -c 'does not recognise the model')" "0"
+# And a failure without the warning is not blamed on the model.
+out="$(env PATH="$STUBS:$PATH" CPR_STUB_RUN_BODY= CPR_STUB_RUN_EXIT=1 \
+  node "$SCRIPT" review o/r#7 --repo o/r --no-prepare 2>&1)"
+check "a failure without the warning gets no hint" \
+  "$(printf '%s' "$out" | grep -c 'does not recognise the model')" "0"
+
 note "batch clean of two PRs sharing one cached clone"
 # Regression: the shared-clone guard compared against post-batch survivors, so
 # with --all the FIRST entry deleted the clone and every later entry in the same

@@ -32,6 +32,7 @@
 #   CPR_STUB_SELF_UPDATE   "no" to list no `update` subcommand under `--help`
 #   CPR_STUB_RUN_HOOK      shell run before a review's output, for race tests
 #   CPR_STUB_RUN_BODY      what a review run prints on stdout
+#   CPR_STUB_RUN_STDERR    what a review run prints on stderr, before its body
 #   CPR_STUB_RUN_EXIT      its exit status                        (default 0)
 #
 # `${VAR-default}` rather than `${VAR:-default}` throughout: a knob set to the
@@ -109,5 +110,6 @@ esac
 
 # A review run.
 [ -n "${CPR_STUB_RUN_HOOK-}" ] && sh -c "$CPR_STUB_RUN_HOOK"
+[ -n "${CPR_STUB_RUN_STDERR-}" ] && printf '%s\n' "$CPR_STUB_RUN_STDERR" >&2
 [ -n "${CPR_STUB_RUN_BODY-}" ] && echo "$CPR_STUB_RUN_BODY"
 exit "${CPR_STUB_RUN_EXIT-0}"
