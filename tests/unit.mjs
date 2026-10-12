@@ -883,6 +883,7 @@ describe("packaging");
 // to be inside each packaged directory to reach them, and identical to the root
 // copy or the two say different things about the same code.
 const rootLicense = path.join(root, "LICENSE");
+const unsupportedPlugins = new Set(["cross-model-advisor"]);
 for (const entry of marketplace.plugins) {
   const dir = path.join(root, entry.source);
   const pluginLicense = path.join(dir, "LICENSE");
@@ -907,11 +908,21 @@ for (const entry of marketplace.plugins) {
     shippedReadme.includes("SECURITY.md"),
     true
   );
-  eq(
-    `${entry.name} shipped README routes to private reporting`,
-    shippedReadme.includes("security/advisories/new"),
-    true
-  );
+  // A retired plugin's security problems are not fixed, so its README says that
+  // instead of inviting private reports.
+  if (unsupportedPlugins.has(entry.name)) {
+    eq(
+      `${entry.name} shipped README says it is no longer supported`,
+      shippedReadme.includes("no longer supported"),
+      true
+    );
+  } else {
+    eq(
+      `${entry.name} shipped README routes to private reporting`,
+      shippedReadme.includes("security/advisories/new"),
+      true
+    );
+  }
 }
 
 describe("version guard");

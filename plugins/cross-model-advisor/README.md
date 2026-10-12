@@ -6,10 +6,10 @@ Codex, Gemini, xAI, OpenRouter, Kimi, Copilot, and others) review exactly what
 git measured, inspect the surrounding code themselves, and either send Claude
 back to address concerns or show their findings to you.
 
-**No longer developed.** The goal was an advisor like Oh My Pi's, which sees a
-turn as it streams, reasoning included, and can steer it mid-run. Claude Code's
-hooks see only visible text, between tool calls and at a turn's end, so I have
-stopped building it. It does not copy OMP's prompts or vendor its agent framework.
+**No longer developed or supported.** The goal was an advisor like Oh My Pi's,
+which sees a turn as it streams, reasoning included, and can steer it mid-run.
+Claude Code's hooks see only visible text, between tool calls and at a turn's end,
+so I have stopped building it. It does not copy OMP's prompts or vendor its agent framework.
 
 ## Commands
 
@@ -411,16 +411,14 @@ Provider conversations are memory-only and last one review. The last review's
 findings and session metadata have seven-day local retention. There are no native advisor CLI
 recordings. External providers apply their own retention and account policies.
 
-## Reporting a security problem
+## Security support
 
-This plugin sends each reviewed turn's diff and selected project files to external
-providers you configure and stores OAuth credentials under your OS user, so it
-has a threat model worth reading:
+This plugin is no longer supported: security problems in it will not be fixed,
+so uninstall it if one would matter to you. It sends each reviewed turn's diff
+and selected project files to external providers you configure and stores OAuth
+credentials under your OS user. The threat model it was built to, and what it
+deliberately accepts, is in
 [SECURITY.md](https://github.com/dumplingsensei/codex-pr-reviewer/blob/main/SECURITY.md).
-It says what is in scope, what is known and deliberately accepted, and how to
-report privately — through
-[GitHub's private vulnerability reporting](https://github.com/dumplingsensei/codex-pr-reviewer/security/advisories/new),
-not a public issue.
 
 Full marketplace listing, runtime notes, and the sibling `codex-pr-reviewer`
 plugin live in the

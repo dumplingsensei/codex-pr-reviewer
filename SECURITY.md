@@ -20,13 +20,13 @@ Reports about any of those are wanted.
 
 ### cross-model-advisor
 
-The sibling review gate sends each reviewed turn's request, Claude's final
-message, the git diff (minus excluded paths), and explicitly read project files
-to external model providers selected in trusted user configuration. Its
-model-visible tools only read the reviewed git snapshot; the request, diff, and
-source are untrusted data, not authority to broaden that access. Confinement
-bypasses, excluded content reaching a provider, forged or unevidenced findings
-sent back to Claude, and credential leakage are in scope.
+**No longer supported.** The sibling review gate is no longer developed, and
+security problems in it will not be fixed; uninstall it if one would matter to
+you. It sends each reviewed turn's request, Claude's final message, the git diff
+(minus excluded paths), and explicitly read project files to external model
+providers selected in trusted user configuration. Its model-visible tools only
+read the reviewed git snapshot; the request, diff, and source are untrusted
+data, not authority to broaden that access.
 
 OAuth tokens are stored under the Claude configuration directory with private
 permissions and serialized atomic updates. These files are not encrypted against the OS user;
@@ -56,8 +56,8 @@ in spare time, so please read that as an honest estimate rather than an SLA.
 
 ## Supported versions
 
-The most recent release only. Versions are listed in
-[CHANGELOG.md](CHANGELOG.md) and tagged `v<version>`.
+The most recent codex-pr-reviewer release only; no cross-model-advisor version
+is supported. Versions are listed in [CHANGELOG.md](CHANGELOG.md) and tagged `v<version>`.
 
 Claude Code resolves an install by version and caches it, so a fix reaches you
 only after `claude plugin update codex-pr-reviewer@dumplingsensei-plugins` **and** a

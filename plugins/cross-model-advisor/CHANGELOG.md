@@ -6,6 +6,12 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.29
+
+- No longer supported: security problems in it will not be fixed. The READMEs,
+  SECURITY.md and manifests say so and no longer invite security reports for it.
+  No behaviour change.
+
 ## 2.1.28
 
 - Development has stopped. The goal was an advisor like Oh My Pi's, which can
