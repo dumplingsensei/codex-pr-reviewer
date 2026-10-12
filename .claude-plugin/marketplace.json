@@ -19,8 +19,8 @@
     },
     {
       "name": "cross-model-advisor",
-      "description": "When Claude finishes a turn that changed files, advisors from other model families review the diff and send Claude back to address their concerns.",
-      "version": "2.1.27",
+      "description": "No longer developed. When Claude finishes a turn that changed files, advisors from other model families review the diff and send Claude back to address their concerns.",
+      "version": "2.1.28",
       "author": {
         "name": "dumplingsensei"
       },

@@ -6,10 +6,10 @@ Codex, Gemini, xAI, OpenRouter, Kimi, Copilot, and others) review exactly what
 git measured, inspect the surrounding code themselves, and either send Claude
 back to address concerns or show their findings to you.
 
-The idea of a second model from another family watching the work comes from
-Oh My Pi's advisors. Claude Code's hooks see a turn between tool calls and at
-its end, not as it streams, so the advisors review what changed at those
-points. It does not copy OMP's prompts or vendor its agent framework.
+**No longer developed.** The goal was an advisor like Oh My Pi's, which sees a
+turn as it streams, reasoning included, and can steer it mid-run. Claude Code's
+hooks see only visible text, between tool calls and at a turn's end, so I have
+stopped building it. It does not copy OMP's prompts or vendor its agent framework.
 
 ## Commands
 

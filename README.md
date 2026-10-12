@@ -10,7 +10,7 @@ Claude Code plugins. Install the marketplace once, then each plugin separately:
 
 | Plugin | What it does |
 |---|---|
-| [cross-model-advisor](#cross-model-advisor) | When Claude finishes a turn that changed files, advisors from other model families review the diff and send Claude back to address their concerns. |
+| [cross-model-advisor](#cross-model-advisor) | **No longer developed.** When Claude finishes a turn that changed files, advisors from other model families review the diff and send Claude back to address their concerns. |
 | [codex-pr-reviewer](#codex-pr-reviewer) | Fetch a GitHub PR into an isolated worktree and review it with Codex. |
 
 Each plugin's manifest defines its version; marketplace metadata is versioned separately. Changing one plugin does not move the other.
@@ -22,13 +22,13 @@ Written for my own use, published in case it is useful. It is tested and it work
 - **Bug reports are welcome and may not get fixed.** File one anyway with a reproduction — it tells the next person what to expect, whether or not I act on it.
 - **Pull requests are welcome and may not get merged.** If something matters to you and I am slow, fork it; that is what the MIT license is for.
 - **Security reports are the exception.** Those get a reply — see [SECURITY.md](SECURITY.md).
-- A quiet stretch means I have not had time, not that this is abandoned. If it ever is, this section will say so.
+- **cross-model-advisor is no longer developed**; [its section](#cross-model-advisor) says why. For codex-pr-reviewer, a quiet stretch means I have not had time, not that it is abandoned. If it ever is, this section will say so.
 
 # cross-model-advisor
 
 A review gate built from models of other families. When Claude finishes a turn that changed files, the advisors you configure review what git measured for that turn (your request, Claude's final message, and the diff), inspect the surrounding code through read-only tools, and send Claude back to fix or rebut evidence-backed concerns. Turns that change nothing are not reviewed.
 
-The idea of a second model from another family comes from Oh My Pi's advisors. Claude Code's hooks cannot stream a turn to an outside model or steer it mid-run, so this plugin reviews the finished turn instead. It does not copy OMP's prompts or vendor its agent framework.
+**No longer developed.** The goal was an advisor like Oh My Pi's, which sees a turn as it streams, reasoning included, and can steer it mid-run. Claude Code's hooks see only visible text, between tool calls and at a turn's end, so that could not be built here and I have stopped building it. Version 2.1.28 works as documented but will get no new features or fixes. It does not copy OMP's prompts or vendor its agent framework.
 
 Shipped documentation, including how the gate works and configuration examples: [plugins/cross-model-advisor/README.md](plugins/cross-model-advisor/README.md). Changelog: [plugins/cross-model-advisor/CHANGELOG.md](plugins/cross-model-advisor/CHANGELOG.md).
 

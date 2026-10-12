@@ -6,6 +6,12 @@ Claude Code resolves an install by that number and caches it, so every change to
 anything under `plugins/cross-model-advisor/` moves it — `tests/version-guard.sh`
 fails the build otherwise.
 
+## 2.1.28
+
+- Development has stopped. The goal was an advisor like Oh My Pi's, which can
+  steer a turn while it streams; Claude Code's hooks cannot, so the READMEs and
+  manifests now say the plugin is no longer developed. No behaviour change.
+
 ## 2.1.27
 
 - Security: watch mode's step reviews no longer see the description Claude
